@@ -1,0 +1,41 @@
+# PlatformIO
+.pio/
+.vscode/
+.idea/
+
+# Build artifacts
+*.o
+*.a
+*.elf
+*.bin
+*.map
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+*.code-workspace
+
+# Credentials and secrets
+secrets.h
+credentials.h
+config_local.h
+wifi_credentials.h
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Auto-generated files
+include/SCD41/Version.h

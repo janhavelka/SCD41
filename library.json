@@ -1,0 +1,55 @@
+{
+  "name": "SCD41",
+  "version": "0.1.0",
+  "description": "Production-grade SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor driver.",
+  "keywords": [
+    "scd41",
+    "scd4x",
+    "scd40",
+    "sensirion",
+    "co2",
+    "carbon-dioxide",
+    "temperature",
+    "humidity",
+    "photoacoustic",
+    "ndir",
+    "i2c",
+    "esp32",
+    "esp32-s2",
+    "esp32-s3",
+    "arduino",
+    "platformio"
+  ],
+  "authors": [
+    {
+      "name": "Thymos Solution s.r.o",
+      "email": "info@thymos.cz",
+      "url": "https://www.thymos.cz"
+    },
+    {
+      "name": "Jan Havelka",
+      "email": "info@thymos.cz",
+      "url": "https://www.thymos.cz",
+      "maintainer": true
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/janhavelka/SCD41.git"
+  },
+  "license": "MIT",
+  "homepage": "https://www.thymos.cz",
+  "frameworks": [
+    "arduino"
+  ],
+  "platforms": [
+    "espressif32"
+  ],
+  "headers": [
+    "SCD41/SCD41.h"
+  ],
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src"
+  }
+}
