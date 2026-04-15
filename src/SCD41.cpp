@@ -109,8 +109,13 @@ Status SCD41::begin(const Config& config) {
   }
   _singleShotMode = _config.singleShotMode;
 
+  Status st = _waitMs(_config.powerUpDelayMs);
+  if (!st.ok()) {
+    return st;
+  }
+
   uint64_t serial = 0;
-  Status st = readSerialNumber(serial);
+  st = readSerialNumber(serial);
   if (!st.ok()) {
     if (_isI2cFailure(st.code)) {
       return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
@@ -160,13 +165,13 @@ void SCD41::end() {
 }
 
 Status SCD41::probe() {
-  if (!_initialized) {
+  if (_config.i2cWrite == nullptr || _config.i2cWriteRead == nullptr) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_pendingCommand != PendingCommand::NONE) {
+  if (_initialized && _pendingCommand != PendingCommand::NONE) {
     return Status::Error(Err::BUSY, "Command in progress");
   }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
+  if (_initialized && _operatingMode == OperatingMode::POWER_DOWN) {
     return Status::Error(Err::BUSY, "Sensor is powered down");
   }
 
@@ -535,7 +540,8 @@ Status SCD41::readSerialNumber(uint64_t& serial) {
 }
 
 Status SCD41::readSensorVariant(SensorVariant& out) {
-  if (!_initialized) {
+  if (!_initialized && !_serialNumberValid &&
+      (_config.i2cWrite == nullptr || _config.i2cWriteRead == nullptr)) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
   if (!_serialNumberValid) {
@@ -959,6 +965,66 @@ Status SCD41::getSettings(SettingsSnapshot& out) const {
   out.sensorVariant = _sensorVariant;
   out.serialNumberValid = _serialNumberValid;
   out.serialNumber = _serialNumber;
+  out.liveConfigValid = false;
+  out.temperatureOffsetC_x1000 = 0;
+  out.sensorAltitudeM = 0;
+  out.ambientPressurePa = 0;
+  out.automaticSelfCalibrationEnabled = false;
+  out.automaticSelfCalibrationTargetPpm = 0;
+  out.automaticSelfCalibrationInitialPeriodHours = 0;
+  out.automaticSelfCalibrationStandardPeriodHours = 0;
+  return Status::Ok();
+}
+
+Status SCD41::readSettings(SettingsSnapshot& out) {
+  Status st = getSettings(out);
+  if (!st.ok()) {
+    return st;
+  }
+
+  if (_pendingCommand != PendingCommand::NONE || _measurementRequested ||
+      _operatingMode == OperatingMode::POWER_DOWN || isPeriodicActive()) {
+    return Status::Ok();
+  }
+
+  st = getTemperatureOffsetC_x1000(out.temperatureOffsetC_x1000);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = getSensorAltitudeM(out.sensorAltitudeM);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = getAmbientPressurePa(out.ambientPressurePa);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = getAutomaticSelfCalibrationEnabled(out.automaticSelfCalibrationEnabled);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = getAutomaticSelfCalibrationTargetPpm(out.automaticSelfCalibrationTargetPpm);
+  if (!st.ok() && !st.is(Err::UNSUPPORTED)) {
+    return st;
+  }
+
+  st = getAutomaticSelfCalibrationInitialPeriodHours(
+      out.automaticSelfCalibrationInitialPeriodHours);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = getAutomaticSelfCalibrationStandardPeriodHours(
+      out.automaticSelfCalibrationStandardPeriodHours);
+  if (!st.ok()) {
+    return st;
+  }
+
+  out.liveConfigValid = true;
   return Status::Ok();
 }
 
@@ -1212,6 +1278,10 @@ Status SCD41::_readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData
 }
 
 Status SCD41::_updateHealth(const Status& st) {
+  if (!_initialized) {
+    return st;
+  }
+
   const uint32_t now = _nowMs();
 
   if (st.ok()) {
@@ -1221,9 +1291,7 @@ Status SCD41::_updateHealth(const Status& st) {
     }
     _consecutiveFailures = 0;
     _lastError = Status::Ok();
-    if (_initialized) {
-      _driverState = DriverState::READY;
-    }
+    _driverState = DriverState::READY;
     return st;
   }
 
@@ -1236,11 +1304,9 @@ Status SCD41::_updateHealth(const Status& st) {
     if (_consecutiveFailures != std::numeric_limits<uint8_t>::max()) {
       ++_consecutiveFailures;
     }
-    if (_initialized) {
-      _driverState = (_consecutiveFailures >= _config.offlineThreshold)
-                         ? DriverState::OFFLINE
-                         : DriverState::DEGRADED;
-    }
+    _driverState = (_consecutiveFailures >= _config.offlineThreshold)
+                       ? DriverState::OFFLINE
+                       : DriverState::DEGRADED;
   }
 
   return st;

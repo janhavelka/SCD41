@@ -1,6 +1,6 @@
 # SCD41 Driver Library
 
-Production-grade package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3 using Arduino and PlatformIO.
+Production-grade PlatformIO/Arduino package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3.
 
 ## Overview
 
@@ -9,7 +9,7 @@ This repository follows the same managed I2C library pattern used across the wor
 - injected I2C transport, no direct `Wire` dependency in library code
 - explicit `Status` return values on every fallible operation
 - 4-state health tracking: `UNINIT`, `READY`, `DEGRADED`, `OFFLINE`
-- deterministic behavior with bounded timing only
+- deterministic timing with bounded waits only
 - CRC-8 validation on every returned 16-bit data word
 - no steady-state heap allocation and no logging inside the library
 
@@ -17,7 +17,7 @@ The device source of truth for this repository is [docs/SCD41_datasheet.md](docs
 
 ## Managed Feature Coverage
 
-The intended SCD41 library surface covers the practical runtime features of the device:
+The library covers the practical documented SCD41 runtime surface:
 
 - fixed I2C address `0x62`
 - serial-number probe and SCD41 variant verification
@@ -28,23 +28,12 @@ The intended SCD41 library surface covers the practical runtime features of the 
 - data-ready polling and CRC-checked measurement reads
 - temperature offset, sensor altitude, and ambient pressure compensation
 - automatic self-calibration enable, target, and period controls
-- forced recalibration, reinit, self-test, factory reset, power-down, and wake-up
-- explicit persistence flow via `persist_settings`
-
-## API Shape
-
-The implemented driver follows these main entry points:
-
-- lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
-- measurement flow: `requestMeasurement()`, `measurementReady()`, `getMeasurement()`
-- mode control: `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
-- configuration: `setTemperatureOffsetC()`, `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
-- long operations: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `startForcedRecalibration()`
-- results for long operations: `getSelfTestResult()`, `getForcedRecalibrationCorrectionPpm()`
+- forced recalibration, persist settings, reinit, self-test, factory reset, power-down, and wake-up
+- live settings readback via `readSettings()`
 
 ## Important Device Rules
 
-- The sensor must be given up to 30 ms after power-up before the first command.
+- The sensor must be given up to 30 ms after power-up before the first command. `begin()` honors `Config::powerUpDelayMs` before probing the serial number.
 - All commands are 16-bit, MSB-first. Every returned 16-bit word is followed by a CRC byte.
 - During command execution, read attempts may NACK. This is normal busy behavior.
 - `wake_up` is special: the device NACKs the command by design, then wakes within 30 ms.
@@ -52,6 +41,18 @@ The implemented driver follows these main entry points:
 - `stop_periodic_measurement` requires a 500 ms settle window before idle-only commands.
 - `persist_settings` writes EEPROM. Sensirion rates this storage for at least 2000 write cycles, so persistence must remain explicit and infrequent.
 - The sensor can draw 175-205 mA peak current during the photoacoustic pulse. Budget the supply accordingly and place at least 10 uF bulk capacitance near the device.
+
+## API Shape
+
+The public driver follows the same family conventions as the mature workspace libraries:
+
+- lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
+- measurement flow: `requestMeasurement()`, `measurementReady()`, `getMeasurement()`, `getRawSample()`, `getCompensatedSample()`
+- mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
+- identification: `readSerialNumber()`, `readSensorVariant()`
+- compensation/config: `setTemperatureOffsetC()`, `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
+- maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `startForcedRecalibration()`
+- snapshots: `getSettings()` for local driver state and `readSettings()` for local state plus live device configuration
 
 ## Measurement Timing Summary
 
@@ -67,7 +68,7 @@ The implemented driver follows these main entry points:
 | `measure_single_shot` | 5000 ms |
 | `perform_self_test` | 10000 ms |
 
-The repository guidelines require long operations to be modeled as bounded start/poll/read flows rather than 400 ms to 10 s busy-waits in a public API call.
+Long operations are modeled as bounded start/poll/read flows driven by `tick()` rather than blocking the public call for hundreds of milliseconds or seconds.
 
 ## Conversion Rules
 
@@ -77,7 +78,7 @@ The repository guidelines require long operations to be modeled as bounded start
 - temperature: `-45 + 175 * raw / 65535`
 - humidity: `100 * raw / 65535`
 
-Recommended fixed-point helpers:
+The library also exposes fixed-point helpers:
 
 ```text
 temperature_mdegC = ((21875 * raw) >> 13) - 45000
@@ -129,17 +130,17 @@ static SCD41::Status i2cWriteRead(uint8_t addr, const uint8_t* txData, size_t tx
                                   uint8_t* rxData, size_t rxLen, uint32_t timeoutMs,
                                   void* user) {
   (void)timeoutMs;
-  (void)txData;
-  if (txLen != 0) {
-    return SCD41::Status::Error(SCD41::Err::INVALID_PARAM, "Combined write+read not supported");
-  }
   TwoWire* wire = static_cast<TwoWire*>(user);
   if (wire == nullptr) {
     return SCD41::Status::Error(SCD41::Err::INVALID_CONFIG, "Wire instance is null");
   }
+  if (txLen != 0) {
+    return SCD41::Status::Error(SCD41::Err::INVALID_PARAM, "Combined write+read not supported");
+  }
   const size_t received = wire->requestFrom(addr, rxLen);
   if (received != rxLen) {
-    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C read failed", static_cast<int32_t>(received));
+    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C read failed",
+                                static_cast<int32_t>(received));
   }
   for (size_t i = 0; i < rxLen; ++i) {
     rxData[i] = static_cast<uint8_t>(wire->read());
@@ -167,28 +168,53 @@ void loop() {
   sensor.tick(millis());
 
   static bool pending = false;
-  if (!pending) {
-    if (sensor.requestMeasurement().inProgress()) {
-      pending = true;
-    }
+  if (!pending && sensor.requestMeasurement().inProgress()) {
+    pending = true;
   }
 
   if (pending && sensor.measurementReady()) {
-    SCD41::Measurement m;
-    if (sensor.getMeasurement(m).ok()) {
-      Serial.printf("CO2=%u ppm T=%.2f C RH=%.2f %%\n", m.co2Ppm, m.temperatureC, m.humidityPct);
+    SCD41::Measurement sample;
+    if (sensor.getMeasurement(sample).ok()) {
+      Serial.printf("CO2=%u ppm T=%.2f C RH=%.2f %%\n",
+                    sample.co2Ppm,
+                    sample.temperatureC,
+                    sample.humidityPct);
     }
     pending = false;
   }
 }
 ```
 
-For single-shot mode the driver schedules a 50 ms or 5000 ms deadline and completes the read in `tick()`.
-For periodic mode the driver schedules the next fetch window and reads when the sensor reports data ready.
+## Example CLI
+
+[examples/01_basic_bringup_cli](examples/01_basic_bringup_cli) provides a family-style serial REPL for bring-up and diagnostics.
+
+Main command groups:
+
+- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `drv`, `drv1`, `cfg`, `settings`, `verbose`
+- Measurement: `read`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `convert`
+- Mode and power: `mode`, `periodic`, `sleep`, `wake`
+- Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
+- Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `frc`
+
+Typical bring-up flow:
+
+```text
+scan
+drv
+settings
+periodic on
+watch 1
+watch 0
+selftest
+frc 400
+persist
+```
 
 ## Build And Validation
 
 ```bash
+python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 pio test -e native
@@ -203,7 +229,7 @@ pio run -e esp32s2dev
 - Version metadata is generated into `include/SCD41/Version.h` from [library.json](library.json)
 - `examples/common` is example-only glue and is not installed as part of the library
 - The library never configures I2C pins or owns the bus
-- [ASSUMPTIONS.md](ASSUMPTIONS.md) records the SCD41-specific assumptions that remain application policy decisions
+- [ASSUMPTIONS.md](ASSUMPTIONS.md) records the remaining SCD41-specific policy assumptions
 
 ## Documentation
 

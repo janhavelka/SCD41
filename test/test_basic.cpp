@@ -1,5 +1,5 @@
 /// @file test_basic.cpp
-/// @brief Basic unit tests for SCD41 driver
+/// @brief Unit tests for the SCD41 driver and example transport
 
 #include <unity.h>
 
@@ -17,23 +17,161 @@ uint32_t gMicrosStep = 0;
 #include "SCD41/SCD41.h"
 #undef private
 
+#include "examples/common/I2cTransport.h"
+
 using namespace SCD41;
 using SCD41Device = SCD41::SCD41;
 
-void setUp() {}
+namespace {
+
+struct ScriptedTransport {
+  Status writeStatus[32] = {};
+  size_t writeCount = 0;
+  size_t writeIndex = 0;
+
+  Status readStatus[32] = {};
+  uint8_t readData[32][9] = {};
+  size_t readLen[32] = {};
+  size_t readCount = 0;
+  size_t readIndex = 0;
+
+  uint8_t lastWrite[16] = {};
+  size_t lastWriteLen = 0;
+
+  uint32_t nowMs = 0;
+  uint32_t nowUs = 0;
+  uint32_t yieldCount = 0;
+};
+
+uint8_t packWord(uint16_t word, uint8_t* out) {
+  out[0] = static_cast<uint8_t>((word >> 8) & 0xFF);
+  out[1] = static_cast<uint8_t>(word & 0xFF);
+  out[2] = SCD41Device::_crc8(out, 2);
+  return out[2];
+}
+
+void queueReadWord(ScriptedTransport& bus, uint16_t word) {
+  TEST_ASSERT_TRUE(bus.readCount < 32);
+  bus.readStatus[bus.readCount] = Status::Ok();
+  bus.readLen[bus.readCount] = 3;
+  packWord(word, bus.readData[bus.readCount]);
+  ++bus.readCount;
+}
+
+void queueReadMeasurement(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
+                          uint16_t humidity) {
+  TEST_ASSERT_TRUE(bus.readCount < 32);
+  bus.readStatus[bus.readCount] = Status::Ok();
+  bus.readLen[bus.readCount] = 9;
+  packWord(co2, &bus.readData[bus.readCount][0]);
+  packWord(temp, &bus.readData[bus.readCount][3]);
+  packWord(humidity, &bus.readData[bus.readCount][6]);
+  ++bus.readCount;
+}
+
+void queueReadSerial(ScriptedTransport& bus, uint16_t word0, uint16_t word1, uint16_t word2) {
+  queueReadMeasurement(bus, word0, word1, word2);
+}
+
+Status scriptedWrite(uint8_t addr, const uint8_t* data, size_t len, uint32_t timeoutMs,
+                     void* user) {
+  (void)timeoutMs;
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
+  ctx->lastWriteLen = len;
+  memset(ctx->lastWrite, 0, sizeof(ctx->lastWrite));
+  memcpy(ctx->lastWrite, data, len);
+  if (ctx->writeIndex < ctx->writeCount) {
+    return ctx->writeStatus[ctx->writeIndex++];
+  }
+  return Status::Ok();
+}
+
+Status scriptedWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
+                         uint8_t* rxData, size_t rxLen, uint32_t timeoutMs, void* user) {
+  (void)txData;
+  (void)timeoutMs;
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
+  TEST_ASSERT_EQUAL_UINT32(0u, txLen);
+  if (ctx->readIndex < ctx->readCount) {
+    const Status st = ctx->readStatus[ctx->readIndex];
+    if (st.ok()) {
+      TEST_ASSERT_EQUAL_UINT32(ctx->readLen[ctx->readIndex], rxLen);
+      memcpy(rxData, ctx->readData[ctx->readIndex], rxLen);
+    }
+    ++ctx->readIndex;
+    return st;
+  }
+  return Status::Ok();
+}
+
+uint32_t scriptedNowMs(void* user) {
+  return static_cast<ScriptedTransport*>(user)->nowMs;
+}
+
+uint32_t scriptedNowUs(void* user) {
+  return static_cast<ScriptedTransport*>(user)->nowUs;
+}
+
+void scriptedYield(void* user) {
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  ++ctx->yieldCount;
+  ++ctx->nowMs;
+  ctx->nowUs += 1000;
+}
+
+Config makeConfig(ScriptedTransport& bus) {
+  Config cfg;
+  cfg.i2cWrite = scriptedWrite;
+  cfg.i2cWriteRead = scriptedWriteRead;
+  cfg.i2cUser = &bus;
+  cfg.nowMs = scriptedNowMs;
+  cfg.nowUs = scriptedNowUs;
+  cfg.cooperativeYield = scriptedYield;
+  cfg.timeUser = &bus;
+  cfg.offlineThreshold = 3;
+  cfg.powerUpDelayMs = 0;
+  return cfg;
+}
+
+void queueBeginSuccess(ScriptedTransport& bus) {
+  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
+}
+
+uint16_t lastWriteCommand(const ScriptedTransport& bus) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[0]) << 8) | bus.lastWrite[1]);
+}
+
+uint16_t lastWriteWord(const ScriptedTransport& bus) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[2]) << 8) | bus.lastWrite[3]);
+}
+
+}  // namespace
+
+void setUp() {
+  gMillis = 0;
+  gMicros = 0;
+  gMillisStep = 0;
+  gMicrosStep = 0;
+  Wire._clearRequestFromOverride();
+  Wire._clearReadCallCount();
+  Wire._clearClockSetCount();
+}
+
 void tearDown() {}
 
 void test_status_helpers() {
-  Status ok = Status::Ok();
+  const Status ok = Status::Ok();
   TEST_ASSERT_TRUE(ok.ok());
   TEST_ASSERT_TRUE(ok.is(Err::OK));
   TEST_ASSERT_TRUE(ok);
 
-  Status pending{Err::IN_PROGRESS, 0, "pending"};
+  const Status pending{Err::IN_PROGRESS, 0, "pending"};
   TEST_ASSERT_FALSE(pending.ok());
   TEST_ASSERT_TRUE(pending.inProgress());
 
-  Status err = Status::Error(Err::CRC_MISMATCH, "crc");
+  const Status err = Status::Error(Err::CRC_MISMATCH, "crc");
   TEST_ASSERT_FALSE(err.ok());
   TEST_ASSERT_TRUE(err.is(Err::CRC_MISMATCH));
 }
@@ -67,118 +205,19 @@ void test_crc_and_conversion_helpers() {
   TEST_ASSERT_EQUAL_INT(4000, SCD41Device::decodeTemperatureOffsetC_x1000(rawOffset));
 }
 
-struct ScriptedTransport {
-  Status writeStatus[16] = {};
-  size_t writeCount = 0;
-  size_t writeIndex = 0;
+void test_begin_waits_power_up_delay_and_does_not_track_startup_io() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.powerUpDelayMs = 3;
+  queueBeginSuccess(bus);
 
-  Status readStatus[16] = {};
-  uint8_t readData[16][9] = {};
-  size_t readLen[16] = {};
-  size_t readCount = 0;
-  size_t readIndex = 0;
-
-  uint8_t lastWrite[16] = {};
-  size_t lastWriteLen = 0;
-
-  uint32_t nowMs = 0;
-  uint32_t nowUs = 0;
-  uint32_t yieldCount = 0;
-};
-
-static uint8_t packWord(uint16_t word, uint8_t* out) {
-  out[0] = static_cast<uint8_t>((word >> 8) & 0xFF);
-  out[1] = static_cast<uint8_t>(word & 0xFF);
-  out[2] = SCD41Device::_crc8(out, 2);
-  return out[2];
-}
-
-static void queueReadWord(ScriptedTransport& bus, uint16_t word) {
-  TEST_ASSERT_TRUE(bus.readCount < 16);
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = 3;
-  packWord(word, bus.readData[bus.readCount]);
-  bus.readCount++;
-}
-
-static void queueReadMeasurement(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
-                                 uint16_t humidity) {
-  TEST_ASSERT_TRUE(bus.readCount < 16);
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = 9;
-  packWord(co2, &bus.readData[bus.readCount][0]);
-  packWord(temp, &bus.readData[bus.readCount][3]);
-  packWord(humidity, &bus.readData[bus.readCount][6]);
-  bus.readCount++;
-}
-
-static void queueReadSerial(ScriptedTransport& bus, uint16_t word0, uint16_t word1, uint16_t word2) {
-  queueReadMeasurement(bus, word0, word1, word2);
-}
-
-static Status scriptedWrite(uint8_t addr, const uint8_t* data, size_t len, uint32_t timeoutMs,
-                            void* user) {
-  (void)timeoutMs;
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
-  ctx->lastWriteLen = len;
-  memset(ctx->lastWrite, 0, sizeof(ctx->lastWrite));
-  memcpy(ctx->lastWrite, data, len);
-  if (ctx->writeIndex < ctx->writeCount) {
-    return ctx->writeStatus[ctx->writeIndex++];
-  }
-  return Status::Ok();
-}
-
-static Status scriptedWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
-                                uint8_t* rxData, size_t rxLen, uint32_t timeoutMs, void* user) {
-  (void)txData;
-  (void)timeoutMs;
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
-  TEST_ASSERT_EQUAL_UINT32(0u, txLen);
-  if (ctx->readIndex < ctx->readCount) {
-    const Status st = ctx->readStatus[ctx->readIndex];
-    if (st.ok()) {
-      TEST_ASSERT_EQUAL_UINT32(ctx->readLen[ctx->readIndex], rxLen);
-      memcpy(rxData, ctx->readData[ctx->readIndex], rxLen);
-    }
-    ctx->readIndex++;
-    return st;
-  }
-  return Status::Ok();
-}
-
-static uint32_t scriptedNowMs(void* user) {
-  return static_cast<ScriptedTransport*>(user)->nowMs;
-}
-
-static uint32_t scriptedNowUs(void* user) {
-  return static_cast<ScriptedTransport*>(user)->nowUs;
-}
-
-static void scriptedYield(void* user) {
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  ctx->yieldCount++;
-  ctx->nowMs++;
-  ctx->nowUs += 1000;
-}
-
-static Config makeConfig(ScriptedTransport& bus) {
-  Config cfg;
-  cfg.i2cWrite = scriptedWrite;
-  cfg.i2cWriteRead = scriptedWriteRead;
-  cfg.i2cUser = &bus;
-  cfg.nowMs = scriptedNowMs;
-  cfg.nowUs = scriptedNowUs;
-  cfg.cooperativeYield = scriptedYield;
-  cfg.timeUser = &bus;
-  cfg.offlineThreshold = 3;
-  return cfg;
-}
-
-static void queueBeginSuccess(ScriptedTransport& bus) {
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(bus.yieldCount >= 3u);
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
 }
 
 void test_begin_reads_serial_and_variant() {
@@ -187,7 +226,7 @@ void test_begin_reads_serial_and_variant() {
   queueBeginSuccess(bus);
 
   SCD41Device device;
-  Status st = device.begin(cfg);
+  const Status st = device.begin(cfg);
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
                     static_cast<uint8_t>(device.state()));
@@ -202,8 +241,21 @@ void test_begin_rejects_non_scd41_variant() {
   queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
 
   SCD41Device device;
-  Status st = device.begin(cfg);
+  const Status st = device.begin(cfg);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.isInitialized());
+}
+
+void test_probe_works_after_variant_mismatch_begin() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
+  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
+
+  SCD41Device device;
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                    static_cast<uint8_t>(device.begin(cfg).code));
+  TEST_ASSERT_TRUE(device.probe().ok());
 }
 
 void test_single_shot_measurement_flow() {
@@ -218,7 +270,7 @@ void test_single_shot_measurement_flow() {
 
   bus.nowMs = 100;
   bus.nowUs = 100000;
-  Status st = device.requestMeasurement();
+  const Status st = device.requestMeasurement();
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
                     static_cast<uint8_t>(device.pendingCommand()));
@@ -280,7 +332,7 @@ void test_periodic_start_request_and_stop() {
   device.tick(bus.nowMs);
   TEST_ASSERT_TRUE(device.measurementReady());
 
-  Status st = device.stopPeriodicMeasurement();
+  const Status st = device.stopPeriodicMeasurement();
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::STOP_PERIODIC),
                     static_cast<uint8_t>(device.pendingCommand()));
@@ -290,6 +342,104 @@ void test_periodic_start_request_and_stop() {
   device.tick(bus.nowMs);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
                     static_cast<uint8_t>(device.operatingMode()));
+}
+
+void test_periodic_mode_allows_ambient_pressure_override() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 1013);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
+
+  TEST_ASSERT_TRUE(device.setAmbientPressurePa(101300).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_AMBIENT_PRESSURE, lastWriteCommand(bus));
+  TEST_ASSERT_EQUAL_UINT16(1013u, lastWriteWord(bus));
+  TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
+
+  uint32_t pressurePa = 0;
+  TEST_ASSERT_TRUE(device.getAmbientPressurePa(pressurePa).ok());
+  TEST_ASSERT_EQUAL_UINT32(101300u, pressurePa);
+}
+
+void test_temperature_offset_roundtrip() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(4000).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_TEMPERATURE_OFFSET, lastWriteCommand(bus));
+
+  int32_t offsetC_x1000 = 0;
+  TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
+  TEST_ASSERT_EQUAL_INT(4000, offsetC_x1000);
+}
+
+void test_read_settings_reads_live_device_configuration() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4250));
+  queueReadWord(bus, 321);
+  queueReadWord(bus, 1013);
+  queueReadWord(bus, 1);
+  queueReadWord(bus, 400);
+  queueReadWord(bus, 44);
+  queueReadWord(bus, 156);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.liveConfigValid);
+  TEST_ASSERT_EQUAL_INT(
+      SCD41Device::decodeTemperatureOffsetC_x1000(
+          SCD41Device::encodeTemperatureOffsetC_x1000(4250)),
+      snap.temperatureOffsetC_x1000);
+  TEST_ASSERT_EQUAL_UINT16(321u, snap.sensorAltitudeM);
+  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
+  TEST_ASSERT_TRUE(snap.automaticSelfCalibrationEnabled);
+  TEST_ASSERT_EQUAL_UINT16(400u, snap.automaticSelfCalibrationTargetPpm);
+  TEST_ASSERT_EQUAL_UINT16(44u, snap.automaticSelfCalibrationInitialPeriodHours);
+  TEST_ASSERT_EQUAL_UINT16(156u, snap.automaticSelfCalibrationStandardPeriodHours);
+}
+
+void test_read_settings_skips_live_reads_while_periodic_active() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
+
+  SettingsSnapshot snap;
+  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
+  TEST_ASSERT_FALSE(snap.liveConfigValid);
+}
+
+void test_asc_period_validation() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(
+                        device.setAutomaticSelfCalibrationInitialPeriodHours(2).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(
+                        device.setAutomaticSelfCalibrationStandardPeriodHours(0).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(
+                        device.setAutomaticSelfCalibrationStandardPeriodHours(6).code));
 }
 
 void test_wake_up_accepts_expected_nack() {
@@ -302,9 +452,8 @@ void test_wake_up_accepts_expected_nack() {
   device._operatingMode = OperatingMode::POWER_DOWN;
   bus.writeStatus[0] = Status::Error(Err::I2C_NACK_ADDR, "expected wake nack");
   bus.writeCount = 1;
-  bus.writeIndex = 0;
 
-  Status st = device.wakeUp();
+  const Status st = device.wakeUp();
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::WAKE_UP),
                     static_cast<uint8_t>(device.pendingCommand()));
@@ -314,6 +463,25 @@ void test_wake_up_accepts_expected_nack() {
   device.tick(bus.nowMs);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
                     static_cast<uint8_t>(device.operatingMode()));
+}
+
+void test_self_test_completion_reads_pass_code() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, cmd::SELF_TEST_PASS);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.startSelfTest().inProgress());
+
+  bus.nowMs = 11000;
+  bus.nowUs = 11000000;
+  device.tick(bus.nowMs);
+
+  uint16_t raw = 0xFFFF;
+  TEST_ASSERT_TRUE(device.getSelfTestResult(raw).ok());
+  TEST_ASSERT_EQUAL_UINT16(cmd::SELF_TEST_PASS, raw);
 }
 
 void test_forced_recalibration_reads_signed_correction() {
@@ -327,10 +495,9 @@ void test_forced_recalibration_reads_signed_correction() {
 
   bus.nowMs = 100;
   bus.nowUs = 100000;
-  Status st = device.startForcedRecalibration(400);
+  const Status st = device.startForcedRecalibration(400);
   TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FORCED_RECALIBRATION,
-                          static_cast<uint16_t>((bus.lastWrite[0] << 8) | bus.lastWrite[1]));
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FORCED_RECALIBRATION, lastWriteCommand(bus));
   TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
 
   bus.nowMs = 600;
@@ -345,8 +512,21 @@ void test_forced_recalibration_reads_signed_correction() {
 void test_data_ready_read_requires_init() {
   SCD41Device device;
   bool ready = false;
-  Status st = device.readDataReadyStatus(ready);
+  const Status st = device.readDataReadyStatus(ready);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::NOT_INITIALIZED), static_cast<uint8_t>(st.code));
+}
+
+void test_example_transport_maps_zero_byte_read_to_i2c_error() {
+  uint8_t rx[3] = {};
+  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
+  TEST_ASSERT_EQUAL_UINT32(400000u, Wire.getClock());
+  TEST_ASSERT_EQUAL_UINT32(50u, Wire.getTimeOut());
+
+  Wire._setRequestFromResult(0);
+  const Status st = transport::wireWriteRead(cmd::I2C_ADDRESS, nullptr, 0, rx, sizeof(rx), 50,
+                                             &Wire);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0u, Wire._readCallCount());
 }
 
 int main(int, char**) {
@@ -354,13 +534,22 @@ int main(int, char**) {
   RUN_TEST(test_status_helpers);
   RUN_TEST(test_config_defaults);
   RUN_TEST(test_crc_and_conversion_helpers);
+  RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
   RUN_TEST(test_begin_reads_serial_and_variant);
   RUN_TEST(test_begin_rejects_non_scd41_variant);
+  RUN_TEST(test_probe_works_after_variant_mismatch_begin);
   RUN_TEST(test_single_shot_measurement_flow);
   RUN_TEST(test_single_shot_rht_only_marks_co2_invalid);
   RUN_TEST(test_periodic_start_request_and_stop);
+  RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
+  RUN_TEST(test_temperature_offset_roundtrip);
+  RUN_TEST(test_read_settings_reads_live_device_configuration);
+  RUN_TEST(test_read_settings_skips_live_reads_while_periodic_active);
+  RUN_TEST(test_asc_period_validation);
   RUN_TEST(test_wake_up_accepts_expected_nack);
+  RUN_TEST(test_self_test_completion_reads_pass_code);
   RUN_TEST(test_forced_recalibration_reads_signed_correction);
   RUN_TEST(test_data_ready_read_requires_init);
+  RUN_TEST(test_example_transport_maps_zero_byte_read_to_i2c_error);
   return UNITY_END();
 }

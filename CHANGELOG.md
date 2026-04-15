@@ -8,7 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- Reserved for future changes.
+- `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
+- Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
+- Tightened the example Wire transport so short reads map to generic `I2C_ERROR` unless a transport can explicitly distinguish read-header NACK behavior.
+
+### Added
+- `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
+- Native coverage for power-up delay handling, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
+
+### Removed
+- Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.
 
 ## [0.1.0] - 2026-04-14
 

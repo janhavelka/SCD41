@@ -65,7 +65,7 @@ inline Status wireWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
     return Status::Error(Err::INVALID_CONFIG, "Wire instance is null");
   }
 
-  if (txLen > 0U || txData != nullptr) {
+  if (txLen > 0U) {
     return Status::Error(Err::INVALID_PARAM, "Combined write+read not supported");
   }
 
@@ -75,7 +75,7 @@ inline Status wireWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
 
   const size_t received = wire->requestFrom(addr, rxLen);
   if (received == 0U) {
-    return Status::Error(Err::I2C_NACK_READ, "I2C read header NACK", 0);
+    return Status::Error(Err::I2C_ERROR, "I2C read returned 0 bytes", 0);
   }
   if (received != rxLen) {
     for (size_t i = 0; i < received; ++i) {

@@ -103,6 +103,14 @@ struct SettingsSnapshot {
   SensorVariant sensorVariant = SensorVariant::UNKNOWN;
   bool serialNumberValid = false;
   uint64_t serialNumber = 0;
+  bool liveConfigValid = false;
+  int32_t temperatureOffsetC_x1000 = 0;
+  uint16_t sensorAltitudeM = 0;
+  uint32_t ambientPressurePa = 0;
+  bool automaticSelfCalibrationEnabled = false;
+  uint16_t automaticSelfCalibrationTargetPpm = 0;
+  uint16_t automaticSelfCalibrationInitialPeriodHours = 0;
+  uint16_t automaticSelfCalibrationStandardPeriodHours = 0;
 };
 
 /// SCD41 driver class
@@ -232,6 +240,7 @@ public:
   // =========================================================================
 
   Status getSettings(SettingsSnapshot& out) const;
+  Status readSettings(SettingsSnapshot& out);
 
   // =========================================================================
   // Helpers
