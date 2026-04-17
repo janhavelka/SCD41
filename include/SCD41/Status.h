@@ -6,7 +6,7 @@
 
 namespace SCD41 {
 
-/// Error codes for all SCD41 operations
+/// Error codes returned by public SCD41 operations.
 enum class Err : uint8_t {
   OK = 0,                 ///< Operation successful
   NOT_INITIALIZED,        ///< begin() not called
@@ -29,13 +29,16 @@ enum class Err : uint8_t {
   I2C_BUS                 ///< I2C bus error (SDA stuck, arbitration, etc.)
 };
 
-/// Status structure returned by all fallible operations
+/// Status structure returned by all fallible operations.
+/// @note `msg` must point to a static string. The driver does not allocate message storage.
 struct Status {
-  Err code = Err::OK;
+  Err code = Err::OK;      ///< Result code
   int32_t detail = 0;   ///< Implementation-specific detail (e.g. raw transport error)
   const char* msg = ""; ///< Static string describing the error
 
+  /// Construct an OK status by default.
   constexpr Status() = default;
+  /// Construct a status with explicit code, detail, and message.
   constexpr Status(Err c, int32_t d, const char* m) : code(c), detail(d), msg(m) {}
 
   /// @return true if operation succeeded
@@ -50,10 +53,10 @@ struct Status {
   /// @return true if operation succeeded
   explicit constexpr operator bool() const { return ok(); }
 
-  /// Create a success status
+  /// Create a success status.
   static constexpr Status Ok() { return Status{Err::OK, 0, "OK"}; }
 
-  /// Create an error status
+  /// Create an error status.
   static constexpr Status Error(Err err, const char* message, int32_t detailCode = 0) {
     return Status{err, detailCode, message};
   }

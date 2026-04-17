@@ -66,8 +66,11 @@ Status SCD41::begin(const Config& config) {
   _serialNumber = 0;
   _serialNumberValid = false;
   _selfTestRaw = 0;
+  _selfTestRawValid = false;
   _selfTestStatus = Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test not started");
   _selfTestCompleted = false;
+  _forcedRecalibrationRaw = 0;
+  _forcedRecalibrationRawValid = false;
   _forcedRecalibrationCorrectionPpm = 0;
   _forcedRecalibrationStatus =
       Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration not started");
@@ -284,28 +287,76 @@ Status SCD41::requestMeasurement() {
     return Status{Err::IN_PROGRESS, 0, "Periodic fetch scheduled"};
   }
 
-  const uint16_t command =
-      (_singleShotMode == SingleShotMode::T_RH_ONLY)
-          ? cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY
-          : cmd::CMD_MEASURE_SINGLE_SHOT;
-  const uint32_t execMs =
-      (_singleShotMode == SingleShotMode::T_RH_ONLY)
-          ? cmd::EXECUTION_TIME_SINGLE_SHOT_RHT_MS
-          : cmd::EXECUTION_TIME_SINGLE_SHOT_MS;
-  const PendingCommand pending =
-      (_singleShotMode == SingleShotMode::T_RH_ONLY)
-          ? PendingCommand::SINGLE_SHOT_RHT_ONLY
-          : PendingCommand::SINGLE_SHOT;
+  return _startSingleShot(_singleShotMode);
+}
 
-  Status st = _writeCommand(command, true);
+Status SCD41::readMeasurement(Measurement& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_operatingMode == OperatingMode::POWER_DOWN) {
+    return Status::Error(Err::BUSY, "Sensor is powered down");
+  }
+  if (_measurementReady) {
+    return getMeasurement(out);
+  }
+  if (_pendingCommand != PendingCommand::NONE && _pendingCommand != PendingCommand::SINGLE_SHOT &&
+      _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY) {
+    return Status::Error(Err::BUSY, "Command in progress");
+  }
+
+  const uint32_t nowMs = _nowMs();
+  if (_pendingCommand == PendingCommand::SINGLE_SHOT ||
+      _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY) {
+    if (!_timeElapsed(nowMs, _commandReadyMs)) {
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    }
+
+    Status st = _completeMeasurement();
+    if (st.ok()) {
+      _clearPendingCommand();
+      return getMeasurement(out);
+    }
+    if (st.code != Err::MEASUREMENT_NOT_READY) {
+      _clearPendingCommand();
+      _clearMeasurementRequest();
+    }
+    return st;
+  }
+
+  if (_measurementRequested) {
+    if (!_timeElapsed(nowMs, _measurementReadyMs)) {
+      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+    }
+
+    Status st = _completeMeasurement();
+    if (!st.ok()) {
+      return st;
+    }
+    return getMeasurement(out);
+  }
+
+  if (!isPeriodicActive()) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "No measurement pending");
+  }
+
+  bool ready = false;
+  Status st = readDataReadyStatus(ready);
+  if (!st.ok()) {
+    return st;
+  }
+  if (!ready) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+
+  RawSample sample = {};
+  st = _readMeasurementRaw(sample, true, true);
   if (!st.ok()) {
     return st;
   }
 
-  _measurementRequested = true;
-  _measurementReady = false;
-  _measurementReadyMs = _nowMs() + execMs;
-  return _schedulePendingCommand(pending, execMs);
+  _storeSample(sample, true);
+  return getMeasurement(out);
 }
 
 Status SCD41::getMeasurement(Measurement& out) {
@@ -400,6 +451,14 @@ Status SCD41::getSingleShotMode(SingleShotMode& out) const {
   return Status::Ok();
 }
 
+Status SCD41::startSingleShotMeasurement() {
+  return _startSingleShot(SingleShotMode::CO2_T_RH);
+}
+
+Status SCD41::startSingleShotRhtOnlyMeasurement() {
+  return _startSingleShot(SingleShotMode::T_RH_ONLY);
+}
+
 Status SCD41::startPeriodicMeasurement() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
@@ -444,6 +503,9 @@ Status SCD41::startLowPowerPeriodicMeasurement() {
   }
   if (_operatingMode == OperatingMode::PERIODIC) {
     return Status::Error(Err::BUSY, "Stop periodic first");
+  }
+  if (_sensorVariant != SensorVariant::SCD41) {
+    return Status::Error(Err::UNSUPPORTED, "Low-power periodic requires SCD41");
   }
 
   Status st = _writeCommand(cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT, true);
@@ -657,7 +719,7 @@ Status SCD41::setAmbientPressurePa(uint32_t pressurePa) {
     return Status::Error(Err::BUSY, "Sensor is busy");
   }
 
-  const uint16_t raw = static_cast<uint16_t>(pressurePa / 100U);
+  const uint16_t raw = encodeAmbientPressurePa(pressurePa);
   Status st = _writeCommandWithData(cmd::CMD_SET_AMBIENT_PRESSURE, raw, true);
   if (!st.ok()) {
     return st;
@@ -678,7 +740,7 @@ Status SCD41::getAmbientPressurePa(uint32_t& out) {
   if (!st.ok()) {
     return st;
   }
-  out = static_cast<uint32_t>(raw) * 100U;
+  out = decodeAmbientPressurePa(raw);
   return Status::Ok();
 }
 
@@ -880,6 +942,8 @@ Status SCD41::startSelfTest() {
   }
 
   _selfTestCompleted = false;
+  _selfTestRaw = 0;
+  _selfTestRawValid = false;
   _selfTestStatus = Status::Error(Err::IN_PROGRESS, "Self-test running");
   return _schedulePendingCommand(PendingCommand::SELF_TEST, cmd::EXECUTION_TIME_SELF_TEST_MS);
 }
@@ -895,6 +959,23 @@ Status SCD41::getSelfTestResult(uint16_t& rawResult) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test result not available");
   }
   if (!_selfTestStatus.ok()) {
+    return _selfTestStatus;
+  }
+  rawResult = _selfTestRaw;
+  return Status::Ok();
+}
+
+Status SCD41::getSelfTestRawResult(uint16_t& rawResult) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_pendingCommand == PendingCommand::SELF_TEST) {
+    return Status::Error(Err::BUSY, "Self-test still running");
+  }
+  if (!_selfTestCompleted) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test result not available");
+  }
+  if (!_selfTestRawValid) {
     return _selfTestStatus;
   }
   rawResult = _selfTestRaw;
@@ -920,6 +1001,8 @@ Status SCD41::startForcedRecalibration(uint16_t referencePpm) {
 
   _forcedRecalibrationCompleted = false;
   _forcedRecalibrationStatus = Status::Error(Err::IN_PROGRESS, "Forced recalibration running");
+  _forcedRecalibrationRaw = 0;
+  _forcedRecalibrationRawValid = false;
   return _schedulePendingCommand(PendingCommand::FORCED_RECALIBRATION,
                                  cmd::EXECUTION_TIME_FRC_MS);
 }
@@ -938,6 +1021,23 @@ Status SCD41::getForcedRecalibrationCorrectionPpm(int16_t& correctionPpm) {
     return _forcedRecalibrationStatus;
   }
   correctionPpm = _forcedRecalibrationCorrectionPpm;
+  return Status::Ok();
+}
+
+Status SCD41::getForcedRecalibrationRawResult(uint16_t& rawResult) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_pendingCommand == PendingCommand::FORCED_RECALIBRATION) {
+    return Status::Error(Err::BUSY, "Forced recalibration still running");
+  }
+  if (!_forcedRecalibrationCompleted) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration result not available");
+  }
+  if (!_forcedRecalibrationRawValid) {
+    return _forcedRecalibrationStatus;
+  }
+  rawResult = _forcedRecalibrationRaw;
   return Status::Ok();
 }
 
@@ -983,8 +1083,12 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   }
 
   if (_pendingCommand != PendingCommand::NONE || _measurementRequested ||
-      _operatingMode == OperatingMode::POWER_DOWN || isPeriodicActive()) {
+      _operatingMode == OperatingMode::POWER_DOWN) {
     return Status::Ok();
+  }
+
+  if (isPeriodicActive()) {
+    return getAmbientPressurePa(out.ambientPressurePa);
   }
 
   st = getTemperatureOffsetC_x1000(out.temperatureOffsetC_x1000);
@@ -1028,6 +1132,75 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   return Status::Ok();
 }
 
+Status SCD41::writeCommand(uint16_t command, bool allowExpectedNack) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  Status st = _validateRawCommand(command);
+  if (!st.ok()) {
+    return st;
+  }
+  return _writeCommand(command, true, allowExpectedNack);
+}
+
+Status SCD41::writeCommandWithData(uint16_t command, uint16_t data) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  Status st = _validateRawCommand(command);
+  if (!st.ok()) {
+    return st;
+  }
+  return _writeCommandWithData(command, data, true);
+}
+
+Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allowNoData) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (out == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
+  }
+  Status st = _validateRawCommand(command);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = _writeCommand(command, true);
+  if (!st.ok()) {
+    return st;
+  }
+
+  st = _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
+  if (!st.ok()) {
+    return st;
+  }
+
+  return _readOnly(out, len, true, allowNoData);
+}
+
+Status SCD41::readWordCommand(uint16_t command, uint16_t& out) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  Status st = _validateRawCommand(command);
+  if (!st.ok()) {
+    return st;
+  }
+  return _readWord(command, out, true);
+}
+
+Status SCD41::readWordsCommand(uint16_t command, uint16_t* out, size_t count) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  Status st = _validateRawCommand(command);
+  if (!st.ok()) {
+    return st;
+  }
+  return _readWords(command, out, count, true);
+}
+
 float SCD41::convertTemperatureC(uint16_t raw) {
   return -45.0f + (175.0f * static_cast<float>(raw) / 65535.0f);
 }
@@ -1065,6 +1238,61 @@ float SCD41::decodeTemperatureOffsetC(uint16_t raw) {
 int32_t SCD41::decodeTemperatureOffsetC_x1000(uint16_t raw) {
   const uint32_t numerator = static_cast<uint32_t>(raw) * 175000U + 32767U;
   return static_cast<int32_t>(numerator / 65535U);
+}
+
+uint16_t SCD41::encodeAmbientPressurePa(uint32_t pressurePa) {
+  return static_cast<uint16_t>(pressurePa / 100U);
+}
+
+uint32_t SCD41::decodeAmbientPressurePa(uint16_t raw) {
+  return static_cast<uint32_t>(raw) * 100U;
+}
+
+Status SCD41::_validateRawCommand(uint16_t command) const {
+  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
+    return Status::Error(Err::BUSY, "Operation in progress");
+  }
+  if (_isManagedOnlyRawCommand(command)) {
+    return Status::Error(Err::UNSUPPORTED, "Use typed API for managed command");
+  }
+  if (_operatingMode == OperatingMode::POWER_DOWN) {
+    return Status::Error(Err::BUSY, "Sensor is powered down");
+  }
+  if (isPeriodicActive() && !_isPeriodicAllowedCommand(command)) {
+    return Status::Error(Err::BUSY, "Command not allowed during periodic measurement");
+  }
+  return Status::Ok();
+}
+
+bool SCD41::_isPeriodicAllowedCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_READ_MEASUREMENT:
+    case cmd::CMD_GET_DATA_READY_STATUS:
+    case cmd::CMD_SET_AMBIENT_PRESSURE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool SCD41::_isManagedOnlyRawCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_START_PERIODIC_MEASUREMENT:
+    case cmd::CMD_STOP_PERIODIC_MEASUREMENT:
+    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
+    case cmd::CMD_MEASURE_SINGLE_SHOT:
+    case cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY:
+    case cmd::CMD_PERFORM_FORCED_RECALIBRATION:
+    case cmd::CMD_PERSIST_SETTINGS:
+    case cmd::CMD_PERFORM_SELF_TEST:
+    case cmd::CMD_PERFORM_FACTORY_RESET:
+    case cmd::CMD_REINIT:
+    case cmd::CMD_POWER_DOWN:
+    case cmd::CMD_WAKE_UP:
+      return true;
+    default:
+      return false;
+  }
 }
 
 Status SCD41::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
@@ -1362,6 +1590,47 @@ Status SCD41::_ensureIdleForConfig(const char* opName) const {
   return Status::Ok();
 }
 
+Status SCD41::_startSingleShot(SingleShotMode mode) {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (!isValidSingleShotMode(mode)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid single-shot mode");
+  }
+  if (_pendingCommand != PendingCommand::NONE) {
+    return Status::Error(Err::BUSY, "Command in progress");
+  }
+  if (_measurementRequested || _measurementReady) {
+    return Status::Error(Err::BUSY, "Measurement already pending");
+  }
+  if (_operatingMode == OperatingMode::POWER_DOWN) {
+    return Status::Error(Err::BUSY, "Sensor is powered down");
+  }
+  if (_sensorVariant != SensorVariant::SCD41) {
+    return Status::Error(Err::UNSUPPORTED, "Single-shot commands require SCD41");
+  }
+
+  const uint16_t command =
+      (mode == SingleShotMode::T_RH_ONLY) ? cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY
+                                          : cmd::CMD_MEASURE_SINGLE_SHOT;
+  const uint32_t execMs =
+      (mode == SingleShotMode::T_RH_ONLY) ? cmd::EXECUTION_TIME_SINGLE_SHOT_RHT_MS
+                                          : cmd::EXECUTION_TIME_SINGLE_SHOT_MS;
+  const PendingCommand pending =
+      (mode == SingleShotMode::T_RH_ONLY) ? PendingCommand::SINGLE_SHOT_RHT_ONLY
+                                          : PendingCommand::SINGLE_SHOT;
+
+  Status st = _writeCommand(command, true);
+  if (!st.ok()) {
+    return st;
+  }
+
+  _measurementRequested = true;
+  _measurementReady = false;
+  _measurementReadyMs = _nowMs() + execMs;
+  return _schedulePendingCommand(pending, execMs);
+}
+
 Status SCD41::_schedulePendingCommand(PendingCommand command, uint32_t delayMs) {
   _pendingCommand = command;
   _commandReadyMs = _nowMs() + delayMs;
@@ -1396,6 +1665,24 @@ void SCD41::_updatePeriodicMissedSamples(uint32_t nowMs) {
       _missedSamples = saturatingAddU32(_missedSamples, missed);
     }
   }
+}
+
+void SCD41::_storeSample(const RawSample& sample, bool co2Valid) {
+  const uint32_t now = _nowMs();
+  if (isPeriodicActive()) {
+    _updatePeriodicMissedSamples(now);
+    _lastFetchMs = now;
+  }
+
+  _rawSample = sample;
+  _compSample.co2Ppm = sample.rawCo2;
+  _compSample.tempC_x1000 = convertTemperatureC_x1000(sample.rawTemperature);
+  _compSample.humidityPct_x1000 = convertHumidityPct_x1000(sample.rawHumidity);
+  _lastSampleCo2Valid = co2Valid;
+  _compSample.co2Valid = co2Valid;
+  _sampleTimestampMs = now;
+  _measurementReady = true;
+  _clearMeasurementRequest();
 }
 
 Status SCD41::_handlePendingCommand(uint32_t nowMs) {
@@ -1466,6 +1753,7 @@ Status SCD41::_completeSelfTest() {
   }
 
   _selfTestRaw = value;
+  _selfTestRawValid = true;
   _selfTestStatus = (value == cmd::SELF_TEST_PASS)
                         ? Status::Ok()
                         : Status::Error(Err::COMMAND_FAILED, "Self-test failed", value);
@@ -1481,6 +1769,8 @@ Status SCD41::_completeForcedRecalibration() {
     return st;
   }
 
+  _forcedRecalibrationRaw = value;
+  _forcedRecalibrationRawValid = true;
   if (value == cmd::FRC_FAILED) {
     _forcedRecalibrationStatus = Status::Error(Err::COMMAND_FAILED, "Forced recalibration failed");
     return _forcedRecalibrationStatus;
@@ -1512,21 +1802,7 @@ Status SCD41::_completeMeasurement() {
     return st;
   }
 
-  const uint32_t now = _nowMs();
-  if (isPeriodicActive()) {
-    _updatePeriodicMissedSamples(now);
-    _lastFetchMs = now;
-  }
-
-  _rawSample = sample;
-  _compSample.co2Ppm = sample.rawCo2;
-  _compSample.tempC_x1000 = convertTemperatureC_x1000(sample.rawTemperature);
-  _compSample.humidityPct_x1000 = convertHumidityPct_x1000(sample.rawHumidity);
-  _lastSampleCo2Valid = (_pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY);
-  _compSample.co2Valid = _lastSampleCo2Valid;
-  _sampleTimestampMs = now;
-  _measurementReady = true;
-  _clearMeasurementRequest();
+  _storeSample(sample, _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY);
   return Status::Ok();
 }
 

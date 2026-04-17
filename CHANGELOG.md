@@ -11,10 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
 - Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
 - Tightened the example Wire transport so short reads map to generic `I2C_ERROR` unless a transport can explicitly distinguish read-header NACK behavior.
+- Tightened the raw command helpers so they reject managed mode/state commands, preserve periodic-mode command restrictions, and stay aligned with the driver's internal state model.
+- `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
+- Fixed the bring-up CLI so forced-recalibration failures are always reported and raw diagnostic reads no longer mask read-header NACKs by default.
+- Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
 
 ### Added
 - `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
-- Native coverage for power-up delay handling, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
+- Public raw command helpers (`writeCommand`, `writeCommandWithData`, `readCommand`, `readWordCommand`, `readWordsCommand`) plus named single-shot and `readMeasurement()` command helpers.
+- Raw self-test/FRC result accessors and ambient-pressure encode/decode helpers.
+- Native coverage for power-up delay handling, direct `read_measurement` reads, raw-command helper restrictions/error paths, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
 
 ### Removed
 - Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.

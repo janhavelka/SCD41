@@ -25,11 +25,25 @@ The library covers the practical documented SCD41 runtime surface:
 - low-power periodic mode, 1 sample every 30 s
 - single-shot CO2 + temperature + humidity measurement
 - single-shot temperature + humidity-only measurement
+- explicit `readMeasurement()` helper for the `read_measurement` command
 - data-ready polling and CRC-checked measurement reads
 - temperature offset, sensor altitude, and ambient pressure compensation
 - automatic self-calibration enable, target, and period controls
 - forced recalibration, persist settings, reinit, self-test, factory reset, power-down, and wake-up
 - live settings readback via `readSettings()`
+- public raw command helpers via `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, and `readWordsCommand()`
+
+## Driver Model
+
+The driver uses a managed asynchronous model:
+
+- `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
+- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion.
+- `requestMeasurement()` schedules work using the current operating mode.
+- `readMeasurement()` is the direct helper for the sensor's `read_measurement` command. It completes a due single-shot request or fetches a ready periodic sample while keeping the cached sample state coherent.
+- `getMeasurement()` returns the cached converted sample and clears the ready flag.
+
+This split keeps long device operations explicit and predictable. Public calls do not hide multi-second waits behind a single synchronous API.
 
 ## Important Device Rules
 
@@ -39,20 +53,34 @@ The library covers the practical documented SCD41 runtime surface:
 - `wake_up` is special: the device NACKs the command by design, then wakes within 30 ms.
 - While periodic measurement is active, only `read_measurement`, `get_data_ready_status`, `set_ambient_pressure`, `get_ambient_pressure`, and `stop_periodic_measurement` are valid.
 - `stop_periodic_measurement` requires a 500 ms settle window before idle-only commands.
+- Low-power periodic mode trades some CO2 accuracy for lower average current.
+- In single-shot workflows, the first 1..3 CO2 results after power-up or mode changes may be unreliable. The driver reports RHT-only CO2 invalidity directly, but warm-up discard policy remains application-managed.
 - `persist_settings` writes EEPROM. Sensirion rates this storage for at least 2000 write cycles, so persistence must remain explicit and infrequent.
 - The sensor can draw 175-205 mA peak current during the photoacoustic pulse. Budget the supply accordingly and place at least 10 uF bulk capacitance near the device.
 
-## API Shape
+## Public API
 
 The public driver follows the same family conventions as the mature workspace libraries:
 
 - lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
-- measurement flow: `requestMeasurement()`, `measurementReady()`, `getMeasurement()`, `getRawSample()`, `getCompensatedSample()`
+- measurement flow: `requestMeasurement()`, `readMeasurement()`, `measurementReady()`, `getMeasurement()`, `getRawSample()`, `getCompensatedSample()`
+- state and health: `state()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
+- measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
-- identification: `readSerialNumber()`, `readSensorVariant()`
+- mode/query helpers: `getSingleShotMode()`, `readSerialNumber()`, `readSensorVariant()`
+- named single-shot commands: `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()`
 - compensation/config: `setTemperatureOffsetC()`, `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
-- maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `startForcedRecalibration()`
-- snapshots: `getSettings()` for local driver state and `readSettings()` for local state plus live device configuration
+- maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
+- raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, `readWordsCommand()`
+- snapshots: `getSettings()` for local driver state and `readSettings()` for a best-effort state plus live-configuration snapshot
+
+`readSettings()` is mode-dependent by design:
+
+- in idle mode it reads the live device configuration fields
+- in periodic mode it refreshes ambient pressure only, because the other configuration commands are idle-only
+- while a command is pending, a measurement is in progress, or the sensor is powered down, it returns the local driver snapshot without live refresh
+
+The raw command helpers are limited to immediate, non-stateful diagnostic transactions. Managed mode transitions and long-running commands must still use the typed APIs, and the raw helpers continue to enforce the sensor's periodic-mode command restrictions.
 
 ## Measurement Timing Summary
 
@@ -185,6 +213,9 @@ void loop() {
 }
 ```
 
+This example uses the cached-sample flow. If you want a direct command-style read path, call
+`readMeasurement()` once a single-shot deadline has elapsed or a periodic sample is reported ready.
+
 ## Example CLI
 
 [examples/01_basic_bringup_cli](examples/01_basic_bringup_cli) provides a family-style serial REPL for bring-up and diagnostics.
@@ -192,10 +223,15 @@ void loop() {
 Main command groups:
 
 - Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `drv`, `drv1`, `cfg`, `settings`, `verbose`
-- Measurement: `read`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `convert`
+- Measurement: `read`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
 - Mode and power: `mode`, `periodic`, `sleep`, `wake`
 - Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
 - Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `frc`
+- Raw commands: `command write`, `command write_data`, `command read`, `command read_word`, `command read_words`
+
+The raw command CLI is intentionally limited to immediate diagnostic commands. Managed transitions such
+as periodic-mode entry/exit, wake-up, self-test, and forced recalibration should be driven through the
+typed commands so the driver state stays coherent.
 
 Typical bring-up flow:
 
@@ -209,6 +245,7 @@ watch 0
 selftest
 frc 400
 persist
+command read_word 0xE4B8
 ```
 
 ## Build And Validation

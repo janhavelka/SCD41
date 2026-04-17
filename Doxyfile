@@ -3,7 +3,7 @@
 
 PROJECT_NAME           = "SCD41"
 PROJECT_NUMBER         = "0.1.0"
-PROJECT_BRIEF          = "SCD41 embedded library API documentation"
+PROJECT_BRIEF          = "Managed SCD41 driver API and repository reference"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
 ALLOW_UNICODE_NAMES    = NO
@@ -51,7 +51,7 @@ GENERATE_XML           = NO
 GENERATE_RTF           = NO
 GENERATE_MAN           = NO
 
-WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_UNDOCUMENTED   = YES
 WARN_NO_PARAMDOC       = NO
 WARN_IF_DOC_ERROR      = YES
 WARN_AS_ERROR          = NO

@@ -284,9 +284,9 @@ void handlePendingTransitions() {
     switch (gLastPending) {
       case app_driver::PendingCommand::SELF_TEST: {
         uint16_t raw = 0;
-        const app_driver::Status st = device.getSelfTestResult(raw);
-        printStatus(st);
-        if (st.ok()) {
+        const app_driver::Status rawSt = device.getSelfTestRawResult(raw);
+        printStatus(rawSt);
+        if (rawSt.ok()) {
           Serial.printf("selftest=0x%04X pass=%s\n",
                         static_cast<unsigned>(raw),
                         yesNo(raw == 0U));
@@ -294,6 +294,12 @@ void handlePendingTransitions() {
       } break;
 
       case app_driver::PendingCommand::FORCED_RECALIBRATION: {
+        uint16_t raw = 0;
+        const app_driver::Status rawSt = device.getForcedRecalibrationRawResult(raw);
+        printStatus(rawSt);
+        if (rawSt.ok()) {
+          Serial.printf("frc_raw=0x%04X\n", static_cast<unsigned>(raw));
+        }
         int16_t correctionPpm = 0;
         const app_driver::Status st = device.getForcedRecalibrationCorrectionPpm(correctionPpm);
         printStatus(st);
@@ -351,6 +357,7 @@ void printHelp() {
   helpItem("watch [0|1]", "Continuously schedule measurements");
   helpItem("stress [N]", "Run N measurement cycles");
   helpItem("single [full|rht]", "Show or set idle single-shot mode");
+  helpItem("single_start [full|rht]", "Start a one-shot full or RHT-only command");
   helpItem("convert <rawT> <rawRH> [co2]", "Convert raw values using library helpers");
 
   helpSection("Mode And Power");
@@ -376,6 +383,13 @@ void printHelp() {
   helpItem("factory_reset", "Perform factory reset");
   helpItem("selftest", "Run the 10 s self-test");
   helpItem("frc <reference_ppm>", "Start forced recalibration");
+
+  helpSection("Raw Commands");
+  helpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
+  helpItem("command write_data <cmd> <data>", "Issue an immediate command with one CRC-packed data word");
+  helpItem("command read <cmd> <len>", "Issue a short raw read command and print response bytes");
+  helpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
+  helpItem("command read_words <cmd> <count>", "Issue a short read command and decode CRC-checked words");
 }
 
 void processConvert(const String& tail) {
@@ -577,6 +591,24 @@ void processCommand(const String& cmdLine) {
     gStressRemaining = static_cast<int>(count);
     Serial.printf("stress=%d\n", gStressRemaining);
     printStatus(scheduleMeasurement());
+    return;
+  }
+
+  if (head == "single_start") {
+    app_driver::Status st = app_driver::Status::Error(app_driver::Err::INVALID_PARAM,
+                                                      "Invalid single-shot command");
+    if (tail.length() == 0U || tail == "full") {
+      st = device.startSingleShotMeasurement();
+    } else if (tail == "rht") {
+      st = device.startSingleShotRhtOnlyMeasurement();
+    } else {
+      LOGW("Usage: single_start [full|rht]");
+      return;
+    }
+    if (st.inProgress()) {
+      gPendingRead = true;
+    }
+    printStatus(st);
     return;
   }
 
@@ -834,6 +866,118 @@ void processCommand(const String& cmdLine) {
       return;
     }
     printStatus(device.startForcedRecalibration(referencePpm));
+    return;
+  }
+
+  if (head == "command") {
+    String sub;
+    String rest;
+    if (!cmd::splitHeadTail(tail, sub, rest)) {
+      LOGW("Usage: command write|write_data|read|read_word|read_words ...");
+      return;
+    }
+
+    if (sub == "write") {
+      uint16_t command = 0;
+      if (!cmd::parseU16(rest, command)) {
+        LOGW("Usage: command write <cmd>");
+        return;
+      }
+      printStatus(device.writeCommand(command));
+      return;
+    }
+
+    if (sub == "write_data") {
+      String cmdToken;
+      String dataToken;
+      if (!cmd::splitHeadTail(rest, cmdToken, dataToken)) {
+        LOGW("Usage: command write_data <cmd> <data>");
+        return;
+      }
+      uint16_t command = 0;
+      uint16_t data = 0;
+      if (!cmd::parseU16(cmdToken, command) || !cmd::parseU16(dataToken, data)) {
+        LOGW("Invalid command or data");
+        return;
+      }
+      printStatus(device.writeCommandWithData(command, data));
+      return;
+    }
+
+    if (sub == "read") {
+      String cmdToken;
+      String lenToken;
+      if (!cmd::splitHeadTail(rest, cmdToken, lenToken)) {
+        LOGW("Usage: command read <cmd> <len>");
+        return;
+      }
+      uint16_t command = 0;
+      uint32_t len = 0;
+      if (!cmd::parseU16(cmdToken, command) || !cmd::parseU32(lenToken, len) || len == 0U ||
+          len > 16U) {
+        LOGW("Length must be 1..16");
+        return;
+      }
+      uint8_t buf[16] = {};
+      const app_driver::Status st = device.readCommand(command, buf, static_cast<size_t>(len));
+      printStatus(st);
+      if (!st.ok()) {
+        return;
+      }
+      Serial.print("data=");
+      for (uint32_t i = 0; i < len; ++i) {
+        Serial.printf("%s%02X", (i == 0U) ? "" : " ", static_cast<unsigned>(buf[i]));
+      }
+      Serial.println();
+      return;
+    }
+
+    if (sub == "read_word") {
+      uint16_t command = 0;
+      if (!cmd::parseU16(rest, command)) {
+        LOGW("Usage: command read_word <cmd>");
+        return;
+      }
+      uint16_t value = 0;
+      const app_driver::Status st = device.readWordCommand(command, value);
+      printStatus(st);
+      if (st.ok()) {
+        Serial.printf("word=0x%04X (%u)\n", static_cast<unsigned>(value), static_cast<unsigned>(value));
+      }
+      return;
+    }
+
+    if (sub == "read_words") {
+      String cmdToken;
+      String countToken;
+      if (!cmd::splitHeadTail(rest, cmdToken, countToken)) {
+        LOGW("Usage: command read_words <cmd> <count>");
+        return;
+      }
+      uint16_t command = 0;
+      uint32_t count = 0;
+      if (!cmd::parseU16(cmdToken, command) || !cmd::parseU32(countToken, count) || count == 0U ||
+          count > 3U) {
+        LOGW("Count must be 1..3");
+        return;
+      }
+      uint16_t words[3] = {};
+      const app_driver::Status st =
+          device.readWordsCommand(command, words, static_cast<size_t>(count));
+      printStatus(st);
+      if (!st.ok()) {
+        return;
+      }
+      for (uint32_t i = 0; i < count; ++i) {
+        Serial.printf("word[%lu]=0x%04X (%u)\n",
+                      static_cast<unsigned long>(i),
+                      static_cast<unsigned>(words[i]),
+                      static_cast<unsigned>(words[i]));
+      }
+      return;
+    }
+
+    LOGW("Usage: command write|write_data|read|read_word|read_words ...");
     return;
   }
 
