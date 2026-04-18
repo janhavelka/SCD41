@@ -24,11 +24,92 @@ app_driver::Config gConfig;
 bool gVerbose = false;
 bool gPendingRead = false;
 bool gWatchEnabled = false;
+uint32_t gPendingStartMs = 0;
 int gStressRemaining = 0;
 app_driver::PendingCommand gLastPending = app_driver::PendingCommand::NONE;
+static constexpr uint32_t STRESS_PROGRESS_UPDATES = 10U;
+static constexpr uint32_t DEFAULT_STRESS_COUNT = 100U;
+static constexpr uint32_t MAX_STRESS_COUNT = 100000U;
+
+void printStatus(const app_driver::Status& st);
+
+struct StressStats {
+  bool active = false;
+  uint32_t startMs = 0;
+  uint32_t endMs = 0;
+  uint32_t successBefore = 0;
+  uint32_t failBefore = 0;
+  int target = 0;
+  int attempts = 0;
+  int success = 0;
+  uint32_t errors = 0;
+  uint32_t invalidCo2Samples = 0;
+  bool hasFailure = false;
+  bool hasValidCo2 = false;
+  bool hasSample = false;
+  uint16_t minCo2 = 0;
+  uint16_t maxCo2 = 0;
+  float minTemp = 0.0f;
+  float maxTemp = 0.0f;
+  float minRh = 0.0f;
+  float maxRh = 0.0f;
+  double sumCo2 = 0.0;
+  double sumTemp = 0.0;
+  double sumRh = 0.0;
+  app_driver::Status firstError = app_driver::Status::Ok();
+  app_driver::Status lastError = app_driver::Status::Ok();
+};
+
+struct SettingsCache {
+  bool temperatureOffsetKnown = false;
+  bool altitudeKnown = false;
+  bool ambientPressureKnown = false;
+  bool ascEnabledKnown = false;
+  bool ascTargetKnown = false;
+  bool ascInitialKnown = false;
+  bool ascStandardKnown = false;
+  int32_t temperatureOffsetC_x1000 = 0;
+  uint16_t sensorAltitudeM = 0;
+  uint32_t ambientPressurePa = 0;
+  bool automaticSelfCalibrationEnabled = false;
+  uint16_t automaticSelfCalibrationTargetPpm = 0;
+  uint16_t automaticSelfCalibrationInitialPeriodHours = 0;
+  uint16_t automaticSelfCalibrationStandardPeriodHours = 0;
+};
+
+StressStats gStressStats;
+SettingsCache gSettingsCache;
 
 const char* yesNo(bool value) {
   return value ? "yes" : "no";
+}
+
+const char* statusColor(const app_driver::Status& st) {
+  if (st.ok()) {
+    return LOG_COLOR_GREEN;
+  }
+  if (st.inProgress()) {
+    return LOG_COLOR_YELLOW;
+  }
+  return LOG_COLOR_RED;
+}
+
+const char* goodIfZeroColor(uint32_t value) {
+  return (value == 0U) ? LOG_COLOR_GREEN : LOG_COLOR_RED;
+}
+
+const char* goodIfNonZeroColor(uint32_t value) {
+  return (value > 0U) ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW;
+}
+
+const char* successRateColor(float pct) {
+  if (pct >= 99.9f) return LOG_COLOR_GREEN;
+  if (pct >= 80.0f) return LOG_COLOR_YELLOW;
+  return LOG_COLOR_RED;
+}
+
+const char* skipCountColor(uint32_t count) {
+  return (count > 0U) ? LOG_COLOR_YELLOW : LOG_COLOR_GRAY;
 }
 
 const char* singleShotModeToString(app_driver::SingleShotMode mode) {
@@ -39,41 +120,301 @@ const char* singleShotModeToString(app_driver::SingleShotMode mode) {
   }
 }
 
+void clearSettingsCache() {
+  gSettingsCache = SettingsCache{};
+}
+
+void noteSettingsCache(const app_driver::SettingsSnapshot& snap) {
+  if (snap.liveConfigValid) {
+    gSettingsCache.temperatureOffsetKnown = true;
+    gSettingsCache.altitudeKnown = true;
+    gSettingsCache.ascEnabledKnown = true;
+    gSettingsCache.ascTargetKnown = true;
+    gSettingsCache.ascInitialKnown = true;
+    gSettingsCache.ascStandardKnown = true;
+  }
+  if (snap.liveConfigValid || snap.ambientPressurePa != 0U) {
+    gSettingsCache.ambientPressureKnown = true;
+  }
+  if (gSettingsCache.temperatureOffsetKnown) {
+    gSettingsCache.temperatureOffsetC_x1000 = snap.temperatureOffsetC_x1000;
+  }
+  if (gSettingsCache.altitudeKnown) {
+    gSettingsCache.sensorAltitudeM = snap.sensorAltitudeM;
+  }
+  if (gSettingsCache.ambientPressureKnown) {
+    gSettingsCache.ambientPressurePa = snap.ambientPressurePa;
+  }
+  if (gSettingsCache.ascEnabledKnown) {
+    gSettingsCache.automaticSelfCalibrationEnabled = snap.automaticSelfCalibrationEnabled;
+  }
+  if (gSettingsCache.ascTargetKnown) {
+    gSettingsCache.automaticSelfCalibrationTargetPpm =
+        snap.automaticSelfCalibrationTargetPpm;
+  }
+  if (gSettingsCache.ascInitialKnown) {
+    gSettingsCache.automaticSelfCalibrationInitialPeriodHours =
+        snap.automaticSelfCalibrationInitialPeriodHours;
+  }
+  if (gSettingsCache.ascStandardKnown) {
+    gSettingsCache.automaticSelfCalibrationStandardPeriodHours =
+        snap.automaticSelfCalibrationStandardPeriodHours;
+  }
+}
+
+bool hasCachedSettings() {
+  return gSettingsCache.temperatureOffsetKnown || gSettingsCache.altitudeKnown ||
+         gSettingsCache.ambientPressureKnown || gSettingsCache.ascEnabledKnown ||
+         gSettingsCache.ascTargetKnown || gSettingsCache.ascInitialKnown ||
+         gSettingsCache.ascStandardKnown;
+}
+
+bool healthMatches(const HealthSnapshot<app_driver::Device>& before,
+                   const HealthSnapshot<app_driver::Device>& after) {
+  return before.state == after.state && before.online == after.online &&
+         before.consecutiveFailures == after.consecutiveFailures &&
+         before.totalFailures == after.totalFailures &&
+         before.totalSuccess == after.totalSuccess && before.lastOkMs == after.lastOkMs &&
+         before.lastErrorMs == after.lastErrorMs &&
+         before.lastError.code == after.lastError.code &&
+         before.lastError.detail == after.lastError.detail;
+}
+
+void printUnknownField(const char* label) {
+  Serial.printf("  %-20s %sunknown%s\n", label, LOG_COLOR_GRAY, LOG_COLOR_RESET);
+}
+
+void printKnownBoolField(const char* label, bool known, bool value) {
+  if (!known) {
+    printUnknownField(label);
+    return;
+  }
+  Serial.printf("  %-20s %s%s%s\n",
+                label,
+                diag::boolColor(value),
+                yesNo(value),
+                LOG_COLOR_RESET);
+}
+
+void printKnownFloatField(const char* label, bool known, float value, const char* unit) {
+  if (!known) {
+    printUnknownField(label);
+    return;
+  }
+  Serial.printf("  %-20s %.3f %s\n", label, static_cast<double>(value), unit);
+}
+
+void printKnownU16Field(const char* label, bool known, uint16_t value, const char* unit) {
+  if (!known) {
+    printUnknownField(label);
+    return;
+  }
+  Serial.printf("  %-20s %u %s\n", label, static_cast<unsigned>(value), unit);
+}
+
+void printKnownU32Field(const char* label, bool known, uint32_t value, const char* unit) {
+  if (!known) {
+    printUnknownField(label);
+    return;
+  }
+  Serial.printf("  %-20s %lu %s\n", label, static_cast<unsigned long>(value), unit);
+}
+
+void printPrompt() {
+  Serial.print("> ");
+}
+
+uint32_t stressProgressStep(uint32_t total) {
+  if (total == 0U) {
+    return 0U;
+  }
+  const uint32_t step = total / STRESS_PROGRESS_UPDATES;
+  return (step == 0U) ? 1U : step;
+}
+
+void printStressProgress(uint32_t completed, uint32_t total, uint32_t okCount, uint32_t failCount) {
+  if (completed == 0U || total == 0U) {
+    return;
+  }
+  const uint32_t step = stressProgressStep(total);
+  if (step == 0U || (completed != total && (completed % step) != 0U)) {
+    return;
+  }
+  const float pct = (100.0f * static_cast<float>(completed)) / static_cast<float>(total);
+  Serial.printf("  Progress: %lu/%lu (%s%.0f%%%s, ok=%s%lu%s, fail=%s%lu%s)\n",
+                static_cast<unsigned long>(completed),
+                static_cast<unsigned long>(total),
+                successRateColor(pct),
+                pct,
+                LOG_COLOR_RESET,
+                goodIfNonZeroColor(okCount),
+                static_cast<unsigned long>(okCount),
+                LOG_COLOR_RESET,
+                goodIfZeroColor(failCount),
+                static_cast<unsigned long>(failCount),
+                LOG_COLOR_RESET);
+}
+
+void resetStressStats(int target) {
+  gStressStats = StressStats{};
+  gStressStats.active = true;
+  gStressStats.startMs = millis();
+  gStressStats.successBefore = device.totalSuccess();
+  gStressStats.failBefore = device.totalFailures();
+  gStressStats.target = target;
+}
+
+void noteStressError(const app_driver::Status& st) {
+  ++gStressStats.errors;
+  if (!gStressStats.hasFailure) {
+    gStressStats.firstError = st;
+    gStressStats.hasFailure = true;
+  }
+  gStressStats.lastError = st;
+}
+
+void updateStressStats(const app_driver::Measurement& sample) {
+  if (!gStressStats.hasSample) {
+    gStressStats.minTemp = gStressStats.maxTemp = sample.temperatureC;
+    gStressStats.minRh = gStressStats.maxRh = sample.humidityPct;
+    gStressStats.hasSample = true;
+  } else {
+    if (sample.temperatureC < gStressStats.minTemp) gStressStats.minTemp = sample.temperatureC;
+    if (sample.temperatureC > gStressStats.maxTemp) gStressStats.maxTemp = sample.temperatureC;
+    if (sample.humidityPct < gStressStats.minRh) gStressStats.minRh = sample.humidityPct;
+    if (sample.humidityPct > gStressStats.maxRh) gStressStats.maxRh = sample.humidityPct;
+  }
+
+  gStressStats.sumTemp += sample.temperatureC;
+  gStressStats.sumRh += sample.humidityPct;
+  if (sample.co2Valid) {
+    if (!gStressStats.hasValidCo2) {
+      gStressStats.minCo2 = gStressStats.maxCo2 = sample.co2Ppm;
+      gStressStats.hasValidCo2 = true;
+    } else {
+      if (sample.co2Ppm < gStressStats.minCo2) gStressStats.minCo2 = sample.co2Ppm;
+      if (sample.co2Ppm > gStressStats.maxCo2) gStressStats.maxCo2 = sample.co2Ppm;
+    }
+    gStressStats.sumCo2 += static_cast<double>(sample.co2Ppm);
+  } else {
+    ++gStressStats.invalidCo2Samples;
+  }
+  ++gStressStats.success;
+}
+
+void finishStressStats() {
+  gStressStats.active = false;
+  gStressStats.endMs = millis();
+  const uint32_t successDelta = device.totalSuccess() - gStressStats.successBefore;
+  const uint32_t failDelta = device.totalFailures() - gStressStats.failBefore;
+  const uint32_t durationMs = gStressStats.endMs - gStressStats.startMs;
+  const float successPct =
+      (gStressStats.attempts > 0)
+          ? (100.0f * static_cast<float>(gStressStats.success) /
+             static_cast<float>(gStressStats.attempts))
+          : 0.0f;
+
+  Serial.println("=== Stress Summary ===");
+  Serial.printf("  Target:   %d\n", gStressStats.target);
+  Serial.printf("  Attempts: %d\n", gStressStats.attempts);
+  Serial.printf("  Success:  %s%d%s\n",
+                goodIfNonZeroColor(static_cast<uint32_t>(gStressStats.success)),
+                gStressStats.success,
+                LOG_COLOR_RESET);
+  Serial.printf("  Errors:   %s%lu%s\n",
+                goodIfZeroColor(gStressStats.errors),
+                static_cast<unsigned long>(gStressStats.errors),
+                LOG_COLOR_RESET);
+  Serial.printf("  Success rate: %s%.2f%%%s\n",
+                successRateColor(successPct),
+                successPct,
+                LOG_COLOR_RESET);
+  Serial.printf("  Duration: %lu ms\n", static_cast<unsigned long>(durationMs));
+  if (durationMs > 0U) {
+    Serial.printf("  Rate:     %.2f samples/s\n",
+                  1000.0f * static_cast<float>(gStressStats.attempts) /
+                      static_cast<float>(durationMs));
+  }
+  Serial.printf("  Health delta: %ssuccess +%lu%s, %sfailures +%lu%s\n",
+                goodIfNonZeroColor(successDelta),
+                static_cast<unsigned long>(successDelta),
+                LOG_COLOR_RESET,
+                goodIfZeroColor(failDelta),
+                static_cast<unsigned long>(failDelta),
+                LOG_COLOR_RESET);
+  if (gStressStats.success > 0 && gStressStats.hasSample) {
+    const float avgTemp =
+        static_cast<float>(gStressStats.sumTemp / static_cast<double>(gStressStats.success));
+    const float avgRh =
+        static_cast<float>(gStressStats.sumRh / static_cast<double>(gStressStats.success));
+    Serial.printf("  Temp C:   min=%.3f avg=%.3f max=%.3f\n",
+                  static_cast<double>(gStressStats.minTemp),
+                  static_cast<double>(avgTemp),
+                  static_cast<double>(gStressStats.maxTemp));
+    Serial.printf("  RH %%:     min=%.3f avg=%.3f max=%.3f\n",
+                  static_cast<double>(gStressStats.minRh),
+                  static_cast<double>(avgRh),
+                  static_cast<double>(gStressStats.maxRh));
+    if (gStressStats.hasValidCo2) {
+      const uint32_t validCo2Count = static_cast<uint32_t>(gStressStats.success) -
+                                     gStressStats.invalidCo2Samples;
+      const float avgCo2 = static_cast<float>(gStressStats.sumCo2 /
+                                              static_cast<double>(validCo2Count));
+      Serial.printf("  CO2 ppm:  min=%u avg=%.1f max=%u invalid=%lu\n",
+                    static_cast<unsigned>(gStressStats.minCo2),
+                    static_cast<double>(avgCo2),
+                    static_cast<unsigned>(gStressStats.maxCo2),
+                    static_cast<unsigned long>(gStressStats.invalidCo2Samples));
+    } else {
+      Serial.printf("  CO2 ppm:  no valid CO2 samples (invalid=%lu)\n",
+                    static_cast<unsigned long>(gStressStats.invalidCo2Samples));
+    }
+  }
+  if (gStressStats.hasFailure) {
+    Serial.println("  First failure:");
+    printStatus(gStressStats.firstError);
+    if (gStressStats.errors > 1U) {
+      Serial.println("  Last failure:");
+      printStatus(gStressStats.lastError);
+    }
+  }
+}
+
 void cancelQueuedWork() {
   gPendingRead = false;
+  gPendingStartMs = 0;
   gWatchEnabled = false;
   gStressRemaining = 0;
+  gStressStats.active = false;
 }
 
 void printStatus(const app_driver::Status& st) {
-  const bool ok = st.ok() || st.inProgress();
-  Serial.printf("%sstatus=%s code=%u detail=%ld%s\n",
-                LOG_COLOR_RESULT(ok),
+  Serial.printf("  Status: %s%s%s (code=%u, detail=%ld)\n",
+                statusColor(st),
                 app_driver::errToString(st.code),
+                LOG_COLOR_RESET,
                 static_cast<unsigned>(st.code),
-                static_cast<long>(st.detail),
-                LOG_COLOR_RESET);
+                static_cast<long>(st.detail));
   if (st.msg != nullptr && st.msg[0] != '\0') {
-    Serial.printf("msg=%s\n", st.msg);
+    Serial.printf("  Message: %s%s%s\n", LOG_COLOR_YELLOW, st.msg, LOG_COLOR_RESET);
   }
 }
 
 void printVersionInfo() {
-  Serial.println("=== Version Info ===");
-  Serial.printf("  Example firmware build: %s %s\n", __DATE__, __TIME__);
-  Serial.printf("  %s library version: %s\n", app_driver::driverName(), app_driver::version());
-  Serial.printf("  %s library full: %s\n", app_driver::driverName(), app_driver::versionFull());
-  Serial.printf("  %s library build: %s\n", app_driver::driverName(), app_driver::buildTimestamp());
-  Serial.printf("  %s library commit: %s (%s)\n",
-                app_driver::driverName(),
-                app_driver::gitCommit(),
-                app_driver::gitStatus());
+  Serial.println("=== Version ===");
+  Serial.printf("  Example build: %s %s\n", __DATE__, __TIME__);
+  Serial.printf("  Library:       %s %s\n", app_driver::driverName(), app_driver::version());
+  Serial.printf("  Full:          %s\n", app_driver::versionFull());
+  Serial.printf("  Built:         %s\n", app_driver::buildTimestamp());
+  Serial.printf("  Commit:        %s (%s)\n", app_driver::gitCommit(), app_driver::gitStatus());
 }
 
 void printMeasurement(const app_driver::Measurement& sample) {
-  Serial.printf("CO2=%u ppm (%s) T=%.3f C RH=%.3f %%\n",
+  Serial.printf("Sample: CO2=%u ppm valid=%s%s%s T=%.3f C RH=%.3f %%\n",
                 static_cast<unsigned>(sample.co2Ppm),
+                diag::boolColor(sample.co2Valid),
                 yesNo(sample.co2Valid),
+                LOG_COLOR_RESET,
                 static_cast<double>(sample.temperatureC),
                 static_cast<double>(sample.humidityPct));
 }
@@ -86,11 +427,122 @@ void printRawSample(const app_driver::RawSample& sample) {
 }
 
 void printCompensatedSample(const app_driver::CompensatedSample& sample) {
-  Serial.printf("co2=%u ppm (%s) temp=%ld mC rh=%lu m%%\n",
+  Serial.printf("Comp: co2=%u ppm valid=%s%s%s temp=%ld mC rh=%lu m%%\n",
                 static_cast<unsigned>(sample.co2Ppm),
+                diag::boolColor(sample.co2Valid),
                 yesNo(sample.co2Valid),
+                LOG_COLOR_RESET,
                 static_cast<long>(sample.tempC_x1000),
                 static_cast<unsigned long>(sample.humidityPct_x1000));
+}
+
+void printDriverHealth() {
+  const uint32_t now = millis();
+  const uint32_t totalOk = device.totalSuccess();
+  const uint32_t totalFail = device.totalFailures();
+  const uint32_t total = totalOk + totalFail;
+  const float successRate = (total > 0U)
+                                ? (100.0f * static_cast<float>(totalOk) /
+                                   static_cast<float>(total))
+                                : 0.0f;
+  const app_driver::Status lastErr = device.lastError();
+
+  Serial.println("=== Driver Health ===");
+  Serial.printf("  State: %s%s%s\n",
+                diag::stateColor(device.state()),
+                app_driver::stateToString(device.state()),
+                LOG_COLOR_RESET);
+  Serial.printf("  Online: %s%s%s\n",
+                diag::boolColor(device.isOnline()),
+                yesNo(device.isOnline()),
+                LOG_COLOR_RESET);
+  Serial.printf("  Consecutive failures: %s%u%s\n",
+                goodIfZeroColor(device.consecutiveFailures()),
+                static_cast<unsigned>(device.consecutiveFailures()),
+                LOG_COLOR_RESET);
+  Serial.printf("  Total success: %s%lu%s\n",
+                goodIfNonZeroColor(totalOk),
+                static_cast<unsigned long>(totalOk),
+                LOG_COLOR_RESET);
+  Serial.printf("  Total failures: %s%lu%s\n",
+                goodIfZeroColor(totalFail),
+                static_cast<unsigned long>(totalFail),
+                LOG_COLOR_RESET);
+  Serial.printf("  Success rate: %s%.1f%%%s\n",
+                successRateColor(successRate),
+                successRate,
+                LOG_COLOR_RESET);
+  if (device.lastOkMs() > 0U) {
+    Serial.printf("  Last OK: %lu ms ago\n",
+                  static_cast<unsigned long>(now - device.lastOkMs()));
+  } else {
+    Serial.println("  Last OK: never");
+  }
+  if (device.lastErrorMs() > 0U) {
+    Serial.printf("  Last error: %lu ms ago\n",
+                  static_cast<unsigned long>(now - device.lastErrorMs()));
+  } else {
+    Serial.println("  Last error: never");
+  }
+  if (!lastErr.ok()) {
+    printStatus(lastErr);
+  }
+}
+
+void printSelfTestResultView() {
+  Serial.println("=== Self-Test Result ===");
+  Serial.printf("  ready: %s%s%s\n",
+                diag::boolColor(device.selfTestReady()),
+                yesNo(device.selfTestReady()),
+                LOG_COLOR_RESET);
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+
+  uint16_t raw = 0;
+  const app_driver::Status st = device.getSelfTestResult(raw);
+  printStatus(st);
+  if (st.ok()) {
+    Serial.printf("  raw: 0x%04X\n", static_cast<unsigned>(raw));
+    Serial.printf("  pass: %s%s%s\n",
+                  diag::boolColor(raw == 0U),
+                  yesNo(raw == 0U),
+                  LOG_COLOR_RESET);
+    return;
+  }
+
+  const app_driver::Status rawSt = device.getSelfTestRawResult(raw);
+  if (rawSt.ok()) {
+    Serial.printf("  raw: 0x%04X\n", static_cast<unsigned>(raw));
+    Serial.printf("  pass: %s%s%s\n",
+                  diag::boolColor(raw == 0U),
+                  yesNo(raw == 0U),
+                  LOG_COLOR_RESET);
+  } else if (rawSt.code != st.code || rawSt.detail != st.detail) {
+    printStatus(rawSt);
+  }
+}
+
+void printFrcResultView() {
+  Serial.println("=== Forced Recalibration Result ===");
+  Serial.printf("  ready: %s%s%s\n",
+                diag::boolColor(device.forcedRecalibrationReady()),
+                yesNo(device.forcedRecalibrationReady()),
+                LOG_COLOR_RESET);
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+
+  int16_t correctionPpm = 0;
+  const app_driver::Status st = device.getForcedRecalibrationCorrectionPpm(correctionPpm);
+  printStatus(st);
+  if (st.ok()) {
+    Serial.printf("  correction_ppm: %d\n", static_cast<int>(correctionPpm));
+  }
+
+  uint16_t raw = 0;
+  const app_driver::Status rawSt = device.getForcedRecalibrationRawResult(raw);
+  if (rawSt.ok()) {
+    Serial.printf("  raw: 0x%04X\n", static_cast<unsigned>(raw));
+  } else if (rawSt.code != st.code || rawSt.detail != st.detail) {
+    printStatus(rawSt);
+  }
 }
 
 void printIdentity() {
@@ -141,15 +593,17 @@ void printConfigView() {
 }
 
 void printDriverView() {
+  Serial.println("=== Driver ===");
+  printDriverHealth();
+
   if (!device.isInitialized()) {
-    Serial.println("=== Driver ===");
-    printHealthView(device);
-    Serial.printf("mode=%s pending=%s busy=%s measurementPending=%s measurementReady=%s\n",
-                  app_driver::modeToString(device.operatingMode()),
-                  app_driver::pendingToString(device.pendingCommand()),
-                  yesNo(device.isBusy()),
-                  yesNo(gPendingRead),
-                  yesNo(device.measurementReady()));
+    Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
+    Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+    Serial.printf("  busy: %s\n", yesNo(device.isBusy()));
+    Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
+    Serial.printf("  measurement_ready: %s\n", yesNo(device.measurementReady()));
+    Serial.printf("  watch: %s\n", yesNo(gWatchEnabled));
+    Serial.printf("  stress_active: %s\n", yesNo(gStressStats.active));
     return;
   }
 
@@ -157,20 +611,26 @@ void printDriverView() {
   const app_driver::Status st = device.getSettings(snap);
   if (!st.ok()) {
     printStatus(st);
+    Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
+    Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+    Serial.printf("  busy: %s\n", yesNo(device.isBusy()));
+    Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
+    Serial.printf("  measurement_ready: %s\n", yesNo(device.measurementReady()));
     return;
   }
 
-  Serial.println("=== Driver ===");
-  diag::printHealthVerbose(device);
+  const uint32_t pendingLatencyMs =
+      (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
   Serial.printf("  mode: %s\n", app_driver::modeToString(snap.operatingMode));
   Serial.printf("  single_shot_mode: %s\n", singleShotModeToString(snap.singleShotMode));
   Serial.printf("  pending: %s\n", app_driver::pendingToString(snap.pendingCommand));
   Serial.printf("  busy: %s\n", yesNo(snap.busy));
   Serial.printf("  command_ready_ms: %lu\n", static_cast<unsigned long>(snap.commandReadyMs));
-  Serial.printf("  measurement_pending: %s\n", yesNo(snap.measurementPending));
+  Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
   Serial.printf("  measurement_ready: %s\n", yesNo(snap.measurementReady));
   Serial.printf("  measurement_ready_ms: %lu\n",
                 static_cast<unsigned long>(snap.measurementReadyMs));
+  Serial.printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
   Serial.printf("  sample_age_ms: %lu\n",
                 static_cast<unsigned long>(device.sampleAgeMs(millis())));
   Serial.printf("  missed_samples_estimate: %lu\n",
@@ -179,9 +639,15 @@ void printDriverView() {
   Serial.printf("  serial_valid: %s\n", yesNo(snap.serialNumberValid));
   Serial.printf("  serial: 0x%012llX\n", static_cast<unsigned long long>(snap.serialNumber));
   Serial.printf("  variant: %s\n", app_driver::variantToString(snap.sensorVariant));
-  Serial.printf("  selftest_ready: %s frc_ready: %s\n",
-                yesNo(device.selfTestReady()),
-                yesNo(device.forcedRecalibrationReady()));
+  Serial.printf("  selftest_ready: %s\n", yesNo(device.selfTestReady()));
+  Serial.printf("  frc_ready: %s\n", yesNo(device.forcedRecalibrationReady()));
+  Serial.printf("  watch: %s\n", yesNo(gWatchEnabled));
+  Serial.printf("  stress_active: %s\n", yesNo(gStressStats.active));
+  if (gStressStats.active) {
+    Serial.printf("  stress_attempts: %d/%d\n", gStressStats.attempts, gStressStats.target);
+    Serial.printf("  stress_success: %d\n", gStressStats.success);
+    Serial.printf("  stress_errors: %lu\n", static_cast<unsigned long>(gStressStats.errors));
+  }
 }
 
 void printSettingsView() {
@@ -193,57 +659,108 @@ void printSettingsView() {
 
   app_driver::SettingsSnapshot snap;
   const app_driver::Status st = device.readSettings(snap);
+  Serial.println("=== Settings ===");
   if (!st.ok()) {
     printStatus(st);
-    return;
+    const app_driver::Status fallbackSt = device.getSettings(snap);
+    if (!fallbackSt.ok()) {
+      printStatus(fallbackSt);
+      return;
+    }
+  } else {
+    noteSettingsCache(snap);
   }
-
-  Serial.println("=== Settings ===");
   Serial.printf("  mode: %s\n", app_driver::modeToString(snap.operatingMode));
   Serial.printf("  single_shot_mode: %s\n", singleShotModeToString(snap.singleShotMode));
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(snap.pendingCommand));
+  Serial.printf("  busy: %s\n", yesNo(snap.busy));
   Serial.printf("  serial: 0x%012llX (%s)\n",
                 static_cast<unsigned long long>(snap.serialNumber),
                 app_driver::variantToString(snap.sensorVariant));
-
-  if (!snap.liveConfigValid) {
-    Serial.println("  live_device_config: unavailable (driver busy, periodic active, or powered down)");
-    return;
+  if (st.ok() && snap.liveConfigValid) {
+    Serial.printf("  live_device_config: %sfull%s\n", LOG_COLOR_GREEN, LOG_COLOR_RESET);
+  } else if (hasCachedSettings()) {
+    Serial.printf("  live_device_config: %spartial / last-known%s\n",
+                  LOG_COLOR_YELLOW,
+                  LOG_COLOR_RESET);
+  } else {
+    Serial.printf("  live_device_config: %sunavailable%s\n", LOG_COLOR_RED, LOG_COLOR_RESET);
   }
 
-  Serial.printf("  temperature_offset: %.3f C\n",
-                static_cast<double>(snap.temperatureOffsetC_x1000) / 1000.0);
-  Serial.printf("  altitude: %u m\n", static_cast<unsigned>(snap.sensorAltitudeM));
-  Serial.printf("  ambient_pressure: %lu Pa\n",
-                static_cast<unsigned long>(snap.ambientPressurePa));
-  Serial.printf("  asc_enabled: %s\n", yesNo(snap.automaticSelfCalibrationEnabled));
-  Serial.printf("  asc_target: %u ppm\n",
-                static_cast<unsigned>(snap.automaticSelfCalibrationTargetPpm));
-  Serial.printf("  asc_initial_period: %u h\n",
-                static_cast<unsigned>(snap.automaticSelfCalibrationInitialPeriodHours));
-  Serial.printf("  asc_standard_period: %u h\n",
-                static_cast<unsigned>(snap.automaticSelfCalibrationStandardPeriodHours));
+  printKnownFloatField("temperature_offset:",
+                       gSettingsCache.temperatureOffsetKnown,
+                       static_cast<float>(gSettingsCache.temperatureOffsetC_x1000) / 1000.0f,
+                       "C");
+  printKnownU16Field("altitude:", gSettingsCache.altitudeKnown, gSettingsCache.sensorAltitudeM, "m");
+  printKnownU32Field("ambient_pressure:",
+                     gSettingsCache.ambientPressureKnown,
+                     gSettingsCache.ambientPressurePa,
+                     "Pa");
+  printKnownBoolField("asc_enabled:",
+                      gSettingsCache.ascEnabledKnown,
+                      gSettingsCache.automaticSelfCalibrationEnabled);
+  printKnownU16Field("asc_target:",
+                     gSettingsCache.ascTargetKnown,
+                     gSettingsCache.automaticSelfCalibrationTargetPpm,
+                     "ppm");
+  printKnownU16Field("asc_initial_period:",
+                     gSettingsCache.ascInitialKnown,
+                     gSettingsCache.automaticSelfCalibrationInitialPeriodHours,
+                     "h");
+  printKnownU16Field("asc_standard_period:",
+                     gSettingsCache.ascStandardKnown,
+                     gSettingsCache.automaticSelfCalibrationStandardPeriodHours,
+                     "h");
 }
 
 app_driver::Status scheduleMeasurement() {
   const app_driver::Status st = device.requestMeasurement();
   if (st.inProgress()) {
     gPendingRead = true;
+    gPendingStartMs = millis();
+  } else if (!st.ok()) {
+    gPendingRead = false;
+    gPendingStartMs = 0;
   }
   return st;
 }
 
-void scheduleFollowupMeasurement() {
-  if (gStressRemaining > 0) {
-    --gStressRemaining;
-    if (gStressRemaining == 0) {
-      Serial.println("stress done");
-      if (!gWatchEnabled) {
-        return;
-      }
-    }
+bool scheduleStressAttempt() {
+  if (!gStressStats.active) {
+    return false;
+  }
+  if (gStressRemaining <= 0) {
+    finishStressStats();
+    return false;
   }
 
-  if (!gWatchEnabled && gStressRemaining == 0) {
+  --gStressRemaining;
+  ++gStressStats.attempts;
+  const app_driver::Status st = scheduleMeasurement();
+  if (!st.ok() && !st.inProgress()) {
+    noteStressError(st);
+    printStatus(st);
+    printStressProgress(static_cast<uint32_t>(gStressStats.attempts),
+                        static_cast<uint32_t>(gStressStats.target),
+                        static_cast<uint32_t>(gStressStats.success),
+                        gStressStats.errors);
+    finishStressStats();
+    return false;
+  }
+  return true;
+}
+
+void scheduleFollowupMeasurement() {
+  if (gStressStats.active) {
+    if (gStressRemaining <= 0) {
+      finishStressStats();
+      return;
+    }
+    (void)scheduleStressAttempt();
+    return;
+  }
+
+  if (!gWatchEnabled) {
     return;
   }
 
@@ -251,7 +768,6 @@ void scheduleFollowupMeasurement() {
   if (!st.ok() && !st.inProgress()) {
     printStatus(st);
     gWatchEnabled = false;
-    gStressRemaining = 0;
   }
 }
 
@@ -262,14 +778,40 @@ void handleMeasurementReady() {
 
   app_driver::Measurement sample;
   const app_driver::Status st = device.getMeasurement(sample);
+  const uint32_t latencyMs =
+      (gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+  gPendingRead = false;
+  gPendingStartMs = 0;
   if (!st.ok()) {
     printStatus(st);
-    cancelQueuedWork();
+    if (gStressStats.active) {
+      noteStressError(st);
+      printStressProgress(static_cast<uint32_t>(gStressStats.attempts),
+                          static_cast<uint32_t>(gStressStats.target),
+                          static_cast<uint32_t>(gStressStats.success),
+                          gStressStats.errors);
+      if (gStressRemaining <= 0) {
+        finishStressStats();
+      } else {
+        (void)scheduleStressAttempt();
+      }
+      return;
+    }
+    gWatchEnabled = false;
     return;
   }
 
+  if (gVerbose && latencyMs > 0U) {
+    Serial.printf("  latency_ms=%lu\n", static_cast<unsigned long>(latencyMs));
+  }
   printMeasurement(sample);
-  gPendingRead = false;
+  if (gStressStats.active) {
+    updateStressStats(sample);
+    printStressProgress(static_cast<uint32_t>(gStressStats.attempts),
+                        static_cast<uint32_t>(gStressStats.target),
+                        static_cast<uint32_t>(gStressStats.success),
+                        gStressStats.errors);
+  }
   scheduleFollowupMeasurement();
 }
 
@@ -283,29 +825,11 @@ void handlePendingTransitions() {
       current == app_driver::PendingCommand::NONE) {
     switch (gLastPending) {
       case app_driver::PendingCommand::SELF_TEST: {
-        uint16_t raw = 0;
-        const app_driver::Status rawSt = device.getSelfTestRawResult(raw);
-        printStatus(rawSt);
-        if (rawSt.ok()) {
-          Serial.printf("selftest=0x%04X pass=%s\n",
-                        static_cast<unsigned>(raw),
-                        yesNo(raw == 0U));
-        }
+        printSelfTestResultView();
       } break;
 
       case app_driver::PendingCommand::FORCED_RECALIBRATION: {
-        uint16_t raw = 0;
-        const app_driver::Status rawSt = device.getForcedRecalibrationRawResult(raw);
-        printStatus(rawSt);
-        if (rawSt.ok()) {
-          Serial.printf("frc_raw=0x%04X\n", static_cast<unsigned>(raw));
-        }
-        int16_t correctionPpm = 0;
-        const app_driver::Status st = device.getForcedRecalibrationCorrectionPpm(correctionPpm);
-        printStatus(st);
-        if (st.ok()) {
-          Serial.printf("frc_correction=%d ppm\n", static_cast<int>(correctionPpm));
-        }
+        printFrcResultView();
       } break;
 
       default:
@@ -317,6 +841,130 @@ void handlePendingTransitions() {
   }
 
   gLastPending = current;
+}
+
+void runDiagnostics() {
+  struct DiagStats {
+    uint32_t pass = 0;
+    uint32_t fail = 0;
+    uint32_t skip = 0;
+  } stats;
+
+  enum class Outcome : uint8_t { PASS, FAIL, SKIP };
+  auto report = [&](const char* name, Outcome outcome, const char* note) {
+    const bool passed = (outcome == Outcome::PASS);
+    const bool skipped = (outcome == Outcome::SKIP);
+    const char* color = skipped ? LOG_COLOR_YELLOW : LOG_COLOR_RESULT(passed);
+    const char* tag = skipped ? "SKIP" : (passed ? "PASS" : "FAIL");
+    Serial.printf("  [%s%s%s] %s", color, tag, LOG_COLOR_RESET, name);
+    if (note != nullptr && note[0] != '\0') {
+      Serial.printf(" - %s", note);
+    }
+    Serial.println();
+    if (skipped) {
+      ++stats.skip;
+    } else if (passed) {
+      ++stats.pass;
+    } else {
+      ++stats.fail;
+    }
+  };
+  auto reportCheck = [&](const char* name, bool passed, const char* note) {
+    report(name, passed ? Outcome::PASS : Outcome::FAIL, note);
+  };
+  auto reportSkip = [&](const char* name, const char* note) {
+    report(name, Outcome::SKIP, note);
+  };
+
+  Serial.println("=== SCD41 diagnostics ===");
+  HealthSnapshot<app_driver::Device> before;
+  before.capture(device);
+  const app_driver::Status probeSt = device.probe();
+  HealthSnapshot<app_driver::Device> afterProbe;
+  afterProbe.capture(device);
+
+  reportCheck("probe responds",
+              probeSt.ok(),
+              probeSt.ok() ? "" : app_driver::errToString(probeSt.code));
+  reportCheck("probe no-health-side-effects", healthMatches(before, afterProbe), "");
+
+  if (!device.isInitialized()) {
+    reportSkip("driver diagnostics", "begin() not called");
+    Serial.printf("Diagnostics: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
+                  goodIfNonZeroColor(stats.pass),
+                  static_cast<unsigned long>(stats.pass),
+                  LOG_COLOR_RESET,
+                  goodIfZeroColor(stats.fail),
+                  static_cast<unsigned long>(stats.fail),
+                  LOG_COLOR_RESET,
+                  skipCountColor(stats.skip),
+                  static_cast<unsigned long>(stats.skip),
+                  LOG_COLOR_RESET);
+    return;
+  }
+
+  uint64_t serial = 0;
+  app_driver::Status st = device.readSerialNumber(serial);
+  reportCheck("read serial number",
+              st.ok(),
+              st.ok() ? "" : app_driver::errToString(st.code));
+  reportCheck("serial nonzero", st.ok() && serial != 0ULL, "");
+
+  app_driver::SensorVariant variant = app_driver::SensorVariant::UNKNOWN;
+  st = device.readSensorVariant(variant);
+  reportCheck("read sensor variant",
+              st.ok(),
+              st.ok() ? "" : app_driver::errToString(st.code));
+  reportCheck("variant recognized",
+              st.ok() && variant != app_driver::SensorVariant::UNKNOWN,
+              "");
+
+  app_driver::SettingsSnapshot snapshot;
+  st = device.getSettings(snapshot);
+  reportCheck("getSettings snapshot",
+              st.ok(),
+              st.ok() ? "" : app_driver::errToString(st.code));
+  if (st.ok()) {
+    const bool busyMatches =
+        snapshot.busy == (snapshot.pendingCommand != app_driver::PendingCommand::NONE);
+    reportCheck("snapshot busy flag consistent", busyMatches, "");
+  }
+
+  if (device.pendingCommand() != app_driver::PendingCommand::NONE ||
+      device.operatingMode() == app_driver::OperatingMode::POWER_DOWN) {
+    reportSkip("readSettings live snapshot", "driver busy or powered down");
+    reportSkip("read data-ready status", "driver busy or powered down");
+  } else {
+    st = device.readSettings(snapshot);
+    reportCheck("readSettings live snapshot",
+                st.ok(),
+                st.ok() ? "" : app_driver::errToString(st.code));
+    if (st.ok()) {
+      noteSettingsCache(snapshot);
+      if (snapshot.operatingMode == app_driver::OperatingMode::IDLE) {
+        reportCheck("idle live settings available", snapshot.liveConfigValid, "");
+      } else {
+        reportCheck("periodic snapshot returned", true, "idle-only settings stay partial");
+      }
+    }
+
+    app_driver::DataReadyStatus ready = {};
+    st = device.readDataReadyStatus(ready);
+    reportCheck("read data-ready status",
+                st.ok(),
+                st.ok() ? "" : app_driver::errToString(st.code));
+  }
+
+  Serial.printf("Diagnostics: pass=%s%lu%s fail=%s%lu%s skip=%s%lu%s\n",
+                goodIfNonZeroColor(stats.pass),
+                static_cast<unsigned long>(stats.pass),
+                LOG_COLOR_RESET,
+                goodIfZeroColor(stats.fail),
+                static_cast<unsigned long>(stats.fail),
+                LOG_COLOR_RESET,
+                skipCountColor(stats.skip),
+                static_cast<unsigned long>(stats.skip),
+                LOG_COLOR_RESET);
 }
 
 void printHelp() {
@@ -343,6 +991,7 @@ void printHelp() {
   helpItem("end", "End the current driver session");
   helpItem("probe", "Probe device without health tracking");
   helpItem("recover", "Attempt manual driver recovery");
+  helpItem("diag", "Run safe diagnostics and health invariants");
   helpItem("drv", "Print driver state and health");
   helpItem("drv1", "Print compact health view");
   helpItem("cfg", "Show current example config");
@@ -350,12 +999,13 @@ void printHelp() {
   helpItem("verbose [0|1]", "Enable or disable verbose polling logs");
 
   helpSection("Measurement");
-  helpItem("read", "Request one measurement");
+  helpItem("read", "Request one managed measurement");
+  helpItem("fetch", "Directly read a ready measurement now");
   helpItem("raw", "Print the last raw sample");
   helpItem("comp", "Print the last compensated sample");
   helpItem("dataready", "Read get_data_ready_status");
   helpItem("watch [0|1]", "Continuously schedule measurements");
-  helpItem("stress [N]", "Run N measurement cycles");
+  helpItem("stress [N]", "Async measurement stress test with summary");
   helpItem("single [full|rht]", "Show or set idle single-shot mode");
   helpItem("single_start [full|rht]", "Start a one-shot full or RHT-only command");
   helpItem("convert <rawT> <rawRH> [co2]", "Convert raw values using library helpers");
@@ -382,7 +1032,9 @@ void printHelp() {
   helpItem("reinit", "Reload persisted settings into RAM");
   helpItem("factory_reset", "Perform factory reset");
   helpItem("selftest", "Run the 10 s self-test");
+  helpItem("selftest_result", "Print the current self-test result state");
   helpItem("frc <reference_ppm>", "Start forced recalibration");
+  helpItem("frc_result", "Print the current forced recalibration result state");
 
   helpSection("Raw Commands");
   helpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
@@ -455,6 +1107,7 @@ void processCommand(const String& cmdLine) {
 
   if (head == "begin") {
     cancelQueuedWork();
+    clearSettingsCache();
     const app_driver::Status st = device.begin(gConfig);
     gLastPending = device.pendingCommand();
     printStatus(st);
@@ -463,6 +1116,7 @@ void processCommand(const String& cmdLine) {
 
   if (head == "end") {
     cancelQueuedWork();
+    clearSettingsCache();
     device.end();
     gLastPending = device.pendingCommand();
     Serial.println("driver ended");
@@ -470,12 +1124,31 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "probe") {
-    printStatus(device.probe());
+    HealthSnapshot<app_driver::Device> before;
+    before.capture(device);
+    const app_driver::Status st = device.probe();
+    HealthSnapshot<app_driver::Device> after;
+    after.capture(device);
+    printStatus(st);
+    Serial.println("  Health changes:");
+    printHealthDiff(before, after);
     return;
   }
 
   if (head == "recover") {
-    printStatus(device.recover());
+    HealthSnapshot<app_driver::Device> before;
+    before.capture(device);
+    const app_driver::Status st = device.recover();
+    HealthSnapshot<app_driver::Device> after;
+    after.capture(device);
+    printStatus(st);
+    Serial.println("  Health changes:");
+    printHealthDiff(before, after);
+    return;
+  }
+
+  if (head == "diag") {
+    runDiagnostics();
     return;
   }
 
@@ -501,6 +1174,27 @@ void processCommand(const String& cmdLine) {
 
   if (head == "read") {
     printStatus(scheduleMeasurement());
+    return;
+  }
+
+  if (head == "fetch") {
+    app_driver::Measurement sample;
+    const app_driver::Status st = device.readMeasurement(sample);
+    if (!st.ok()) {
+      printStatus(st);
+      return;
+    }
+    gPendingRead = false;
+    gPendingStartMs = 0;
+    printMeasurement(sample);
+    if (gStressStats.active) {
+      updateStressStats(sample);
+      printStressProgress(static_cast<uint32_t>(gStressStats.attempts),
+                          static_cast<uint32_t>(gStressStats.target),
+                          static_cast<uint32_t>(gStressStats.success),
+                          gStressStats.errors);
+    }
+    scheduleFollowupMeasurement();
     return;
   }
 
@@ -533,8 +1227,10 @@ void processCommand(const String& cmdLine) {
       printStatus(st);
       return;
     }
-    Serial.printf("data_ready=%s raw=0x%04X\n",
+    Serial.printf("data_ready=%s%s%s raw=0x%04X\n",
+                  ready.ready ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
                   yesNo(ready.ready),
+                  LOG_COLOR_RESET,
                   static_cast<unsigned>(ready.raw));
     return;
   }
@@ -551,8 +1247,18 @@ void processCommand(const String& cmdLine) {
       return;
     }
 
+    if (enabled && gStressStats.active) {
+      LOGW("watch is disabled while stress is active");
+      return;
+    }
+
     gWatchEnabled = enabled;
     Serial.printf("watch=%s\n", yesNo(gWatchEnabled));
+    if (gWatchEnabled && device.measurementReady()) {
+      gPendingRead = true;
+      gPendingStartMs = 0;
+      return;
+    }
     if (gWatchEnabled && !gPendingRead && !device.measurementReady()) {
       const app_driver::Status st = scheduleMeasurement();
       if (!st.ok() && !st.inProgress()) {
@@ -580,17 +1286,40 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "stress") {
-    uint32_t count = 10;
-    if (tail.length() > 0U && !cmd::parseU32(tail, count)) {
+    if (tail.length() == 0U) {
+      Serial.printf("stress_active=%s target=%d attempts=%d success=%d errors=%lu remaining=%d\n",
+                    yesNo(gStressStats.active),
+                    gStressStats.target,
+                    gStressStats.attempts,
+                    gStressStats.success,
+                    static_cast<unsigned long>(gStressStats.errors),
+                    gStressRemaining);
+      return;
+    }
+
+    uint32_t count = DEFAULT_STRESS_COUNT;
+    if (!cmd::parseU32(tail, count)) {
       LOGW("Expected stress [count]");
       return;
     }
-    if (count == 0U) {
-      count = 1U;
+    if (count == 0U || count > MAX_STRESS_COUNT) {
+      Serial.printf("  Expected stress [1..%lu]\n", static_cast<unsigned long>(MAX_STRESS_COUNT));
+      return;
     }
+
+    cancelQueuedWork();
+    gWatchEnabled = false;
+    resetStressStats(static_cast<int>(count));
     gStressRemaining = static_cast<int>(count);
-    Serial.printf("stress=%d\n", gStressRemaining);
-    printStatus(scheduleMeasurement());
+    Serial.printf("stress_target=%lu\n", static_cast<unsigned long>(count));
+    if (device.measurementReady()) {
+      --gStressRemaining;
+      ++gStressStats.attempts;
+      gPendingRead = true;
+      gPendingStartMs = 0;
+      return;
+    }
+    (void)scheduleStressAttempt();
     return;
   }
 
@@ -607,6 +1336,7 @@ void processCommand(const String& cmdLine) {
     }
     if (st.inProgress()) {
       gPendingRead = true;
+      gPendingStartMs = millis();
     }
     printStatus(st);
     return;
@@ -850,12 +1580,18 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "factory_reset") {
+    clearSettingsCache();
     printStatus(device.startFactoryReset());
     return;
   }
 
   if (head == "selftest") {
     printStatus(device.startSelfTest());
+    return;
+  }
+
+  if (head == "selftest_result") {
+    printSelfTestResultView();
     return;
   }
 
@@ -866,6 +1602,11 @@ void processCommand(const String& cmdLine) {
       return;
     }
     printStatus(device.startForcedRecalibration(referencePpm));
+    return;
+  }
+
+  if (head == "frc_result") {
+    printFrcResultView();
     return;
   }
 
@@ -995,12 +1736,14 @@ void processCommand(const String& cmdLine) {
 void setup() {
   log_begin(115200);
   delay(100);
-  LOGI("=== SCD41 Bringup Example ===");
+  LOGI("=== SCD41 Bringup CLI ===");
+  printVersionInfo();
 
   if (!board::initI2c()) {
     LOGE("Wire init failed");
     return;
   }
+  bus_diag::scan(SCD41::cmd::I2C_ADDRESS);
 
   gConfig.i2cWrite = transport::wireWrite;
   gConfig.i2cWriteRead = transport::wireWriteRead;
@@ -1011,8 +1754,17 @@ void setup() {
 
   const app_driver::Status st = device.begin(gConfig);
   gLastPending = device.pendingCommand();
-  printStatus(st);
+  if (!st.ok()) {
+    LOGE("Device initialization failed; CLI remains available for probe/recover");
+    printStatus(st);
+  } else {
+    printDriverHealth();
+  }
+
+  Serial.println();
+  Serial.println("Type 'help' for commands");
   printHelp();
+  printPrompt();
 }
 
 void loop() {
@@ -1036,5 +1788,6 @@ void loop() {
   String line;
   if (cli_shell::readLine(line)) {
     processCommand(line);
+    printPrompt();
   }
 }
