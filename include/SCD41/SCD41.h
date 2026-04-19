@@ -59,6 +59,12 @@ struct DataReadyStatus {
   bool ready = false; ///< True when `(raw & 0x07FF) != 0`
 };
 
+/// Cached device identity derived from `get_serial_number`.
+struct Identity {
+  uint64_t serialNumber = 0; ///< 48-bit serial number packed into the low bits
+  SensorVariant variant = SensorVariant::UNKNOWN; ///< Variant decoded from the serial number
+};
+
 /// Converted measurement sample in engineering units.
 struct Measurement {
   uint16_t co2Ppm = 0;       ///< CO2 concentration in ppm
@@ -172,7 +178,9 @@ public:
   /// - in PERIODIC / LOW_POWER_PERIODIC: schedules the next fetch
   Status requestMeasurement();
 
+  bool measurementPending() const { return _measurementRequested; } ///< True while a sample fetch is still pending inside the driver
   bool measurementReady() const { return _measurementReady; } ///< True when `getMeasurement()` can consume a cached sample
+  uint32_t measurementReadyMs() const { return _measurementReadyMs; } ///< Earliest time a pending measurement may become available
   bool lastSampleCo2Valid() const { return _lastSampleCo2Valid; } ///< False for RHT-only single-shot samples
   uint32_t sampleTimestampMs() const { return _sampleTimestampMs; } ///< Timestamp of the cached sample
   uint32_t sampleAgeMs(uint32_t nowMs) const {
@@ -184,6 +192,8 @@ public:
   Status readMeasurement(Measurement& out);
   /// Consume the cached converted sample and clear the ready flag.
   Status getMeasurement(Measurement& out);
+  /// Return the most recently cached converted sample without clearing the ready flag.
+  Status getLastMeasurement(Measurement& out) const;
   /// Return the last raw sample without clearing the ready flag.
   Status getRawSample(RawSample& out) const;
   /// Return the last fixed-point converted sample without clearing the ready flag.
@@ -218,6 +228,8 @@ public:
 
   /// Read and cache the 48-bit serial number.
   Status readSerialNumber(uint64_t& serial);
+  /// Return the cached identity, reading and caching the serial number first if needed.
+  Status getIdentity(Identity& out);
   /// Return the observed sensor variant, probing the serial number if needed.
   Status readSensorVariant(SensorVariant& out);
 

@@ -420,6 +420,68 @@ void test_direct_read_measurement_reads_periodic_sample() {
   TEST_ASSERT_EQUAL_HEX16(cmd::CMD_READ_MEASUREMENT, lastWriteCommand(bus));
 }
 
+void test_measurement_helpers_track_pending_and_preserve_last_sample() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 550, 21000, 33000);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_FALSE(device.measurementPending());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  TEST_ASSERT_TRUE(device.measurementPending());
+  TEST_ASSERT_EQUAL_UINT32(5100u, device.measurementReadyMs());
+
+  bus.nowMs = 5200;
+  bus.nowUs = 5200000;
+  device.tick(bus.nowMs);
+
+  TEST_ASSERT_FALSE(device.measurementPending());
+  TEST_ASSERT_TRUE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
+
+  Measurement last = {};
+  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
+  TEST_ASSERT_TRUE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT16(550u, last.co2Ppm);
+  TEST_ASSERT_TRUE(last.co2Valid);
+
+  Measurement sample = {};
+  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
+  TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT16(last.co2Ppm, sample.co2Ppm);
+  TEST_ASSERT_EQUAL(last.co2Valid, sample.co2Valid);
+
+  Measurement retained = {};
+  TEST_ASSERT_TRUE(device.getLastMeasurement(retained).ok());
+  TEST_ASSERT_EQUAL_UINT16(sample.co2Ppm, retained.co2Ppm);
+  TEST_ASSERT_EQUAL(sample.co2Valid, retained.co2Valid);
+}
+
+void test_get_identity_uses_cached_serial_and_variant() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  bus.lastWriteLen = 0;
+  memset(bus.lastWrite, 0, sizeof(bus.lastWrite));
+
+  Identity identity = {};
+  TEST_ASSERT_TRUE(device.getIdentity(identity).ok());
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
+  TEST_ASSERT_EQUAL_UINT64(device._serialNumber, identity.serialNumber);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device._sensorVariant),
+                    static_cast<uint8_t>(identity.variant));
+}
+
 void test_low_power_periodic_start_and_variant_guard() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
@@ -846,6 +908,8 @@ int main(int, char**) {
   RUN_TEST(test_direct_read_measurement_completes_pending_single_shot);
   RUN_TEST(test_periodic_start_request_and_stop);
   RUN_TEST(test_direct_read_measurement_reads_periodic_sample);
+  RUN_TEST(test_measurement_helpers_track_pending_and_preserve_last_sample);
+  RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
   RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
   RUN_TEST(test_temperature_offset_roundtrip);

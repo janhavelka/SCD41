@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
 - Public raw command helpers (`writeCommand`, `writeCommandWithData`, `readCommand`, `readWordCommand`, `readWordsCommand`) plus named single-shot and `readMeasurement()` command helpers.
 - Raw self-test/FRC result accessors and ambient-pressure encode/decode helpers.
+- Small public convenience helpers for application code: `measurementPending()`, `measurementReadyMs()`, `getLastMeasurement()`, and `getIdentity()`.
 - Native coverage for power-up delay handling, direct `read_measurement` reads, raw-command helper restrictions/error paths, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
 
 ### Removed

@@ -546,23 +546,16 @@ void printFrcResultView() {
 }
 
 void printIdentity() {
-  uint64_t serial = 0;
-  const app_driver::Status serialSt = device.readSerialNumber(serial);
-  if (!serialSt.ok()) {
-    printStatus(serialSt);
-    return;
-  }
-
-  app_driver::SensorVariant variant = app_driver::SensorVariant::UNKNOWN;
-  const app_driver::Status variantSt = device.readSensorVariant(variant);
-  if (!variantSt.ok()) {
-    printStatus(variantSt);
+  app_driver::Identity identity;
+  const app_driver::Status st = device.getIdentity(identity);
+  if (!st.ok()) {
+    printStatus(st);
     return;
   }
 
   Serial.printf("variant=%s serial=0x%012llX\n",
-                app_driver::variantToString(variant),
-                static_cast<unsigned long long>(serial));
+                app_driver::variantToString(identity.variant),
+                static_cast<unsigned long long>(identity.serialNumber));
 }
 
 void printConfigView() {
@@ -600,7 +593,7 @@ void printDriverView() {
     Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
     Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
     Serial.printf("  busy: %s\n", yesNo(device.isBusy()));
-    Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
+    Serial.printf("  measurement_pending: %s\n", yesNo(device.measurementPending()));
     Serial.printf("  measurement_ready: %s\n", yesNo(device.measurementReady()));
     Serial.printf("  watch: %s\n", yesNo(gWatchEnabled));
     Serial.printf("  stress_active: %s\n", yesNo(gStressStats.active));
@@ -614,7 +607,7 @@ void printDriverView() {
     Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
     Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
     Serial.printf("  busy: %s\n", yesNo(device.isBusy()));
-    Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
+    Serial.printf("  measurement_pending: %s\n", yesNo(device.measurementPending()));
     Serial.printf("  measurement_ready: %s\n", yesNo(device.measurementReady()));
     return;
   }
@@ -626,10 +619,10 @@ void printDriverView() {
   Serial.printf("  pending: %s\n", app_driver::pendingToString(snap.pendingCommand));
   Serial.printf("  busy: %s\n", yesNo(snap.busy));
   Serial.printf("  command_ready_ms: %lu\n", static_cast<unsigned long>(snap.commandReadyMs));
-  Serial.printf("  measurement_pending: %s\n", yesNo(gPendingRead));
+  Serial.printf("  measurement_pending: %s\n", yesNo(device.measurementPending()));
   Serial.printf("  measurement_ready: %s\n", yesNo(snap.measurementReady));
   Serial.printf("  measurement_ready_ms: %lu\n",
-                static_cast<unsigned long>(snap.measurementReadyMs));
+                static_cast<unsigned long>(device.measurementReadyMs()));
   Serial.printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
   Serial.printf("  sample_age_ms: %lu\n",
                 static_cast<unsigned long>(device.sampleAgeMs(millis())));
@@ -903,20 +896,14 @@ void runDiagnostics() {
     return;
   }
 
-  uint64_t serial = 0;
-  app_driver::Status st = device.readSerialNumber(serial);
-  reportCheck("read serial number",
+  app_driver::Identity identity;
+  app_driver::Status st = device.getIdentity(identity);
+  reportCheck("get identity",
               st.ok(),
               st.ok() ? "" : app_driver::errToString(st.code));
-  reportCheck("serial nonzero", st.ok() && serial != 0ULL, "");
-
-  app_driver::SensorVariant variant = app_driver::SensorVariant::UNKNOWN;
-  st = device.readSensorVariant(variant);
-  reportCheck("read sensor variant",
-              st.ok(),
-              st.ok() ? "" : app_driver::errToString(st.code));
+  reportCheck("serial nonzero", st.ok() && identity.serialNumber != 0ULL, "");
   reportCheck("variant recognized",
-              st.ok() && variant != app_driver::SensorVariant::UNKNOWN,
+              st.ok() && identity.variant != app_driver::SensorVariant::UNKNOWN,
               "");
 
   app_driver::SettingsSnapshot snapshot;

@@ -40,8 +40,10 @@ The driver uses a managed asynchronous model:
 - `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
 - `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion.
 - `requestMeasurement()` schedules work using the current operating mode.
+- `measurementPending()` and `measurementReadyMs()` expose the driver's local sample-fetch state directly, so applications do not need to mirror it with their own shadow flags.
 - `readMeasurement()` is the direct helper for the sensor's `read_measurement` command. It completes a due single-shot request or fetches a ready periodic sample while keeping the cached sample state coherent.
 - `getMeasurement()` returns the cached converted sample and clears the ready flag.
+- `getLastMeasurement()` returns the most recent converted sample without consuming the ready flag.
 
 This split keeps long device operations explicit and predictable. Public calls do not hide multi-second waits behind a single synchronous API.
 
@@ -63,11 +65,11 @@ This split keeps long device operations explicit and predictable. Public calls d
 The public driver follows the same family conventions as the mature workspace libraries:
 
 - lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
-- measurement flow: `requestMeasurement()`, `readMeasurement()`, `measurementReady()`, `getMeasurement()`, `getRawSample()`, `getCompensatedSample()`
+- measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`
 - state and health: `state()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
 - measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
-- mode/query helpers: `getSingleShotMode()`, `readSerialNumber()`, `readSensorVariant()`
+- mode/query helpers: `getSingleShotMode()`, `getIdentity()`, `readSerialNumber()`, `readSensorVariant()`
 - named single-shot commands: `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()`
 - compensation/config: `setTemperatureOffsetC()`, `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
@@ -195,12 +197,11 @@ void setup() {
 void loop() {
   sensor.tick(millis());
 
-  static bool pending = false;
-  if (!pending && sensor.requestMeasurement().inProgress()) {
-    pending = true;
+  if (!sensor.measurementPending() && !sensor.measurementReady()) {
+    (void)sensor.requestMeasurement();
   }
 
-  if (pending && sensor.measurementReady()) {
+  if (sensor.measurementReady()) {
     SCD41::Measurement sample;
     if (sensor.getMeasurement(sample).ok()) {
       Serial.printf("CO2=%u ppm T=%.2f C RH=%.2f %%\n",
@@ -208,13 +209,14 @@ void loop() {
                     sample.temperatureC,
                     sample.humidityPct);
     }
-    pending = false;
   }
 }
 ```
 
 This example uses the cached-sample flow. If you want a direct command-style read path, call
 `readMeasurement()` once a single-shot deadline has elapsed or a periodic sample is reported ready.
+If you need the latest converted sample for logging or diagnostics without consuming the ready flag,
+use `getLastMeasurement()`.
 
 ## Example CLI
 

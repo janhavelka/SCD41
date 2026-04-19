@@ -375,6 +375,21 @@ Status SCD41::getMeasurement(Measurement& out) {
   return Status::Ok();
 }
 
+Status SCD41::getLastMeasurement(Measurement& out) const {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_sampleTimestampMs == 0) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
+  }
+
+  out.co2Ppm = _rawSample.rawCo2;
+  out.temperatureC = convertTemperatureC(_rawSample.rawTemperature);
+  out.humidityPct = convertHumidityPct(_rawSample.rawHumidity);
+  out.co2Valid = _lastSampleCo2Valid;
+  return Status::Ok();
+}
+
 Status SCD41::getRawSample(RawSample& out) const {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
@@ -598,6 +613,20 @@ Status SCD41::readSerialNumber(uint64_t& serial) {
                   static_cast<uint64_t>(words[2]);
   _serialNumberValid = true;
   serial = _serialNumber;
+  return Status::Ok();
+}
+
+Status SCD41::getIdentity(Identity& out) {
+  if (!_serialNumberValid) {
+    uint64_t serial = 0;
+    Status st = readSerialNumber(serial);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  out.serialNumber = _serialNumber;
+  out.variant = _sensorVariant;
   return Status::Ok();
 }
 

@@ -18,6 +18,7 @@ using Config = api::Config;
 using DriverState = api::DriverState;
 using TransportCapability = api::TransportCapability;
 using SettingsSnapshot = api::SettingsSnapshot;
+using Identity = api::Identity;
 using Measurement = api::Measurement;
 using RawSample = api::RawSample;
 using CompensatedSample = api::CompensatedSample;
