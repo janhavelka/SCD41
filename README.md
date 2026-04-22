@@ -224,12 +224,22 @@ use `getLastMeasurement()`.
 
 Main command groups:
 
-- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `drv`, `drv1`, `cfg`, `settings`, `verbose`
-- Measurement: `read`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
+- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
+- Measurement: `read`, `fetch`, `sample`, `last`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
 - Mode and power: `mode`, `periodic`, `sleep`, `wake`
 - Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
-- Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `frc`
+- Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `selftest_result`, `frc`, `frc_result`
 - Raw commands: `command write`, `command write_data`, `command read`, `command read_word`, `command read_words`
+
+`read` follows the managed driver path: it prints a sample immediately if one is already ready, or
+it schedules a managed fetch when no sample is pending yet. `fetch` is the explicit direct-read path
+for a sample that is expected to be ready now. `verbose` follows the family CLI convention and acts
+as a toggle with no argument, or as an explicit setter with `0` / `1`. `status` is the concise
+chip/runtime view for pending commands, timing, and live `get_data_ready_status`, while `sample` /
+`last` expose the most recently cached converted, raw, and fixed-point sample without consuming it.
+Deferred operations such as self-test, forced recalibration, wake-up, stop-periodic, reinit, and
+factory reset now print explicit pending-work and completion summaries so the operator can follow the
+chip state without polling internal flags manually.
 
 The raw command CLI is intentionally limited to immediate diagnostic commands. Managed transitions such
 as periodic-mode entry/exit, wake-up, self-test, and forced recalibration should be driven through the

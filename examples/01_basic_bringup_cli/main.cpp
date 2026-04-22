@@ -84,6 +84,10 @@ const char* yesNo(bool value) {
   return value ? "yes" : "no";
 }
 
+const char* onOff(bool value) {
+  return value ? "ON" : "OFF";
+}
+
 const char* statusColor(const app_driver::Status& st) {
   if (st.ok()) {
     return LOG_COLOR_GREEN;
@@ -110,6 +114,10 @@ const char* successRateColor(float pct) {
 
 const char* skipCountColor(uint32_t count) {
   return (count > 0U) ? LOG_COLOR_YELLOW : LOG_COLOR_GRAY;
+}
+
+const char* toggleColor(bool enabled) {
+  return enabled ? LOG_COLOR_GREEN : LOG_COLOR_GRAY;
 }
 
 const char* singleShotModeToString(app_driver::SingleShotMode mode) {
@@ -222,6 +230,10 @@ void printKnownU32Field(const char* label, bool known, uint32_t value, const cha
 
 void printPrompt() {
   Serial.print("> ");
+}
+
+void printToggleState(const char* label, bool enabled) {
+  Serial.printf("  %s: %s%s%s\n", label, toggleColor(enabled), onOff(enabled), LOG_COLOR_RESET);
 }
 
 uint32_t stressProgressStep(uint32_t total) {
@@ -406,7 +418,8 @@ void printVersionInfo() {
   Serial.printf("  Library:       %s %s\n", app_driver::driverName(), app_driver::version());
   Serial.printf("  Full:          %s\n", app_driver::versionFull());
   Serial.printf("  Built:         %s\n", app_driver::buildTimestamp());
-  Serial.printf("  Commit:        %s (%s)\n", app_driver::gitCommit(), app_driver::gitStatus());
+  Serial.printf("  Commit:        %s\n", app_driver::gitCommit());
+  Serial.printf("  Status:        %s\n", app_driver::gitStatus());
 }
 
 void printMeasurement(const app_driver::Measurement& sample) {
@@ -446,6 +459,8 @@ void printDriverHealth() {
                                    static_cast<float>(total))
                                 : 0.0f;
   const app_driver::Status lastErr = device.lastError();
+  const uint32_t lastOkMs = device.lastOkMs();
+  const uint32_t lastErrorMs = device.lastErrorMs();
 
   Serial.println("=== Driver Health ===");
   Serial.printf("  State: %s%s%s\n",
@@ -472,20 +487,29 @@ void printDriverHealth() {
                 successRateColor(successRate),
                 successRate,
                 LOG_COLOR_RESET);
-  if (device.lastOkMs() > 0U) {
-    Serial.printf("  Last OK: %lu ms ago\n",
-                  static_cast<unsigned long>(now - device.lastOkMs()));
+  if (lastOkMs > 0U) {
+    Serial.printf("  Last OK: %lu ms ago (at %lu ms)\n",
+                  static_cast<unsigned long>(now - lastOkMs),
+                  static_cast<unsigned long>(lastOkMs));
   } else {
     Serial.println("  Last OK: never");
   }
-  if (device.lastErrorMs() > 0U) {
-    Serial.printf("  Last error: %lu ms ago\n",
-                  static_cast<unsigned long>(now - device.lastErrorMs()));
+  if (lastErrorMs > 0U) {
+    Serial.printf("  Last error: %lu ms ago (at %lu ms)\n",
+                  static_cast<unsigned long>(now - lastErrorMs),
+                  static_cast<unsigned long>(lastErrorMs));
   } else {
     Serial.println("  Last error: never");
   }
   if (!lastErr.ok()) {
-    printStatus(lastErr);
+    Serial.printf("  Error code: %s%s%s\n",
+                  LOG_COLOR_RED,
+                  app_driver::errToString(lastErr.code),
+                  LOG_COLOR_RESET);
+    Serial.printf("  Error detail: %ld\n", static_cast<long>(lastErr.detail));
+    if (lastErr.msg != nullptr && lastErr.msg[0] != '\0') {
+      Serial.printf("  Error msg: %s\n", lastErr.msg);
+    }
   }
 }
 
@@ -499,7 +523,6 @@ void printSelfTestResultView() {
 
   uint16_t raw = 0;
   const app_driver::Status st = device.getSelfTestResult(raw);
-  printStatus(st);
   if (st.ok()) {
     Serial.printf("  raw: 0x%04X\n", static_cast<unsigned>(raw));
     Serial.printf("  pass: %s%s%s\n",
@@ -508,6 +531,7 @@ void printSelfTestResultView() {
                   LOG_COLOR_RESET);
     return;
   }
+  printStatus(st);
 
   const app_driver::Status rawSt = device.getSelfTestRawResult(raw);
   if (rawSt.ok()) {
@@ -531,9 +555,10 @@ void printFrcResultView() {
 
   int16_t correctionPpm = 0;
   const app_driver::Status st = device.getForcedRecalibrationCorrectionPpm(correctionPpm);
-  printStatus(st);
   if (st.ok()) {
     Serial.printf("  correction_ppm: %d\n", static_cast<int>(correctionPpm));
+  } else {
+    printStatus(st);
   }
 
   uint16_t raw = 0;
@@ -542,6 +567,195 @@ void printFrcResultView() {
     Serial.printf("  raw: 0x%04X\n", static_cast<unsigned>(raw));
   } else if (rawSt.code != st.code || rawSt.detail != st.detail) {
     printStatus(rawSt);
+  }
+}
+
+void printPendingWorkView(const char* title = "=== Pending Work ===") {
+  const uint32_t now = millis();
+  const uint32_t pendingLatencyMs =
+      (gPendingRead && gPendingStartMs > 0U) ? (now - gPendingStartMs) : 0U;
+
+  Serial.println(title);
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+  Serial.printf("  command_ready_ms: %lu\n", static_cast<unsigned long>(device.commandReadyMs()));
+  Serial.printf("  measurement_pending: %s%s%s\n",
+                diag::boolColor(device.measurementPending()),
+                yesNo(device.measurementPending()),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_ready: %s%s%s\n",
+                diag::boolColor(device.measurementReady()),
+                yesNo(device.measurementReady()),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_ready_ms: %lu\n",
+                static_cast<unsigned long>(device.measurementReadyMs()));
+  Serial.printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
+  printToggleState("Watch", gWatchEnabled);
+  printToggleState("Stress", gStressStats.active);
+}
+
+void printCommandCompletionView(app_driver::PendingCommand completed) {
+  Serial.println("=== Command Complete ===");
+  Serial.printf("  command: %s\n", app_driver::pendingToString(completed));
+  Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(device.pendingCommand()));
+  Serial.printf("  measurement_pending: %s\n", yesNo(device.measurementPending()));
+  Serial.printf("  measurement_ready: %s\n", yesNo(device.measurementReady()));
+}
+
+void printStatusView() {
+  const uint32_t now = millis();
+
+  Serial.println("=== Status ===");
+  Serial.printf("  initialized: %s%s%s\n",
+                diag::boolColor(device.isInitialized()),
+                yesNo(device.isInitialized()),
+                LOG_COLOR_RESET);
+  Serial.printf("  state: %s%s%s\n",
+                diag::stateColor(device.state()),
+                app_driver::stateToString(device.state()),
+                LOG_COLOR_RESET);
+  Serial.printf("  mode: %s\n", app_driver::modeToString(device.operatingMode()));
+
+  if (!device.isInitialized()) {
+    printPendingWorkView();
+    return;
+  }
+
+  app_driver::SettingsSnapshot snap;
+  const app_driver::Status st = device.getSettings(snap);
+  if (!st.ok()) {
+    printStatus(st);
+    return;
+  }
+
+  const uint32_t pendingLatencyMs =
+      (gPendingRead && gPendingStartMs > 0U) ? (now - gPendingStartMs) : 0U;
+
+  Serial.printf("  single_shot_mode: %s\n", singleShotModeToString(snap.singleShotMode));
+  Serial.printf("  pending: %s\n", app_driver::pendingToString(snap.pendingCommand));
+  Serial.printf("  busy: %s%s%s\n",
+                diag::boolColor(snap.busy),
+                yesNo(snap.busy),
+                LOG_COLOR_RESET);
+  Serial.printf("  command_ready_ms: %lu\n", static_cast<unsigned long>(snap.commandReadyMs));
+  Serial.printf("  measurement_pending: %s%s%s\n",
+                diag::boolColor(snap.measurementPending),
+                yesNo(snap.measurementPending),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_ready: %s%s%s\n",
+                diag::boolColor(snap.measurementReady),
+                yesNo(snap.measurementReady),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_ready_ms: %lu\n",
+                static_cast<unsigned long>(snap.measurementReadyMs));
+  Serial.printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
+  Serial.printf("  sample_timestamp_ms: %lu\n",
+                static_cast<unsigned long>(snap.sampleTimestampMs));
+  Serial.printf("  sample_age_ms: %lu\n",
+                static_cast<unsigned long>(device.sampleAgeMs(now)));
+  Serial.printf("  missed_samples_estimate: %lu\n",
+                static_cast<unsigned long>(snap.missedSamples));
+  Serial.printf("  last_sample_co2_valid: %s%s%s\n",
+                diag::boolColor(snap.lastSampleCo2Valid),
+                yesNo(snap.lastSampleCo2Valid),
+                LOG_COLOR_RESET);
+  Serial.printf("  selftest_ready: %s%s%s\n",
+                diag::boolColor(device.selfTestReady()),
+                yesNo(device.selfTestReady()),
+                LOG_COLOR_RESET);
+  Serial.printf("  frc_ready: %s%s%s\n",
+                diag::boolColor(device.forcedRecalibrationReady()),
+                yesNo(device.forcedRecalibrationReady()),
+                LOG_COLOR_RESET);
+  printToggleState("Watch", gWatchEnabled);
+  printToggleState("Stress", gStressStats.active);
+
+  if (snap.pendingCommand != app_driver::PendingCommand::NONE) {
+    Serial.printf("  data_ready: %sbusy (%s)%s\n",
+                  LOG_COLOR_GRAY,
+                  app_driver::pendingToString(snap.pendingCommand),
+                  LOG_COLOR_RESET);
+    return;
+  }
+  if (snap.operatingMode == app_driver::OperatingMode::POWER_DOWN) {
+    Serial.printf("  data_ready: %spowered down%s\n", LOG_COLOR_GRAY, LOG_COLOR_RESET);
+    return;
+  }
+
+  app_driver::DataReadyStatus ready = {};
+  const app_driver::Status readySt = device.readDataReadyStatus(ready);
+  if (!readySt.ok()) {
+    printStatus(readySt);
+    return;
+  }
+  Serial.printf("  data_ready: %s%s%s raw=0x%04X\n",
+                ready.ready ? LOG_COLOR_GREEN : LOG_COLOR_YELLOW,
+                yesNo(ready.ready),
+                LOG_COLOR_RESET,
+                static_cast<unsigned>(ready.raw));
+}
+
+void printSampleView() {
+  const uint32_t now = millis();
+  Serial.println("=== Sample ===");
+
+  Serial.printf("  measurement_ready: %s%s%s\n",
+                diag::boolColor(device.measurementReady()),
+                yesNo(device.measurementReady()),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_pending: %s%s%s\n",
+                diag::boolColor(device.measurementPending()),
+                yesNo(device.measurementPending()),
+                LOG_COLOR_RESET);
+  Serial.printf("  measurement_ready_ms: %lu\n",
+                static_cast<unsigned long>(device.measurementReadyMs()));
+
+  if (!device.isInitialized()) {
+    printStatus(app_driver::Status::Error(app_driver::Err::NOT_INITIALIZED, "begin() not called"));
+    return;
+  }
+
+  app_driver::SettingsSnapshot snap;
+  const app_driver::Status snapSt = device.getSettings(snap);
+  if (!snapSt.ok()) {
+    printStatus(snapSt);
+    return;
+  }
+
+  Serial.printf("  sample_timestamp_ms: %lu\n",
+                static_cast<unsigned long>(snap.sampleTimestampMs));
+  Serial.printf("  sample_age_ms: %lu\n",
+                static_cast<unsigned long>(device.sampleAgeMs(now)));
+  Serial.printf("  missed_samples_estimate: %lu\n",
+                static_cast<unsigned long>(snap.missedSamples));
+  Serial.printf("  last_sample_co2_valid: %s%s%s\n",
+                diag::boolColor(snap.lastSampleCo2Valid),
+                yesNo(snap.lastSampleCo2Valid),
+                LOG_COLOR_RESET);
+
+  app_driver::Measurement sample;
+  const app_driver::Status st = device.getLastMeasurement(sample);
+  if (!st.ok()) {
+    printStatus(st);
+    return;
+  }
+
+  printMeasurement(sample);
+
+  app_driver::RawSample raw = {};
+  const app_driver::Status rawSt = device.getRawSample(raw);
+  if (rawSt.ok()) {
+    printRawSample(raw);
+  } else {
+    printStatus(rawSt);
+  }
+
+  app_driver::CompensatedSample comp = {};
+  const app_driver::Status compSt = device.getCompensatedSample(comp);
+  if (compSt.ok()) {
+    printCompensatedSample(comp);
+  } else if (compSt.code != rawSt.code || compSt.detail != rawSt.detail) {
+    printStatus(compSt);
   }
 }
 
@@ -825,10 +1039,12 @@ void handlePendingTransitions() {
         printFrcResultView();
       } break;
 
+      case app_driver::PendingCommand::SINGLE_SHOT:
+      case app_driver::PendingCommand::SINGLE_SHOT_RHT_ONLY:
+        break;
+
       default:
-        Serial.printf("completed=%s mode=%s\n",
-                      app_driver::pendingToString(gLastPending),
-                      app_driver::modeToString(device.operatingMode()));
+        printCommandCompletionView(gLastPending);
         break;
     }
   }
@@ -968,6 +1184,7 @@ void printHelp() {
 
   Serial.println();
   Serial.printf("%s=== SCD41 CLI Help ===%s\n", LOG_COLOR_CYAN, LOG_COLOR_RESET);
+  Serial.printf("Version: %s\n", app_driver::versionFull());
 
   helpSection("Common");
   helpItem("help / ?", "Show this help");
@@ -980,14 +1197,16 @@ void printHelp() {
   helpItem("recover", "Attempt manual driver recovery");
   helpItem("diag", "Run safe diagnostics and health invariants");
   helpItem("drv", "Print driver state and health");
-  helpItem("drv1", "Print compact health view");
+  helpItem("drv1 / state", "Print compact health view");
   helpItem("cfg", "Show current example config");
   helpItem("settings", "Show driver snapshot and live device settings");
-  helpItem("verbose [0|1]", "Enable or disable verbose polling logs");
+  helpItem("status", "Show concise chip/runtime status and data-ready state");
+  helpItem("verbose [0|1]", "Toggle or set verbose polling logs");
 
   helpSection("Measurement");
-  helpItem("read", "Request one managed measurement");
-  helpItem("fetch", "Directly read a ready measurement now");
+  helpItem("read", "Read now if ready, otherwise schedule one managed measurement");
+  helpItem("fetch", "Directly fetch a ready measurement now");
+  helpItem("sample / last", "Show the last cached converted/raw/fixed-point sample");
   helpItem("raw", "Print the last raw sample");
   helpItem("comp", "Print the last compensated sample");
   helpItem("dataready", "Read get_data_ready_status");
@@ -1029,6 +1248,9 @@ void printHelp() {
   helpItem("command read <cmd> <len>", "Issue a short raw read command and print response bytes");
   helpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
   helpItem("command read_words <cmd> <count>", "Issue a short read command and decode CRC-checked words");
+  Serial.printf("  %sNote:%s raw commands are immediate diagnostics and do not reconcile cached driver state\n",
+                LOG_COLOR_GRAY,
+                LOG_COLOR_RESET);
 }
 
 void processConvert(const String& tail) {
@@ -1131,6 +1353,7 @@ void processCommand(const String& cmdLine) {
     printStatus(st);
     Serial.println("  Health changes:");
     printHealthDiff(before, after);
+    printDriverHealth();
     return;
   }
 
@@ -1144,7 +1367,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
 
-  if (head == "drv1") {
+  if (head == "drv1" || head == "state") {
     printHealthView(device);
     return;
   }
@@ -1159,8 +1382,49 @@ void processCommand(const String& cmdLine) {
     return;
   }
 
+  if (head == "status") {
+    printStatusView();
+    return;
+  }
+
   if (head == "read") {
-    printStatus(scheduleMeasurement());
+    app_driver::Measurement sample;
+    const app_driver::Status st = device.readMeasurement(sample);
+    if (st.ok()) {
+      const uint32_t latencyMs =
+          (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+      gPendingRead = false;
+      gPendingStartMs = 0;
+      if (gVerbose && latencyMs > 0U) {
+        Serial.printf("  latency_ms=%lu\n", static_cast<unsigned long>(latencyMs));
+      }
+      printMeasurement(sample);
+      if (gStressStats.active) {
+        updateStressStats(sample);
+        printStressProgress(static_cast<uint32_t>(gStressStats.attempts),
+                            static_cast<uint32_t>(gStressStats.target),
+                            static_cast<uint32_t>(gStressStats.success),
+                            gStressStats.errors);
+      }
+      scheduleFollowupMeasurement();
+      return;
+    }
+    if (st.code == app_driver::Err::MEASUREMENT_NOT_READY &&
+        device.pendingCommand() == app_driver::PendingCommand::NONE &&
+        !device.measurementPending()) {
+      const app_driver::Status scheduleSt = scheduleMeasurement();
+      printStatus(scheduleSt);
+      if (scheduleSt.inProgress()) {
+        printPendingWorkView();
+      }
+      return;
+    }
+    printStatus(st);
+    return;
+  }
+
+  if (head == "sample" || head == "last") {
+    printSampleView();
     return;
   }
 
@@ -1171,8 +1435,13 @@ void processCommand(const String& cmdLine) {
       printStatus(st);
       return;
     }
+    const uint32_t latencyMs =
+        (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
     gPendingRead = false;
     gPendingStartMs = 0;
+    if (gVerbose && latencyMs > 0U) {
+      Serial.printf("  latency_ms=%lu\n", static_cast<unsigned long>(latencyMs));
+    }
     printMeasurement(sample);
     if (gStressStats.active) {
       updateStressStats(sample);
@@ -1224,7 +1493,7 @@ void processCommand(const String& cmdLine) {
 
   if (head == "watch") {
     if (tail.length() == 0U) {
-      Serial.printf("watch=%s\n", yesNo(gWatchEnabled));
+      printToggleState("Watch", gWatchEnabled);
       return;
     }
 
@@ -1240,7 +1509,7 @@ void processCommand(const String& cmdLine) {
     }
 
     gWatchEnabled = enabled;
-    Serial.printf("watch=%s\n", yesNo(gWatchEnabled));
+    printToggleState("Watch", gWatchEnabled);
     if (gWatchEnabled && device.measurementReady()) {
       gPendingRead = true;
       gPendingStartMs = 0;
@@ -1257,18 +1526,13 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "verbose") {
-    if (tail.length() == 0U) {
-      Serial.printf("verbose=%s\n", yesNo(gVerbose));
-      return;
-    }
-
-    bool enabled = false;
-    if (!cmd::parseBool01(tail, enabled)) {
+    bool enabled = !gVerbose;
+    if (tail.length() > 0U && !cmd::parseBool01(tail, enabled)) {
       LOGW("Expected verbose 0|1");
       return;
     }
     gVerbose = enabled;
-    Serial.printf("verbose=%s\n", yesNo(gVerbose));
+    printToggleState("Verbose", gVerbose);
     return;
   }
 
@@ -1326,6 +1590,9 @@ void processCommand(const String& cmdLine) {
       gPendingStartMs = millis();
     }
     printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
@@ -1376,7 +1643,11 @@ void processCommand(const String& cmdLine) {
       return;
     }
     if (tail == "off") {
-      printStatus(device.stopPeriodicMeasurement());
+      const app_driver::Status st = device.stopPeriodicMeasurement();
+      printStatus(st);
+      if (st.inProgress()) {
+        printPendingWorkView();
+      }
       return;
     }
     LOGW("Usage: periodic [on|lp|off]");
@@ -1384,12 +1655,20 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "sleep") {
-    printStatus(device.powerDown());
+    const app_driver::Status st = device.powerDown();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
   if (head == "wake") {
-    printStatus(device.wakeUp());
+    const app_driver::Status st = device.wakeUp();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
@@ -1557,23 +1836,39 @@ void processCommand(const String& cmdLine) {
   }
 
   if (head == "persist") {
-    printStatus(device.startPersistSettings());
+    const app_driver::Status st = device.startPersistSettings();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
   if (head == "reinit") {
-    printStatus(device.startReinit());
+    const app_driver::Status st = device.startReinit();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
   if (head == "factory_reset") {
     clearSettingsCache();
-    printStatus(device.startFactoryReset());
+    const app_driver::Status st = device.startFactoryReset();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
   if (head == "selftest") {
-    printStatus(device.startSelfTest());
+    const app_driver::Status st = device.startSelfTest();
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
@@ -1588,7 +1883,11 @@ void processCommand(const String& cmdLine) {
       LOGW("Usage: frc <reference_ppm>");
       return;
     }
-    printStatus(device.startForcedRecalibration(referencePpm));
+    const app_driver::Status st = device.startForcedRecalibration(referencePpm);
+    printStatus(st);
+    if (st.inProgress()) {
+      printPendingWorkView();
+    }
     return;
   }
 
@@ -1714,8 +2013,7 @@ void processCommand(const String& cmdLine) {
     return;
   }
 
-  Serial.printf("unknown command: %s\n", head.c_str());
-  printHelp();
+  LOGW("Unknown command: '%s'. Type 'help'.", head.c_str());
 }
 
 }  // namespace
@@ -1730,6 +2028,7 @@ void setup() {
     LOGE("Wire init failed");
     return;
   }
+  LOGI("I2C initialized (SDA=%d, SCL=%d)", board::I2C_SDA, board::I2C_SCL);
   bus_diag::scan(SCD41::cmd::I2C_ADDRESS);
 
   gConfig.i2cWrite = transport::wireWrite;
@@ -1745,12 +2044,12 @@ void setup() {
     LOGE("Device initialization failed; CLI remains available for probe/recover");
     printStatus(st);
   } else {
+    LOGI("Device initialized successfully");
     printDriverHealth();
   }
 
   Serial.println();
   Serial.println("Type 'help' for commands");
-  printHelp();
   printPrompt();
 }
 

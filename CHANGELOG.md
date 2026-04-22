@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
 - Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
+- Refined the bring-up CLI again to match the mature family behavior more closely: versioned help header, startup/log flow parity, `state` compact-health alias, toggle-style verbose output, more detailed health/error reporting, less noisy unknown-command handling, and a smarter `read` path that prints a ready sample before scheduling another fetch.
+- Extended the bring-up CLI with chip-oriented `status` and cached `sample` / `last` views, plus explicit pending-work and completion summaries for deferred commands such as self-test, FRC, wake-up, stop-periodic, reinit, and factory reset.
 - Tightened the example Wire transport so short reads map to generic `I2C_ERROR` unless a transport can explicitly distinguish read-header NACK behavior.
 - Tightened the raw command helpers so they reject managed mode/state commands, preserve periodic-mode command restrictions, and stay aligned with the driver's internal state model.
 - `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
