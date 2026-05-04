@@ -7,6 +7,7 @@
 
 #include <Arduino.h>
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -21,6 +22,7 @@ static constexpr uint32_t MAX_RECOVER_BACKOFF_MS = 600000;
 static constexpr uint32_t MAX_PERIODIC_MARGIN_MS = 5000;
 static constexpr uint32_t MAX_RETRY_DELAY_MS = 60000;
 static constexpr uint32_t MIN_COMMAND_DELAY_US = 1000;
+static constexpr uint32_t MAX_WAIT_GUARD_EXTRA_ITERATIONS = 16;
 
 static uint32_t saturatingAddU32(uint32_t a, uint32_t b) {
   const uint32_t maxU32 = std::numeric_limits<uint32_t>::max();
@@ -32,6 +34,14 @@ static uint32_t saturatingAddU32(uint32_t a, uint32_t b) {
 
 static bool isValidSingleShotMode(SingleShotMode mode) {
   return mode == SingleShotMode::CO2_T_RH || mode == SingleShotMode::T_RH_ONLY;
+}
+
+static uint32_t boundedWaitIterations(uint32_t delayMs, uint32_t timeoutMs) {
+  const uint32_t windowMs = saturatingAddU32(saturatingAddU32(delayMs, timeoutMs), 1U);
+  const uint32_t scaled = (windowMs > (std::numeric_limits<uint32_t>::max() / 4U))
+                              ? std::numeric_limits<uint32_t>::max()
+                              : windowMs * 4U;
+  return saturatingAddU32(scaled, MAX_WAIT_GUARD_EXTRA_ITERATIONS);
 }
 
 } // namespace
@@ -591,7 +601,7 @@ Status SCD41::wakeUp() {
 }
 
 Status SCD41::readSerialNumber(uint64_t& serial) {
-  if (!_initialized && _config.i2cWrite == nullptr) {
+  if (!_initialized && (_config.i2cWrite == nullptr || _config.i2cWriteRead == nullptr)) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
   if (_initialized) {
@@ -647,6 +657,9 @@ Status SCD41::readSensorVariant(SensorVariant& out) {
 }
 
 Status SCD41::setTemperatureOffsetC(float offsetC) {
+  if (!std::isfinite(offsetC)) {
+    return Status::Error(Err::INVALID_PARAM, "Temperature offset must be finite");
+  }
   const int32_t milli = static_cast<int32_t>(
       (offsetC * 1000.0f) + (offsetC >= 0.0f ? 0.5f : -0.5f));
   return setTemperatureOffsetC_x1000(milli);
@@ -1190,6 +1203,9 @@ Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allow
   if (out == nullptr || len == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
   }
+  if (len > cmd::MEASUREMENT_RESPONSE_LEN) {
+    return Status::Error(Err::INVALID_PARAM, "Read length too large");
+  }
   Status st = _validateRawCommand(command);
   if (!st.ok()) {
     return st;
@@ -1247,6 +1263,9 @@ uint32_t SCD41::convertHumidityPct_x1000(uint16_t raw) {
 }
 
 uint16_t SCD41::encodeTemperatureOffsetC(float offsetC) {
+  if (!std::isfinite(offsetC)) {
+    return 0;
+  }
   const int32_t milli = static_cast<int32_t>(
       (offsetC * 1000.0f) + (offsetC >= 0.0f ? 0.5f : -0.5f));
   return encodeTemperatureOffsetC_x1000(milli);
@@ -1256,8 +1275,12 @@ uint16_t SCD41::encodeTemperatureOffsetC_x1000(int32_t offsetC_x1000) {
   if (offsetC_x1000 <= 0) {
     return 0;
   }
-  const uint32_t numerator = static_cast<uint32_t>(offsetC_x1000) * 65535U + 87500U;
-  return static_cast<uint16_t>(numerator / 175000U);
+  const uint64_t numerator = static_cast<uint64_t>(offsetC_x1000) * 65535ULL + 87500ULL;
+  const uint64_t encoded = numerator / 175000ULL;
+  return static_cast<uint16_t>(
+      encoded > std::numeric_limits<uint16_t>::max()
+          ? std::numeric_limits<uint16_t>::max()
+          : encoded);
 }
 
 float SCD41::decodeTemperatureOffsetC(uint16_t raw) {
@@ -1325,11 +1348,23 @@ bool SCD41::_isManagedOnlyRawCommand(uint16_t command) {
 }
 
 Status SCD41::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
+  if (_config.i2cWriteRead == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C read callback not set");
+  }
+  if ((txLen > 0 && txBuf == nullptr) || rxBuf == nullptr || rxLen == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C read buffers");
+  }
   return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
                               _config.i2cTimeoutMs, _config.i2cUser);
 }
 
 Status SCD41::_i2cWriteRaw(const uint8_t* buf, size_t len) {
+  if (_config.i2cWrite == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "I2C write callback not set");
+  }
+  if (buf == nullptr || len == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid I2C write buffer");
+  }
   return _config.i2cWrite(_config.i2cAddress, buf, len, _config.i2cTimeoutMs, _config.i2cUser);
 }
 
@@ -1430,6 +1465,10 @@ Status SCD41::_readCommand(uint16_t cmd, uint8_t* out, size_t len, bool tracked)
 }
 
 Status SCD41::_readOnly(uint8_t* out, size_t len, bool tracked, bool allowNoData) {
+  if (out == nullptr || len == 0 || len > cmd::MEASUREMENT_RESPONSE_LEN) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid read buffer");
+  }
+
   Status st = _ensureCommandDelay();
   if (!st.ok()) {
     return st;
@@ -1456,6 +1495,9 @@ Status SCD41::_readWord(uint16_t cmd, uint16_t& value, bool tracked) {
 Status SCD41::_readWords(uint16_t cmd, uint16_t* values, size_t count, bool tracked) {
   if (values == nullptr || count == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
+  }
+  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
+    return Status::Error(Err::INVALID_PARAM, "Read length too large");
   }
 
   const size_t len = count * cmd::DATA_WORD_WITH_CRC;
@@ -1485,6 +1527,9 @@ Status SCD41::_readWords(uint16_t cmd, uint16_t* values, size_t count, bool trac
 Status SCD41::_readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData) {
   if (values == nullptr || count == 0) {
     return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
+  }
+  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
+    return Status::Error(Err::INVALID_PARAM, "Read length too large");
   }
 
   const size_t len = count * cmd::DATA_WORD_WITH_CRC;
@@ -1583,9 +1628,15 @@ Status SCD41::_ensureCommandDelay() {
   }
 
   const uint32_t startMs = _nowMs();
+  uint32_t iterations = 0;
+  const uint32_t maxIterations = boundedWaitIterations(_config.commandDelayMs,
+                                                       _config.i2cTimeoutMs);
   while ((_nowUs() - _lastCommandUs) < minDelayUs) {
     if (_timeElapsed(_nowMs(), startMs + _config.commandDelayMs + _config.i2cTimeoutMs)) {
       return Status::Error(Err::TIMEOUT, "Command delay guard timed out");
+    }
+    if (iterations++ >= maxIterations) {
+      return Status::Error(Err::TIMEOUT, "Command delay guard stalled");
     }
     _cooperativeYield();
   }
@@ -1597,9 +1648,14 @@ Status SCD41::_waitMs(uint32_t delayMs) {
     return Status::Ok();
   }
   const uint32_t start = _nowMs();
+  uint32_t iterations = 0;
+  const uint32_t maxIterations = boundedWaitIterations(delayMs, _config.i2cTimeoutMs);
   while (!_timeElapsed(_nowMs(), start + delayMs)) {
     if (_timeElapsed(_nowMs(), start + delayMs + _config.i2cTimeoutMs)) {
       return Status::Error(Err::TIMEOUT, "Delay timed out");
+    }
+    if (iterations++ >= maxIterations) {
+      return Status::Error(Err::TIMEOUT, "Delay stalled");
     }
     _cooperativeYield();
   }

@@ -238,6 +238,7 @@ public:
   // =========================================================================
 
   /// Set the temperature offset in degrees Celsius.
+  /// @return INVALID_PARAM when `offsetC` is non-finite or outside the supported range.
   Status setTemperatureOffsetC(float offsetC);
   /// Read the temperature offset in degrees Celsius.
   Status getTemperatureOffsetC(float& out);
@@ -323,6 +324,7 @@ public:
   /// Issue an immediate short read command and return the raw response bytes.
   /// @note `allowNoData` maps a transport-reported read-header NACK to `MEASUREMENT_NOT_READY`
   ///       only when the transport declares `TransportCapability::READ_HEADER_NACK`.
+  ///       SCD41 read responses are bounded to 9 bytes; larger reads are rejected before I2C.
   Status readCommand(uint16_t command, uint8_t* out, size_t len, bool allowNoData = false);
   /// Issue an immediate short read command and decode one CRC-checked word.
   Status readWordCommand(uint16_t command, uint16_t& out);

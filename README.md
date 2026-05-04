@@ -71,7 +71,7 @@ The public driver follows the same family conventions as the mature workspace li
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
 - mode/query helpers: `getSingleShotMode()`, `getIdentity()`, `readSerialNumber()`, `readSensorVariant()`
 - named single-shot commands: `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()`
-- compensation/config: `setTemperatureOffsetC()`, `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
+- compensation/config: `setTemperatureOffsetC()` (finite values only), `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
 - raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, `readWordsCommand()`
 - snapshots: `getSettings()` for local driver state and `readSettings()` for a best-effort state plus live-configuration snapshot
@@ -82,7 +82,7 @@ The public driver follows the same family conventions as the mature workspace li
 - in periodic mode it refreshes ambient pressure only, because the other configuration commands are idle-only
 - while a command is pending, a measurement is in progress, or the sensor is powered down, it returns the local driver snapshot without live refresh
 
-The raw command helpers are limited to immediate, non-stateful diagnostic transactions. Managed mode transitions and long-running commands must still use the typed APIs, and the raw helpers continue to enforce the sensor's periodic-mode command restrictions.
+The raw command helpers are limited to immediate, non-stateful diagnostic transactions. Managed mode transitions and long-running commands must still use the typed APIs, and the raw helpers continue to enforce the sensor's periodic-mode command restrictions. Raw read helpers reject buffers larger than the largest documented SCD41 response (9 bytes), invalid buffers, and locally invalid requests before touching I2C.
 
 ## Measurement Timing Summary
 
@@ -98,7 +98,7 @@ The raw command helpers are limited to immediate, non-stateful diagnostic transa
 | `measure_single_shot` | 5000 ms |
 | `perform_self_test` | 10000 ms |
 
-Long operations are modeled as bounded start/poll/read flows driven by `tick()` rather than blocking the public call for hundreds of milliseconds or seconds.
+Long operations are modeled as bounded start/poll/read flows driven by `tick()` rather than blocking the public call for hundreds of milliseconds or seconds. Short synchronous wait guards also have a finite stalled-timebase escape path, so a broken injected clock/yield hook returns `TIMEOUT` instead of spinning indefinitely.
 
 ## Conversion Rules
 

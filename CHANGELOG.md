@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
 - Fixed the bring-up CLI so forced-recalibration failures are always reported and raw diagnostic reads no longer mask read-header NACKs by default.
 - Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
+- Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
 
 ### Added
 - `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
@@ -24,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raw self-test/FRC result accessors and ambient-pressure encode/decode helpers.
 - Small public convenience helpers for application code: `measurementPending()`, `measurementReadyMs()`, `getLastMeasurement()`, and `getIdentity()`.
 - Native coverage for power-up delay handling, direct `read_measurement` reads, raw-command helper restrictions/error paths, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
+
+### Fixed
+- `setTemperatureOffsetC(float)` now rejects NaN/infinite input before converting to the fixed-point command word.
 
 ### Removed
 - Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.

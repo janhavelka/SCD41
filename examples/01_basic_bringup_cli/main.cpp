@@ -15,6 +15,7 @@
 #include "common/HealthDiag.h"
 #include "common/HealthView.h"
 #include "common/I2cTransport.h"
+#include "common/CliStyle.h"
 #include "common/Log.h"
 
 namespace {
@@ -229,7 +230,7 @@ void printKnownU32Field(const char* label, bool known, uint32_t value, const cha
 }
 
 void printPrompt() {
-  Serial.print("> ");
+  cli::printPrompt();
 }
 
 void printToggleState(const char* label, bool enabled) {
@@ -1171,83 +1172,72 @@ void runDiagnostics() {
 }
 
 void printHelp() {
-  auto helpSection = [](const char* title) {
-    Serial.printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET);
-  };
-  auto helpItem = [](const char* command, const char* desc) {
-    Serial.printf("  %s%-28s%s - %s\n",
-                  LOG_COLOR_CYAN,
-                  command,
-                  LOG_COLOR_RESET,
-                  desc);
-  };
-
   Serial.println();
-  Serial.printf("%s=== SCD41 CLI Help ===%s\n", LOG_COLOR_CYAN, LOG_COLOR_RESET);
+  cli::printHelpHeader("SCD41 CLI Help");
   Serial.printf("Version: %s\n", app_driver::versionFull());
 
-  helpSection("Common");
-  helpItem("help / ?", "Show this help");
-  helpItem("version / ver", "Print firmware and library version info");
-  helpItem("info", "Print version info and current identity");
-  helpItem("scan", "Scan I2C bus");
-  helpItem("begin", "Run begin() with the current example config");
-  helpItem("end", "End the current driver session");
-  helpItem("probe", "Probe device without health tracking");
-  helpItem("recover", "Attempt manual driver recovery");
-  helpItem("diag", "Run safe diagnostics and health invariants");
-  helpItem("drv", "Print driver state and health");
-  helpItem("drv1 / state", "Print compact health view");
-  helpItem("cfg", "Show current example config");
-  helpItem("settings", "Show driver snapshot and live device settings");
-  helpItem("status", "Show concise chip/runtime status and data-ready state");
-  helpItem("verbose [0|1]", "Toggle or set verbose polling logs");
+  cli::printHelpSection("Common");
+  cli::printHelpItem("help / ?", "Show this help");
+  cli::printHelpItem("version / ver", "Print firmware and library version info");
+  cli::printHelpItem("info", "Print version info and current identity");
+  cli::printHelpItem("scan", "Scan I2C bus");
+  cli::printHelpItem("begin", "Run begin() with the current example config");
+  cli::printHelpItem("end", "End the current driver session");
+  cli::printHelpItem("probe", "Probe device without health tracking");
+  cli::printHelpItem("recover", "Attempt manual driver recovery");
+  cli::printHelpItem("diag", "Run safe diagnostics and health invariants");
+  cli::printHelpItem("drv", "Print driver state and health");
+  cli::printHelpItem("drv1 / state", "Print compact health view");
+  cli::printHelpItem("cfg", "Show current example config");
+  cli::printHelpItem("settings", "Show driver snapshot and live device settings");
+  cli::printHelpItem("status", "Show concise chip/runtime status and data-ready state");
+  cli::printHelpItem("verbose [0|1]", "Toggle or set verbose polling logs");
 
-  helpSection("Measurement");
-  helpItem("read", "Read now if ready, otherwise schedule one managed measurement");
-  helpItem("fetch", "Directly fetch a ready measurement now");
-  helpItem("sample / last", "Show the last cached converted/raw/fixed-point sample");
-  helpItem("raw", "Print the last raw sample");
-  helpItem("comp", "Print the last compensated sample");
-  helpItem("dataready", "Read get_data_ready_status");
-  helpItem("watch [0|1]", "Continuously schedule measurements");
-  helpItem("stress [N]", "Async measurement stress test with summary");
-  helpItem("single [full|rht]", "Show or set idle single-shot mode");
-  helpItem("single_start [full|rht]", "Start a one-shot full or RHT-only command");
-  helpItem("convert <rawT> <rawRH> [co2]", "Convert raw values using library helpers");
+  cli::printHelpSection("Measurement");
+  cli::printHelpItem("read", "Read now if ready, otherwise schedule one managed measurement");
+  cli::printHelpItem("fetch", "Directly fetch a ready measurement now");
+  cli::printHelpItem("sample / last", "Show the last cached converted/raw/fixed-point sample");
+  cli::printHelpItem("raw", "Print the last raw sample");
+  cli::printHelpItem("comp", "Print the last compensated sample");
+  cli::printHelpItem("dataready", "Read get_data_ready_status");
+  cli::printHelpItem("watch [0|1]", "Continuously schedule measurements");
+  cli::printHelpItem("stress [N]", "Async measurement stress test with summary");
+  cli::printHelpItem("single [full|rht]", "Show or set idle single-shot mode");
+  cli::printHelpItem("single_start [full|rht]", "Start a one-shot full or RHT-only command");
+  cli::printHelpItem("convert <rawT> <rawRH> [co2]", "Convert raw values using library helpers");
 
-  helpSection("Mode And Power");
-  helpItem("mode", "Show current operating and single-shot mode");
-  helpItem("periodic [on|lp|off]", "Start standard or low-power periodic mode, or stop");
-  helpItem("sleep", "Power down the sensor");
-  helpItem("wake", "Wake from power-down");
+  cli::printHelpSection("Mode And Power");
+  cli::printHelpItem("mode", "Show current operating and single-shot mode");
+  cli::printHelpItem("periodic [on|lp|off]", "Start standard or low-power periodic mode, or stop");
+  cli::printHelpItem("sleep", "Power down the sensor");
+  cli::printHelpItem("wake", "Wake from power-down");
 
-  helpSection("Identity And Compensation");
-  helpItem("serial", "Read and print serial number and variant");
-  helpItem("variant", "Read and print current variant");
-  helpItem("toffset [degC]", "Show or set temperature offset");
-  helpItem("altitude [m]", "Show or set sensor altitude");
-  helpItem("pressure [Pa]", "Show or set ambient pressure compensation");
-  helpItem("asc_enabled [0|1]", "Show or set automatic self-calibration enable");
-  helpItem("asc_target [ppm]", "Show or set ASC target");
-  helpItem("asc_initial [hours]", "Show or set ASC initial period");
-  helpItem("asc_standard [hours]", "Show or set ASC standard period");
+  cli::printHelpSection("Identity And Compensation");
+  cli::printHelpItem("serial", "Read and print serial number and variant");
+  cli::printHelpItem("variant", "Read and print current variant");
+  cli::printHelpItem("toffset [degC]", "Show or set temperature offset");
+  cli::printHelpItem("altitude [m]", "Show or set sensor altitude");
+  cli::printHelpItem("pressure [Pa]", "Show or set ambient pressure compensation");
+  cli::printHelpItem("asc_enabled [0|1]", "Show or set automatic self-calibration enable");
+  cli::printHelpItem("asc_target [ppm]", "Show or set ASC target");
+  cli::printHelpItem("asc_initial [hours]", "Show or set ASC initial period");
+  cli::printHelpItem("asc_standard [hours]", "Show or set ASC standard period");
 
-  helpSection("Maintenance");
-  helpItem("persist", "Persist EEPROM-backed settings");
-  helpItem("reinit", "Reload persisted settings into RAM");
-  helpItem("factory_reset", "Perform factory reset");
-  helpItem("selftest", "Run the 10 s self-test");
-  helpItem("selftest_result", "Print the current self-test result state");
-  helpItem("frc <reference_ppm>", "Start forced recalibration");
-  helpItem("frc_result", "Print the current forced recalibration result state");
+  cli::printHelpSection("Maintenance");
+  cli::printHelpItem("persist", "Persist EEPROM-backed settings");
+  cli::printHelpItem("reinit", "Reload persisted settings into RAM");
+  cli::printHelpItem("factory_reset", "Perform factory reset");
+  cli::printHelpItem("selftest", "Run the 10 s self-test");
+  cli::printHelpItem("selftest_result", "Print the current self-test result state");
+  cli::printHelpItem("frc <reference_ppm>", "Start forced recalibration");
+  cli::printHelpItem("frc_result", "Print the current forced recalibration result state");
 
-  helpSection("Raw Commands");
-  helpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
-  helpItem("command write_data <cmd> <data>", "Issue an immediate command with one CRC-packed data word");
-  helpItem("command read <cmd> <len>", "Issue a short raw read command and print response bytes");
-  helpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
-  helpItem("command read_words <cmd> <count>", "Issue a short read command and decode CRC-checked words");
+  cli::printHelpSection("Raw Commands");
+  cli::printHelpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
+  cli::printHelpItem("command write_data <cmd> <data>", "Issue an immediate command with one CRC-packed data word");
+  cli::printHelpItem("command read <cmd> <len>", "Issue a short raw read command and print response bytes");
+  cli::printHelpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
+  cli::printHelpItem("command read_words <cmd> <count>", "Issue a short read command and decode CRC-checked words");
   Serial.printf("  %sNote:%s raw commands are immediate diagnostics and do not reconcile cached driver state\n",
                 LOG_COLOR_GRAY,
                 LOG_COLOR_RESET);

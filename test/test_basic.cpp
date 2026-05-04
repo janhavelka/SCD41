@@ -2,6 +2,7 @@
 /// @brief Unit tests for the SCD41 driver and example transport
 
 #include <unity.h>
+#include <math.h>
 
 #include "Arduino.h"
 #include "Wire.h"
@@ -41,6 +42,7 @@ struct ScriptedTransport {
   uint32_t nowMs = 0;
   uint32_t nowUs = 0;
   uint32_t yieldCount = 0;
+  bool advanceOnYield = true;
 };
 
 uint8_t packWord(uint16_t word, uint8_t* out) {
@@ -133,8 +135,10 @@ uint32_t scriptedNowUs(void* user) {
 void scriptedYield(void* user) {
   auto* ctx = static_cast<ScriptedTransport*>(user);
   ++ctx->yieldCount;
-  ++ctx->nowMs;
-  ctx->nowUs += 1000;
+  if (ctx->advanceOnYield) {
+    ++ctx->nowMs;
+    ctx->nowUs += 1000;
+  }
 }
 
 Config makeConfig(ScriptedTransport& bus) {
@@ -236,6 +240,23 @@ void test_begin_waits_power_up_delay_and_does_not_track_startup_io() {
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
   TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
+}
+
+void test_begin_wait_guard_times_out_if_time_source_stalls() {
+  ScriptedTransport bus;
+  bus.advanceOnYield = false;
+  Config cfg = makeConfig(bus);
+  cfg.powerUpDelayMs = 1;
+  cfg.i2cTimeoutMs = 1;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_TRUE(bus.yieldCount > 0u);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeIndex);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.readIndex);
 }
 
 void test_begin_reads_serial_and_variant() {
@@ -541,6 +562,24 @@ void test_temperature_offset_roundtrip() {
   TEST_ASSERT_EQUAL_INT(4000, offsetC_x1000);
 }
 
+void test_temperature_offset_rejects_non_finite_values() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  bus.lastWriteLen = 0;
+
+  Status st = device.setTemperatureOffsetC(NAN);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
+
+  st = device.setTemperatureOffsetC(INFINITY);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+}
+
 void test_low_level_command_helpers_work() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
@@ -574,6 +613,41 @@ void test_low_level_command_helpers_work() {
   TEST_ASSERT_EQUAL_UINT16(0x1001u, words[0]);
   TEST_ASSERT_EQUAL_UINT16(0x2002u, words[1]);
   TEST_ASSERT_EQUAL_UINT16(0x3003u, words[2]);
+}
+
+void test_low_level_raw_read_rejects_oversized_buffer_without_i2c() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  bus.lastWriteLen = 0;
+
+  uint8_t oversized[10] = {};
+  const Status st = device.readCommand(cmd::CMD_GET_SERIAL_NUMBER,
+                                       oversized, sizeof(oversized));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+}
+
+void test_command_delay_guard_times_out_if_time_source_stalls() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.i2cTimeoutMs = 1;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  bus.advanceOnYield = false;
+  bus.yieldCount = 0;
+
+  bool ready = false;
+  const Status st = device.readDataReadyStatus(ready);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(bus.yieldCount > 0u);
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
 }
 
 void test_low_level_command_helpers_handle_expected_nack_and_no_data() {
@@ -899,6 +973,7 @@ int main(int, char**) {
   RUN_TEST(test_config_defaults);
   RUN_TEST(test_crc_and_conversion_helpers);
   RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
+  RUN_TEST(test_begin_wait_guard_times_out_if_time_source_stalls);
   RUN_TEST(test_begin_reads_serial_and_variant);
   RUN_TEST(test_begin_rejects_non_scd41_variant);
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
@@ -913,7 +988,10 @@ int main(int, char**) {
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
   RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
   RUN_TEST(test_temperature_offset_roundtrip);
+  RUN_TEST(test_temperature_offset_rejects_non_finite_values);
   RUN_TEST(test_low_level_command_helpers_work);
+  RUN_TEST(test_low_level_raw_read_rejects_oversized_buffer_without_i2c);
+  RUN_TEST(test_command_delay_guard_times_out_if_time_source_stalls);
   RUN_TEST(test_low_level_command_helpers_handle_expected_nack_and_no_data);
   RUN_TEST(test_low_level_command_helper_failures_update_health);
   RUN_TEST(test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands);
