@@ -47,6 +47,13 @@ The driver uses a managed asynchronous model:
 
 This split keeps long device operations explicit and predictable. Public calls do not hide multi-second waits behind a single synchronous API.
 
+## Thread, ISR, And Recovery Model
+
+- The driver is single-threaded: call public APIs from one task or loop context, or serialize access externally.
+- Do not call I2C-backed APIs from ISRs. Use an interrupt only to set an application flag, then call the driver from normal task context.
+- `OFFLINE` is latched. Normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch the bus.
+- `probe()` remains a raw diagnostic check and does not update health counters. `recover()` and explicit reset commands such as `startReinit()` and `startFactoryReset()` may access I2C while offline.
+
 ## Important Device Rules
 
 - The sensor must be given up to 30 ms after power-up before the first command. `begin()` honors `Config::powerUpDelayMs` before probing the serial number.
@@ -273,19 +280,19 @@ pio run -e esp32s2dev
 
 ## Repository Notes
 
-- Public headers live in [include/SCD41](include/SCD41)
-- Implementation lives in [src](src)
-- Version metadata is generated into `include/SCD41/Version.h` from [library.json](library.json)
+- Public headers live in <a href="include/SCD41">include/SCD41</a>
+- Implementation lives in <a href="src">src</a>
+- Version metadata is generated into `include/SCD41/Version.h` from <a href="library.json">library.json</a>
 - `examples/common` is example-only glue and is not installed as part of the library
 - The library never configures I2C pins or owns the bus
-- [ASSUMPTIONS.md](ASSUMPTIONS.md) records the remaining SCD41-specific policy assumptions
+- <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> records the remaining SCD41-specific policy assumptions
 
 ## Documentation
 
-- [CHANGELOG.md](CHANGELOG.md) - release history
-- [AGENTS.md](AGENTS.md) - repository engineering rules
-- [ASSUMPTIONS.md](ASSUMPTIONS.md) - explicit assumptions and scope notes
-- [docs/SCD41_datasheet.md](docs/SCD41_datasheet.md) - datasheet-derived implementation reference
+- <a href="CHANGELOG.md">CHANGELOG.md</a> - release history
+- <a href="AGENTS.md">AGENTS.md</a> - repository engineering rules
+- <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> - explicit assumptions and scope notes
+- <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
 
 ## License
 

@@ -3,7 +3,7 @@
 
 PROJECT_NAME           = "SCD41"
 PROJECT_NUMBER         = "0.1.0"
-PROJECT_BRIEF          = "Managed SCD41 driver API and repository reference"
+PROJECT_BRIEF          = "SCD41 embedded library API documentation"
 OUTPUT_DIRECTORY       = docs/doxygen
 CREATE_SUBDIRS         = NO
 ALLOW_UNICODE_NAMES    = NO
@@ -31,10 +31,10 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md SECURITY.md ASSUMPTIONS.md include docs/SCD41_datasheet.md
+INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md include docs
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = YES
-EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/*
+EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/extracted-md/* */docs/pdf-extracted-md/* */docs/_pdf_extracts/*
 EXAMPLE_PATH           = examples/01_basic_bringup_cli
 
 USE_MDFILE_AS_MAINPAGE = README.md
@@ -51,7 +51,7 @@ GENERATE_XML           = NO
 GENERATE_RTF           = NO
 GENERATE_MAN           = NO
 
-WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_UNDOCUMENTED   = NO
 WARN_NO_PARAMDOC       = NO
 WARN_IF_DOC_ERROR      = YES
 WARN_AS_ERROR          = NO
