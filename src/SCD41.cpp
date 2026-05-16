@@ -24,6 +24,24 @@ static constexpr uint32_t MAX_RETRY_DELAY_MS = 60000;
 static constexpr uint32_t MIN_COMMAND_DELAY_US = 1000;
 static constexpr uint32_t MAX_WAIT_GUARD_EXTRA_ITERATIONS = 16;
 
+class ScopedOfflineI2cAllowance {
+public:
+  explicit ScopedOfflineI2cAllowance(bool& flag, bool allow) : _flag(flag), _old(flag) {
+    _flag = allow;
+  }
+
+  ~ScopedOfflineI2cAllowance() {
+    _flag = _old;
+  }
+
+  ScopedOfflineI2cAllowance(const ScopedOfflineI2cAllowance&) = delete;
+  ScopedOfflineI2cAllowance& operator=(const ScopedOfflineI2cAllowance&) = delete;
+
+private:
+  bool& _flag;
+  bool _old;
+};
+
 static uint32_t saturatingAddU32(uint32_t a, uint32_t b) {
   const uint32_t maxU32 = std::numeric_limits<uint32_t>::max();
   if (a > (maxU32 - b)) {
@@ -59,11 +77,13 @@ Status SCD41::begin(const Config& config) {
   _consecutiveFailures = 0;
   _totalFailures = 0;
   _totalSuccess = 0;
+  _allowOfflineI2c = false;
   _lastCommandUs = 0;
   _lastCommandValid = false;
   _commandReadyMs = 0;
   _measurementRequested = false;
   _measurementReady = false;
+  _hasSample = false;
   _measurementReadyMs = 0;
   _periodicStartMs = 0;
   _lastFetchMs = 0;
@@ -169,6 +189,7 @@ void SCD41::end() {
   _commandReadyMs = 0;
   _measurementRequested = false;
   _measurementReady = false;
+  _hasSample = false;
   _measurementReadyMs = 0;
   _periodicStartMs = 0;
   _lastFetchMs = 0;
@@ -227,58 +248,69 @@ Status SCD41::recover() {
   _lastRecoverMs = now;
   _lastRecoverValid = true;
 
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return wakeUp();
-  }
-
-  if (isPeriodicActive()) {
-    bool ready = false;
-    Status st = readDataReadyStatus(ready);
-    if (st.ok()) {
-      return Status::Ok();
-    }
-  } else {
-    uint64_t serial = 0;
-    Status st = readSerialNumber(serial);
-    if (st.ok()) {
-      return Status::Ok();
-    }
-  }
-
-  if (_config.busReset != nullptr) {
-    Status st = _config.busReset(_config.controlUser);
-    if (!st.ok()) {
-      return st;
+  const bool startedOffline = _driverState == DriverState::OFFLINE;
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
+  Status result = [this]() -> Status {
+    if (_operatingMode == OperatingMode::POWER_DOWN) {
+      return wakeUp();
     }
 
     if (isPeriodicActive()) {
       bool ready = false;
-      st = readDataReadyStatus(ready);
+      Status st = readDataReadyStatus(ready);
+      if (st.ok()) {
+        return Status::Ok();
+      }
     } else {
       uint64_t serial = 0;
-      st = readSerialNumber(serial);
+      Status st = readSerialNumber(serial);
+      if (st.ok()) {
+        return Status::Ok();
+      }
     }
-    if (st.ok()) {
-      return Status::Ok();
-    }
-  }
 
-  if (_config.powerCycle != nullptr) {
-    Status st = _config.powerCycle(_config.controlUser);
-    if (!st.ok()) {
-      return st;
-    }
-    _operatingMode = OperatingMode::IDLE;
-    _clearMeasurementRequest();
-    return _schedulePendingCommand(PendingCommand::POWER_CYCLE, _config.powerUpDelayMs);
-  }
+    if (_config.busReset != nullptr) {
+      Status st = _config.busReset(_config.controlUser);
+      if (!st.ok()) {
+        return st;
+      }
 
-  return Status::Error(Err::COMMAND_FAILED, "Recovery exhausted");
+      if (isPeriodicActive()) {
+        bool ready = false;
+        st = readDataReadyStatus(ready);
+      } else {
+        uint64_t serial = 0;
+        st = readSerialNumber(serial);
+      }
+      if (st.ok()) {
+        return Status::Ok();
+      }
+    }
+
+    if (_config.powerCycle != nullptr) {
+      Status st = _config.powerCycle(_config.controlUser);
+      if (!st.ok()) {
+        return st;
+      }
+      _operatingMode = OperatingMode::IDLE;
+      _clearMeasurementRequest();
+      return _schedulePendingCommand(PendingCommand::POWER_CYCLE, _config.powerUpDelayMs);
+    }
+
+    return Status::Error(Err::COMMAND_FAILED, "Recovery exhausted");
+  }();
+  if (startedOffline && !result.ok() && !result.inProgress()) {
+    _reassertOfflineLatch();
+  }
+  return result;
 }
 
 Status SCD41::requestMeasurement() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_driverState == DriverState::OFFLINE) {
+    return Status::Error(Err::BUSY, "Driver is offline; call recover()");
   }
   if (_pendingCommand != PendingCommand::NONE) {
     return Status::Error(Err::BUSY, "Command in progress");
@@ -389,7 +421,7 @@ Status SCD41::getLastMeasurement(Measurement& out) const {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_sampleTimestampMs == 0) {
+  if (!_hasSample) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
   }
 
@@ -404,7 +436,7 @@ Status SCD41::getRawSample(RawSample& out) const {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_sampleTimestampMs == 0) {
+  if (!_hasSample) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
   }
   out = _rawSample;
@@ -415,7 +447,7 @@ Status SCD41::getCompensatedSample(CompensatedSample& out) const {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_sampleTimestampMs == 0) {
+  if (!_hasSample) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
   }
   out = _compSample;
@@ -945,6 +977,7 @@ Status SCD41::startReinit() {
     return st;
   }
 
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
   st = _writeCommand(cmd::CMD_REINIT, true);
   if (!st.ok()) {
     return st;
@@ -961,6 +994,7 @@ Status SCD41::startFactoryReset() {
     return st;
   }
 
+  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
   st = _writeCommand(cmd::CMD_PERFORM_FACTORY_RESET, true);
   if (!st.ok()) {
     return st;
@@ -1100,6 +1134,7 @@ Status SCD41::getSettings(SettingsSnapshot& out) const {
   out.offlineThreshold = _config.offlineThreshold;
   out.measurementPending = _measurementRequested;
   out.measurementReady = _measurementReady;
+  out.hasSample = _hasSample;
   out.measurementReadyMs = _measurementReadyMs;
   out.sampleTimestampMs = _sampleTimestampMs;
   out.missedSamples = _missedSamples;
@@ -1369,10 +1404,18 @@ Status SCD41::_i2cWriteRaw(const uint8_t* buf, size_t len) {
 }
 
 Status SCD41::_i2cWriteTracked(const uint8_t* buf, size_t len) {
+  Status allowed = _ensureNormalI2cAllowed();
+  if (!allowed.ok()) {
+    return allowed;
+  }
   return _updateHealth(_i2cWriteRaw(buf, len));
 }
 
 Status SCD41::_i2cWriteTrackedAllowExpectedNack(const uint8_t* buf, size_t len) {
+  Status allowed = _ensureNormalI2cAllowed();
+  if (!allowed.ok()) {
+    return allowed;
+  }
   Status st = _i2cWriteRaw(buf, len);
   if (st.ok()) {
     return _updateHealth(st);
@@ -1386,11 +1429,19 @@ Status SCD41::_i2cWriteTrackedAllowExpectedNack(const uint8_t* buf, size_t len) 
 
 Status SCD41::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf,
                                    size_t rxLen) {
+  Status allowed = _ensureNormalI2cAllowed();
+  if (!allowed.ok()) {
+    return allowed;
+  }
   return _updateHealth(_i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen));
 }
 
 Status SCD41::_i2cWriteReadTrackedAllowNoData(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf,
                                               size_t rxLen, bool allowNoData) {
+  Status allowed = _ensureNormalI2cAllowed();
+  if (!allowed.ok()) {
+    return allowed;
+  }
   Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
   if (allowNoData && st.code == Err::I2C_NACK_READ &&
       hasCapability(_config.transportCapabilities, TransportCapability::READ_HEADER_NACK)) {
@@ -1580,7 +1631,7 @@ Status SCD41::_readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData
 }
 
 Status SCD41::_updateHealth(const Status& st) {
-  if (!_initialized) {
+  if (!_initialized || st.inProgress()) {
     return st;
   }
 
@@ -1612,6 +1663,21 @@ Status SCD41::_updateHealth(const Status& st) {
   }
 
   return st;
+}
+
+void SCD41::_reassertOfflineLatch() {
+  _driverState = DriverState::OFFLINE;
+  const uint8_t threshold = _config.offlineThreshold == 0 ? 1 : _config.offlineThreshold;
+  if (_consecutiveFailures < threshold) {
+    _consecutiveFailures = threshold;
+  }
+}
+
+Status SCD41::_ensureNormalI2cAllowed() const {
+  if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
+    return Status::Error(Err::BUSY, "Driver is offline; call recover()");
+  }
+  return Status::Ok();
 }
 
 Status SCD41::_ensureCommandDelay() {
@@ -1766,6 +1832,7 @@ void SCD41::_storeSample(const RawSample& sample, bool co2Valid) {
   _lastSampleCo2Valid = co2Valid;
   _compSample.co2Valid = co2Valid;
   _sampleTimestampMs = now;
+  _hasSample = true;
   _measurementReady = true;
   _clearMeasurementRequest();
 }

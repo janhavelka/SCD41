@@ -72,8 +72,8 @@ This split keeps long device operations explicit and predictable. Public calls d
 The public driver follows the same family conventions as the mature workspace libraries:
 
 - lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
-- measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`
-- state and health: `state()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
+- measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, `hasSample()`
+- state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
 - measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
 - mode/query helpers: `getSingleShotMode()`, `getIdentity()`, `readSerialNumber()`, `readSensorVariant()`
@@ -81,7 +81,7 @@ The public driver follows the same family conventions as the mature workspace li
 - compensation/config: `setTemperatureOffsetC()` (finite values only), `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
 - raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, `readWordsCommand()`
-- snapshots: `getSettings()` for local driver state and `readSettings()` for a best-effort state plus live-configuration snapshot
+- snapshots: `getSettings()` for local driver state, including `hasSample`, and `readSettings()` for a best-effort state plus live-configuration snapshot
 
 `readSettings()` is mode-dependent by design:
 
@@ -90,6 +90,12 @@ The public driver follows the same family conventions as the mature workspace li
 - while a command is pending, a measurement is in progress, or the sensor is powered down, it returns the local driver snapshot without live refresh
 
 The raw command helpers are limited to immediate, non-stateful diagnostic transactions. Managed mode transitions and long-running commands must still use the typed APIs, and the raw helpers continue to enforce the sensor's periodic-mode command restrictions. Raw read helpers reject buffers larger than the largest documented SCD41 response (9 bytes), invalid buffers, and locally invalid requests before touching I2C.
+
+Cached raw, fixed-point, and converted sample access is gated by whether any
+sample has ever been cached (`hasSample()` / `SettingsSnapshot::hasSample`), not
+by `measurementReady` or by a nonzero timestamp. `getMeasurement()` can consume
+the current ready flag while the cached sample remains available through the
+snapshot and cached-sample helpers.
 
 ## Measurement Timing Summary
 

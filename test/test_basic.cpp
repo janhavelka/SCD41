@@ -27,12 +27,14 @@ namespace {
 
 struct ScriptedTransport {
   Status writeStatus[32] = {};
+  size_t writeCalls = 0;
   size_t writeCount = 0;
   size_t writeIndex = 0;
 
   Status readStatus[32] = {};
   uint8_t readData[32][9] = {};
   size_t readLen[32] = {};
+  size_t readCalls = 0;
   size_t readCount = 0;
   size_t readIndex = 0;
 
@@ -96,6 +98,7 @@ Status scriptedWrite(uint8_t addr, const uint8_t* data, size_t len, uint32_t tim
   (void)timeoutMs;
   auto* ctx = static_cast<ScriptedTransport*>(user);
   TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
+  ++ctx->writeCalls;
   ctx->lastWriteLen = len;
   memset(ctx->lastWrite, 0, sizeof(ctx->lastWrite));
   memcpy(ctx->lastWrite, data, len);
@@ -112,6 +115,7 @@ Status scriptedWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
   auto* ctx = static_cast<ScriptedTransport*>(user);
   TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
   TEST_ASSERT_EQUAL_UINT32(0u, txLen);
+  ++ctx->readCalls;
   if (ctx->readIndex < ctx->readCount) {
     const Status st = ctx->readStatus[ctx->readIndex];
     if (st.ok()) {
@@ -240,6 +244,29 @@ void test_begin_waits_power_up_delay_and_does_not_track_startup_io() {
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
   TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.driverState()));
+}
+
+void test_update_health_ignores_in_progress() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  bus.nowMs = 123;
+
+  const Status st = device._updateHealth(Status{Err::IN_PROGRESS, 0, "pending"});
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OK),
+                    static_cast<uint8_t>(device.lastError().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.state()));
 }
 
 void test_begin_wait_guard_times_out_if_time_source_stalls() {
@@ -257,6 +284,34 @@ void test_begin_wait_guard_times_out_if_time_source_stalls() {
   TEST_ASSERT_TRUE(bus.yieldCount > 0u);
   TEST_ASSERT_EQUAL_UINT32(0u, bus.writeIndex);
   TEST_ASSERT_EQUAL_UINT32(0u, bus.readIndex);
+}
+
+void test_failed_begin_after_success_clears_health_snapshot() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  (void)device._updateHealth(Status::Error(Err::I2C_TIMEOUT, "forced stale error"));
+  TEST_ASSERT_GREATER_THAN_UINT32(0u, device.totalFailures());
+
+  ScriptedTransport stalledBus;
+  stalledBus.advanceOnYield = false;
+  Config stalledCfg = makeConfig(stalledBus);
+  stalledCfg.powerUpDelayMs = 1;
+  stalledCfg.i2cTimeoutMs = 1;
+
+  const Status st = device.begin(stalledCfg);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.lastErrorMs());
 }
 
 void test_begin_reads_serial_and_variant() {
@@ -283,6 +338,11 @@ void test_begin_rejects_non_scd41_variant() {
   const Status st = device.begin(cfg);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
   TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
 }
 
 void test_probe_works_after_variant_mismatch_begin() {
@@ -467,6 +527,10 @@ void test_measurement_helpers_track_pending_and_preserve_last_sample() {
   TEST_ASSERT_TRUE(device.measurementReady());
   TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
 
+  SettingsSnapshot snap = {};
+  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.hasSample);
+
   Measurement last = {};
   TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
   TEST_ASSERT_TRUE(device.measurementReady());
@@ -483,6 +547,57 @@ void test_measurement_helpers_track_pending_and_preserve_last_sample() {
   TEST_ASSERT_TRUE(device.getLastMeasurement(retained).ok());
   TEST_ASSERT_EQUAL_UINT16(sample.co2Ppm, retained.co2Ppm);
   TEST_ASSERT_EQUAL(sample.co2Valid, retained.co2Valid);
+}
+
+void test_zero_timestamp_sample_is_still_available() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 0;
+  RawSample injected = {601, 20000, 30000};
+  device._storeSample(injected, true);
+  TEST_ASSERT_EQUAL_UINT32(0u, device.sampleTimestampMs());
+  TEST_ASSERT_TRUE(device.hasSample());
+
+  Measurement last = {};
+  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
+  TEST_ASSERT_EQUAL_UINT16(601u, last.co2Ppm);
+
+  RawSample raw = {};
+  TEST_ASSERT_TRUE(device.getRawSample(raw).ok());
+  TEST_ASSERT_EQUAL_UINT16(601u, raw.rawCo2);
+
+  CompensatedSample comp = {};
+  TEST_ASSERT_TRUE(device.getCompensatedSample(comp).ok());
+  TEST_ASSERT_TRUE(comp.co2Valid);
+
+  SettingsSnapshot snap = {};
+  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.hasSample);
+}
+
+void test_offline_request_measurement_does_not_schedule_or_touch_bus() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
+  device._driverState = DriverState::OFFLINE;
+
+  const size_t writeCalls = bus.writeCalls;
+  const size_t readCalls = bus.readCalls;
+  const Status st = device.requestMeasurement();
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::BUSY), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.measurementPending());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
+  TEST_ASSERT_EQUAL_UINT32(writeCalls, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readCalls, bus.readCalls);
 }
 
 void test_get_identity_uses_cached_serial_and_variant() {
@@ -692,6 +807,56 @@ void test_low_level_command_helper_failures_update_health() {
                     static_cast<uint8_t>(device.state()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
                     static_cast<uint8_t>(device.lastError().code));
+}
+
+void test_offline_set_temperature_offset_returns_busy_without_i2c() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  uint16_t word = 0;
+  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+
+  const size_t writesBefore = bus.writeCalls;
+  const size_t readsBefore = bus.readCalls;
+  Status st = device.setTemperatureOffsetC(1.5f);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::BUSY), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+}
+
+void test_failed_recover_from_offline_keeps_latch_after_intermediate_success() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 3;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.writeCount = cfg.offlineThreshold;
+  bus.writeIndex = 0;
+  for (uint8_t i = 0; i < cfg.offlineThreshold; ++i) {
+    bus.writeStatus[i] = Status::Error(Err::I2C_TIMEOUT, "forced write timeout");
+    TEST_ASSERT_FALSE(device.writeCommand(0xABCD).ok());
+  }
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
+  const Status st = device.recover();
+  TEST_ASSERT_FALSE(st.ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_TRUE(device.consecutiveFailures() >= cfg.offlineThreshold);
 }
 
 void test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands() {
@@ -973,7 +1138,9 @@ int main(int, char**) {
   RUN_TEST(test_config_defaults);
   RUN_TEST(test_crc_and_conversion_helpers);
   RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
+  RUN_TEST(test_update_health_ignores_in_progress);
   RUN_TEST(test_begin_wait_guard_times_out_if_time_source_stalls);
+  RUN_TEST(test_failed_begin_after_success_clears_health_snapshot);
   RUN_TEST(test_begin_reads_serial_and_variant);
   RUN_TEST(test_begin_rejects_non_scd41_variant);
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
@@ -984,6 +1151,8 @@ int main(int, char**) {
   RUN_TEST(test_periodic_start_request_and_stop);
   RUN_TEST(test_direct_read_measurement_reads_periodic_sample);
   RUN_TEST(test_measurement_helpers_track_pending_and_preserve_last_sample);
+  RUN_TEST(test_zero_timestamp_sample_is_still_available);
+  RUN_TEST(test_offline_request_measurement_does_not_schedule_or_touch_bus);
   RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
   RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
@@ -994,6 +1163,8 @@ int main(int, char**) {
   RUN_TEST(test_command_delay_guard_times_out_if_time_source_stalls);
   RUN_TEST(test_low_level_command_helpers_handle_expected_nack_and_no_data);
   RUN_TEST(test_low_level_command_helper_failures_update_health);
+  RUN_TEST(test_offline_set_temperature_offset_returns_busy_without_i2c);
+  RUN_TEST(test_failed_recover_from_offline_keeps_latch_after_intermediate_success);
   RUN_TEST(test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands);
   RUN_TEST(test_read_settings_reads_live_device_configuration);
   RUN_TEST(test_read_settings_reads_periodic_ambient_pressure_only);

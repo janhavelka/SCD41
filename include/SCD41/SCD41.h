@@ -102,6 +102,7 @@ struct SettingsSnapshot {
   uint8_t offlineThreshold = 5; ///< Failure threshold used for OFFLINE transition
   bool measurementPending = false; ///< True while a sample fetch is in flight
   bool measurementReady = false; ///< True when a cached sample can be consumed
+  bool hasSample = false; ///< True after at least one sample has been cached
   uint32_t measurementReadyMs = 0; ///< Earliest time a pending sample may become ready
   uint32_t sampleTimestampMs = 0; ///< Timestamp of the last stored sample
   uint32_t missedSamples = 0; ///< Estimated missed periodic samples since last fetch
@@ -127,8 +128,11 @@ public:
   // =========================================================================
 
   /// Initialize the driver, wait the configured power-up settle time, and verify device identity.
+  /// @param config Transport, timing, recovery, and policy settings
+  /// @return Status::Ok() on success, error otherwise
   Status begin(const Config& config);
   /// Advance pending command completion using the caller's monotonic millisecond clock.
+  /// @param nowMs Current monotonic timestamp in milliseconds
   void tick(uint32_t nowMs);
   /// Reset the driver to `UNINIT` and clear runtime state.
   void end();
@@ -150,6 +154,7 @@ public:
   // =========================================================================
 
   DriverState state() const { return _driverState; } ///< Current tracked driver state
+  DriverState driverState() const { return state(); } ///< Alias for shared diagnostics
   bool isOnline() const {
     return _driverState == DriverState::READY || _driverState == DriverState::DEGRADED;
   } ///< True when the driver is READY or DEGRADED
@@ -180,12 +185,19 @@ public:
 
   bool measurementPending() const { return _measurementRequested; } ///< True while a sample fetch is still pending inside the driver
   bool measurementReady() const { return _measurementReady; } ///< True when `getMeasurement()` can consume a cached sample
+  bool hasSample() const { return _hasSample; } ///< True after at least one sample has been cached
   uint32_t measurementReadyMs() const { return _measurementReadyMs; } ///< Earliest time a pending measurement may become available
   bool lastSampleCo2Valid() const { return _lastSampleCo2Valid; } ///< False for RHT-only single-shot samples
-  uint32_t sampleTimestampMs() const { return _sampleTimestampMs; } ///< Timestamp of the cached sample
+  /// Timestamp of the cached sample.
+  /// @return Millisecond timestamp stored with the latest cached sample.
+  uint32_t sampleTimestampMs() const { return _sampleTimestampMs; }
+
+  /// Age of the cached sample in milliseconds.
+  /// @param nowMs Current monotonic timestamp in milliseconds
+  /// @return `nowMs - sampleTimestampMs()` when a sample exists, otherwise 0
   uint32_t sampleAgeMs(uint32_t nowMs) const {
-    return _sampleTimestampMs == 0 ? 0 : (nowMs - _sampleTimestampMs);
-  } ///< Age of the cached sample, or zero when no sample is stored
+    return _hasSample ? (nowMs - _sampleTimestampMs) : 0;
+  }
   uint32_t missedSamplesEstimate() const { return _missedSamples; } ///< Estimated missed periodic samples
 
   /// Directly execute `read_measurement` when a sample is available and update the cached sample.
@@ -195,8 +207,12 @@ public:
   /// Return the most recently cached converted sample without clearing the ready flag.
   Status getLastMeasurement(Measurement& out) const;
   /// Return the last raw sample without clearing the ready flag.
+  /// @param[out] out Last cached raw words
+  /// @return Status::Ok() on success, MEASUREMENT_NOT_READY until a sample has been cached
   Status getRawSample(RawSample& out) const;
   /// Return the last fixed-point converted sample without clearing the ready flag.
+  /// @param[out] out Last cached fixed-point sample
+  /// @return Status::Ok() on success, MEASUREMENT_NOT_READY until a sample has been cached
   Status getCompensatedSample(CompensatedSample& out) const;
   /// Read the sensor data-ready state into a simple boolean.
   Status readDataReadyStatus(bool& ready);
@@ -391,6 +407,8 @@ private:
   // =========================================================================
 
   Status _updateHealth(const Status& st);
+  void _reassertOfflineLatch();
+  Status _ensureNormalI2cAllowed() const;
   Status _ensureCommandDelay();
   Status _waitMs(uint32_t delayMs);
   Status _ensureIdleForConfig(const char* opName) const;
@@ -447,6 +465,7 @@ private:
   uint8_t _consecutiveFailures = 0;
   uint32_t _totalFailures = 0;
   uint32_t _totalSuccess = 0;
+  bool _allowOfflineI2c = false;
 
   uint32_t _lastCommandUs = 0;
   bool _lastCommandValid = false;
@@ -454,6 +473,7 @@ private:
 
   bool _measurementRequested = false;
   bool _measurementReady = false;
+  bool _hasSample = false;
   uint32_t _measurementReadyMs = 0;
   uint32_t _periodicStartMs = 0;
   uint32_t _lastFetchMs = 0;

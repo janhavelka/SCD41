@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
 - Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
+- Cached raw/fixed-point/converted sample access now uses an explicit `hasSample` flag rather than inferring cache validity from timestamps or readiness state.
+- `requestMeasurement()` now returns the latched-offline `BUSY` status without scheduling work while the driver is `OFFLINE`.
 - Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
 - Refined the bring-up CLI again to match the mature family behavior more closely: versioned help header, startup/log flow parity, `state` compact-health alias, toggle-style verbose output, more detailed health/error reporting, less noisy unknown-command handling, and a smarter `read` path that prints a ready sample before scheduling another fetch.
 - Extended the bring-up CLI with chip-oriented `status` and cached `sample` / `last` views, plus explicit pending-work and completion summaries for deferred commands such as self-test, FRC, wake-up, stop-periodic, reinit, and factory reset.
@@ -18,11 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
 - Fixed the bring-up CLI so forced-recalibration failures are always reported and raw diagnostic reads no longer mask read-header NACKs by default.
 - Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
+- Reference documentation now separates compact SCD41 notes from full PDF extraction under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
 - Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
 - Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
 
 ### Added
 - `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
+- `hasSample()` / `SettingsSnapshot::hasSample` and `driverState()` for cross-library diagnostics.
 - Public raw command helpers (`writeCommand`, `writeCommandWithData`, `readCommand`, `readWordCommand`, `readWordsCommand`) plus named single-shot and `readMeasurement()` command helpers.
 - Raw self-test/FRC result accessors and ambient-pressure encode/decode helpers.
 - Small public convenience helpers for application code: `measurementPending()`, `measurementReadyMs()`, `getLastMeasurement()`, and `getIdentity()`.

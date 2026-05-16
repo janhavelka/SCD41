@@ -647,6 +647,10 @@ void printStatusView() {
                 diag::boolColor(snap.measurementReady),
                 yesNo(snap.measurementReady),
                 LOG_COLOR_RESET);
+  Serial.printf("  has_sample: %s%s%s\n",
+                diag::boolColor(snap.hasSample),
+                yesNo(snap.hasSample),
+                LOG_COLOR_RESET);
   Serial.printf("  measurement_ready_ms: %lu\n",
                 static_cast<unsigned long>(snap.measurementReadyMs));
   Serial.printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
@@ -1931,11 +1935,11 @@ void processCommand(const String& cmdLine) {
       uint16_t command = 0;
       uint32_t len = 0;
       if (!cmd::parseU16(cmdToken, command) || !cmd::parseU32(lenToken, len) || len == 0U ||
-          len > 16U) {
-        LOGW("Length must be 1..16");
+          len > app_driver::cmd::MEASUREMENT_RESPONSE_LEN) {
+        LOGW("Length must be 1..9");
         return;
       }
-      uint8_t buf[16] = {};
+      uint8_t buf[app_driver::cmd::MEASUREMENT_RESPONSE_LEN] = {};
       const app_driver::Status st = device.readCommand(command, buf, static_cast<size_t>(len));
       printStatus(st);
       if (!st.ok()) {
