@@ -1935,11 +1935,11 @@ void processCommand(const String& cmdLine) {
       uint16_t command = 0;
       uint32_t len = 0;
       if (!cmd::parseU16(cmdToken, command) || !cmd::parseU32(lenToken, len) || len == 0U ||
-          len > app_driver::cmd::MEASUREMENT_RESPONSE_LEN) {
+          len > SCD41::cmd::MEASUREMENT_RESPONSE_LEN) {
         LOGW("Length must be 1..9");
         return;
       }
-      uint8_t buf[app_driver::cmd::MEASUREMENT_RESPONSE_LEN] = {};
+      uint8_t buf[SCD41::cmd::MEASUREMENT_RESPONSE_LEN] = {};
       const app_driver::Status st = device.readCommand(command, buf, static_cast<size_t>(len));
       printStatus(st);
       if (!st.ok()) {
