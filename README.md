@@ -151,10 +151,10 @@ The repository root can be used as an ESP-IDF component through
 no I2C bus, pins, power rail, logging, or scheduler policy; applications provide
 transport and timing callbacks through `SCD41::Config`.
 
-Under ESP-IDF the private fallback timebase uses `esp_timer_get_time()` and
-`taskYIELD()`, but IDF applications should inject `Config::nowMs`,
-`Config::nowUs`, and `Config::cooperativeYield` so all driver timing follows the
-application scheduler.
+The core component does not include Arduino or ESP-IDF framework headers. IDF
+applications should inject `Config::nowMs`, `Config::nowUs`, and
+`Config::cooperativeYield` so all driver timing follows the application
+scheduler.
 
 See [examples/idf/basic](examples/idf/basic) for an ESP-IDF v6-style
 `i2c_master` adapter and native bring-up CLI with the same user-visible

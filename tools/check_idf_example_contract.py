@@ -81,6 +81,19 @@ REQUIRED_IDF_TOKENS = [
     "LOG_COLOR_RED",
 ]
 
+FORBIDDEN_IDF_PATTERNS = {
+    "Arduino.h": re.compile(r"#\s*include\s*[<\"]Arduino\.h[>\"]"),
+    "Wire.h": re.compile(r"#\s*include\s*[<\"]Wire\.h[>\"]"),
+    "ArduinoCompat": re.compile(r"\bArduinoCompat\b"),
+    "IdfArduinoCompat": re.compile(r"\bIdfArduinoCompat\b"),
+    "TwoWire": re.compile(r"\bTwoWire\b"),
+    "String": re.compile(r"\bString\b"),
+    "Serial": re.compile(r"\bSerial\b"),
+    "Arduino CLI source": re.compile(r"examples/01_basic_bringup_cli/main\.cpp"),
+    "setup": re.compile(r"\bsetup\s*\(\s*\)\s*;"),
+    "loop": re.compile(r"\bloop\s*\(\s*\)\s*;"),
+}
+
 
 def fail(msg: str) -> None:
     print(f"IDF example contract FAILED: {msg}")
@@ -157,6 +170,10 @@ def main() -> int:
         fail(f"raw subcommand sets differ: Arduino={sorted(arduino_raw)}, IDF={sorted(idf_raw)}")
 
     combined_idf = idf + "\n" + transport
+    for label, pattern in FORBIDDEN_IDF_PATTERNS.items():
+        if pattern.search(combined_idf):
+            fail(f"IDF example uses forbidden Arduino/compat token: {label}")
+
     for token in REQUIRED_IDF_TOKENS:
         if token not in combined_idf:
             fail(f"IDF example missing required token: {token}")

@@ -12,11 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ESP-IDF native bring-up CLI example with an application-owned `i2c_master` bus/device, SCD41 transport callbacks, and command parity with the Arduino CLI.
 - `tools/check_idf_example_contract.py` to guard Arduino/ESP-IDF CLI help, command, raw access, and IDF transport contract parity.
 - Safe one-sample `demo` workflow in both Arduino and ESP-IDF CLIs.
-- Private platform timing/yield shim for Arduino and ESP-IDF fallback behavior without including Arduino from the driver implementation.
+- Framework-neutral private timing/yield shim; real timing is supplied by application callbacks.
 - `docs/IDF_PORT.md` and `docs/IDF_PORT_IMPLEMENTATION.md` with the implemented port structure, validation notes, and remaining hardware checks.
 
 ### Changed
-- Core timing guard now allows Arduino timing only inside the private platform shim.
+- Core timing guard now rejects Arduino and ESP-IDF framework headers in core/public headers and `src/`.
 - README now describes the ESP-IDF component/example flow.
 - `library.json` now declares both Arduino and ESP-IDF framework compatibility.
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.

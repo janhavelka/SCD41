@@ -5,9 +5,7 @@ Last updated: 2026-05-19
 ## Implemented
 
 - The library core no longer includes `<Arduino.h>` from `src/SCD41.cpp`.
-- `src/PlatformTime.h` is the only private framework fallback shim:
-  - Arduino builds use `millis()`, `micros()`, and `yield()` when timing hooks are not supplied.
-  - ESP-IDF builds use `esp_timer_get_time()` and `taskYIELD()` when timing hooks are not supplied.
+- `src/PlatformTime.h` is framework-neutral and does not include Arduino or ESP-IDF headers.
 - Root `CMakeLists.txt` registers the core as an ESP-IDF component with C++17 enabled.
 - `examples/idf/basic` provides:
   - an ESP-IDF project CMake file;
@@ -21,8 +19,8 @@ Last updated: 2026-05-19
     raw command access;
   - a non-blocking example loop that advances pending driver work with `tick()`.
 - `tools/check_idf_example_contract.py` compares the Arduino and ESP-IDF CLI
-  help/command/raw-access surface and verifies the IDF example uses the
-  `i2c_master` API.
+  help/command/raw-access surface, verifies the IDF example uses the
+  `i2c_master` API, and rejects Arduino compatibility facades.
 
 ## Core Boundary
 
