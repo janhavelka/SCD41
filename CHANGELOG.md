@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- ESP-IDF component metadata for building the framework-neutral core with `idf_component_register`.
+- ESP-IDF basic example with an application-owned `i2c_master` bus/device and SCD41 transport callbacks.
+- Private platform timing/yield shim for Arduino and ESP-IDF fallback behavior without including Arduino from the driver implementation.
+- `docs/IDF_PORT.md` and `docs/IDF_PORT_IMPLEMENTATION.md` with the implemented port structure, validation notes, and remaining hardware checks.
+
 ### Changed
+- Core timing guard now allows Arduino timing only inside the private platform shim.
+- README now describes the ESP-IDF component/example flow.
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
 - Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 - Cached raw/fixed-point/converted sample access now uses an explicit `hasSample` flag rather than inferring cache validity from timestamps or readiness state.

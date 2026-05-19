@@ -1,12 +1,13 @@
 # SCD41 Driver Library
 
-Production-grade PlatformIO/Arduino package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3.
+Production-grade PlatformIO/Arduino and ESP-IDF component package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3.
 
 ## Overview
 
 This repository follows the same managed I2C library pattern used across the workspace:
 
 - injected I2C transport, no direct `Wire` dependency in library code
+- framework-neutral core with Arduino and ESP-IDF integration behind callbacks/adapters
 - explicit `Status` return values on every fallible operation
 - 4-state health tracking: `UNINIT`, `READY`, `DEGRADED`, `OFFLINE`
 - deterministic timing with bounded waits only
@@ -143,6 +144,21 @@ lib_deps =
 
 Copy [include/SCD41](include/SCD41) and [src](src) into your project.
 
+### ESP-IDF Component
+
+The repository root can be used as an ESP-IDF component through
+`EXTRA_COMPONENT_DIRS` or your component manager workflow. The core driver owns
+no I2C bus, pins, power rail, logging, or scheduler policy; applications provide
+transport and timing callbacks through `SCD41::Config`.
+
+Under ESP-IDF the private fallback timebase uses `esp_timer_get_time()` and
+`taskYIELD()`, but IDF applications should inject `Config::nowMs`,
+`Config::nowUs`, and `Config::cooperativeYield` so all driver timing follows the
+application scheduler.
+
+See [examples/idf/basic](examples/idf/basic) for an ESP-IDF v6-style
+`i2c_master` adapter and a periodic measurement polling task.
+
 ## Quick Start
 
 ```cpp
@@ -235,6 +251,10 @@ use `getLastMeasurement()`.
 
 [examples/01_basic_bringup_cli](examples/01_basic_bringup_cli) provides a family-style serial REPL for bring-up and diagnostics.
 
+[examples/idf/basic](examples/idf/basic) provides a minimal ESP-IDF project that
+owns the I2C bus/device handles and wires them into the same transport callback
+contract used by Arduino examples.
+
 Main command groups:
 
 - Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
@@ -298,6 +318,8 @@ pio run -e esp32s2dev
 - <a href="CHANGELOG.md">CHANGELOG.md</a> - release history
 - <a href="AGENTS.md">AGENTS.md</a> - repository engineering rules
 - <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> - explicit assumptions and scope notes
+- <a href="docs/IDF_PORT.md">docs/IDF_PORT.md</a> - ESP-IDF portability guidance
+- <a href="docs/IDF_PORT_IMPLEMENTATION.md">docs/IDF_PORT_IMPLEMENTATION.md</a> - implemented IDF component/example notes
 - <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
 
 ## License

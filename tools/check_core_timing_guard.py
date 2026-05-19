@@ -22,8 +22,10 @@ BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
-ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {"src/SCD41.cpp": {"millis": 1, "micros": 1, "yield": 1}}
-ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {"src/SCD41.cpp": 1}
+ALLOWED_CALL_COUNTS: Dict[str, Dict[str, int]] = {
+    "src/PlatformTime.h": {"millis": 1, "micros": 1, "yield": 1}
+}
+ALLOWED_INCLUDE_COUNTS: Dict[str, int] = {"src/PlatformTime.h": 1}
 
 
 def strip_non_code(text: str) -> str:
