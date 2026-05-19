@@ -157,7 +157,8 @@ Under ESP-IDF the private fallback timebase uses `esp_timer_get_time()` and
 application scheduler.
 
 See [examples/idf/basic](examples/idf/basic) for an ESP-IDF v6-style
-`i2c_master` adapter and a periodic measurement polling task.
+`i2c_master` adapter and native bring-up CLI with the same user-visible
+command contract as the Arduino serial CLI.
 
 ## Quick Start
 
@@ -251,20 +252,24 @@ use `getLastMeasurement()`.
 
 [examples/01_basic_bringup_cli](examples/01_basic_bringup_cli) provides a family-style serial REPL for bring-up and diagnostics.
 
-[examples/idf/basic](examples/idf/basic) provides a minimal ESP-IDF project that
-owns the I2C bus/device handles and wires them into the same transport callback
-contract used by Arduino examples.
+[examples/idf/basic](examples/idf/basic) provides a native ESP-IDF CLI project
+that owns the I2C bus/device handles and wires them into the same transport
+callback contract used by Arduino examples.
 
 Main command groups:
 
-- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
+- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `demo`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
 - Measurement: `read`, `fetch`, `sample`, `last`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
 - Mode and power: `mode`, `periodic`, `sleep`, `wake`
 - Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
 - Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `selftest_result`, `frc`, `frc_result`
 - Raw commands: `command write`, `command write_data`, `command read`, `command read_word`, `command read_words`
 
-`read` follows the managed driver path: it prints a sample immediately if one is already ready, or
+The Arduino and ESP-IDF examples intentionally expose the same command names,
+aliases, help sections, prompts, colorized status/health output, diagnostics,
+the safe one-sample `demo` workflow, maintenance workflows, measurement flows,
+compensation controls, and raw command access. `read` follows the managed driver
+path: it prints a sample immediately if one is already ready, or
 it schedules a managed fetch when no sample is pending yet. `fetch` is the explicit direct-read path
 for a sample that is expected to be ready now. `verbose` follows the family CLI convention and acts
 as a toggle with no argument, or as an explicit setter with `0` / `1`. `status` is the concise
@@ -299,6 +304,7 @@ command read_word 0xE4B8
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
 pio test -e native
 pio run -e esp32s3dev
 pio run -e esp32s2dev

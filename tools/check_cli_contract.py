@@ -18,7 +18,7 @@ REQUIRED_COMMON = [
     "HealthView.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "drv", "read", "verbose", "stress"]
+MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "diag", "demo", "drv", "read", "verbose", "stress"]
 
 
 def fail(msg: str) -> None:

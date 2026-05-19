@@ -12,7 +12,7 @@ Official ESP-IDF references:
 ## Current State
 
 - Public API is in `include/SCD41/`; implementation is in `src/SCD41.cpp`.
-- `library.json` and `platformio.ini` remain Arduino/PlatformIO package files.
+- `library.json` is package metadata for Arduino and ESP-IDF consumers; `platformio.ini` remains the Arduino/native-test project file.
 - Root `CMakeLists.txt` registers the core as an ESP-IDF component.
 - The driver already uses injected I2C callbacks from `Config`; library code does not call `Wire` directly.
 - The SCD41 address is fixed at `0x62`.
@@ -37,7 +37,7 @@ Official ESP-IDF references:
   helpers, including CLI/compat/diagnostic helpers, are Arduino example glue.
   They use `Wire`, `Serial`, `String`, GPIO helpers, `delay()`, and `yield()`.
 - `platformio.ini` builds Arduino examples and native tests. It is not an IDF project file.
-- `library.json` declares only the Arduino framework and must remain the PlatformIO package manifest.
+- `library.json` declares Arduino and ESP-IDF framework compatibility and remains the PlatformIO package manifest.
 - `include/SCD41/Version.h` is generated from `library.json`; do not edit it by hand.
 
 ## Portability Status
@@ -47,7 +47,7 @@ Implemented:
 1. The core driver compiles through a private platform timing/yield shim instead of direct Arduino includes.
 2. ESP-IDF fallback timing uses `esp_timer_get_time()` and `taskYIELD()`.
 3. Root `CMakeLists.txt` provides `idf_component_register`.
-4. `examples/idf/basic` provides an ESP-IDF v6 `i2c_master` adapter.
+4. `examples/idf/basic` provides an ESP-IDF v6 `i2c_master` adapter and a native CLI matching the Arduino bring-up CLI command contract.
 5. Arduino examples remain separate and are not part of the IDF component target.
 6. The IDF example maps `esp_err_t` values to library `Status` codes and advertises only the timeout capability.
 
@@ -75,6 +75,9 @@ Still application-owned:
   - Own the I2C bus, device handle, optional regulator/reset GPIOs, and task timing.
   - Fill `Config` with IDF adapter callbacks.
   - Call `tick()` frequently enough for pending long operations.
+  - Provide the native CLI command set, help text, prompts, status/health output,
+    diagnostics, maintenance workflows, and raw command access in parity with the
+    Arduino example.
 - CMake files
   - Root component `CMakeLists.txt`.
   - Example project files under `examples/idf/basic`.
@@ -83,7 +86,7 @@ Still application-owned:
 
 - Keep the SCD41 core as a framework-neutral C++17 component.
 - Keep Arduino-only adapters in `examples/common/`; they are not part of the library.
-- Add IDF-only adapters under an IDF example or an optional `extras/idf/` style directory.
+- Keep IDF-only adapters under an IDF example or an optional `extras/idf/` style directory.
 - The library must never own the ESP-IDF I2C bus, pins, pullups, clock speed, power rail, or reset GPIO.
 - Optional `busReset` and `powerCycle` remain application callbacks. The IDF implementation may use `driver/gpio.h`, a regulator driver, or board-specific code outside the library.
 - The application owns bus lifetime:
@@ -193,20 +196,25 @@ Arduino examples:
 
 ESP-IDF examples:
 
-- Add `examples/idf/basic` with a normal ESP-IDF `main` component.
+- Keep `examples/idf/basic` as a normal ESP-IDF `main` component.
 - Configure SDA, SCL, pullups, and bus frequency in the example only.
 - Use `i2c_new_master_bus()`, `i2c_master_bus_add_device()`, and the callback adapter.
 - Provide `nowMs`, `nowUs`, and `cooperativeYield` callbacks.
 - Build an `SCD41::Config`, set callbacks and timeout, and call `begin(config)`.
-- Start periodic measurement, call `tick()` from a task loop, and read samples when available.
-- For single-shot and maintenance commands, demonstrate starting the command and advancing completion through `tick()`.
-- Print results with ESP-IDF logging from the example, not from the library.
+- Run the same user-visible CLI contract as the Arduino example: command
+  names/aliases, help sections, arguments/defaults/ranges, status/colors,
+  diagnostics, health/error reporting, probe/recover/reset workflows,
+  self-test/stress/demo flows, and raw command access.
+- Advance pending single-shot, periodic, and maintenance operations through
+  `tick()` from the example loop.
+- Print results from the example, not from the library.
 
 ## Test and Validation Plan
 
 - Compile the existing Arduino PlatformIO environments as regression checks
   only. Arduino-ESP32 builds do not prove pure ESP-IDF v6.0.1 compatibility.
 - Compile native tests to preserve framework-neutral behavior.
+- Run repository contract checks, including `python tools/check_idf_example_contract.py`, to keep Arduino and ESP-IDF CLI behavior aligned.
 - Add an ESP-IDF example build for ESP32-S2 and ESP32-S3.
 - Hardware smoke test probe and serial-number read at fixed address `0x62`.
 - Verify CRC failure injection returns the expected status and does not update measurement state.
@@ -232,13 +240,13 @@ ESP-IDF examples:
 ## Ordered Checklist
 
 1. Add a private timing/yield shim and remove direct `<Arduino.h>` use from `src/SCD41.cpp`. Done.
-2. Add a minimal component `CMakeLists.txt` for the core library. Done.
+2. Add a core component `CMakeLists.txt` for the library. Done.
 3. Add an IDF I2C adapter using `<driver/i2c_master.h>` outside the core driver. Done.
 4. Add optional IDF bus-reset and power-cycle callback examples outside the library. Documented as application-owned.
-5. Add `examples/idf/basic` with bus setup, adapter callbacks, timing callbacks, and a polling task. Done.
+5. Add `examples/idf/basic` with bus setup, adapter callbacks, timing callbacks, and a native CLI matching the Arduino bring-up CLI. Done.
    Include top-level and `main` CMake files, component path wiring, and
    `extern "C" void app_main(void)`. Done.
 6. Build with ESP-IDF v6.0.1 for ESP32-S2 and ESP32-S3. Pending local ESP-IDF environment.
-7. Run Arduino and native builds to confirm existing users are unaffected. Pending local validation.
+7. Run Arduino and native builds to confirm existing users are unaffected. Done for native, ESP32-S3 Arduino, and ESP32-S2 Arduino via PlatformIO.
 8. Run hardware tests for probe, CRC, periodic measurement, single-shot, wake-up, stop-periodic, maintenance commands, and fault injection. Pending hardware.
 9. Update README and changelog for the implemented port. Done.

@@ -15,7 +15,14 @@ Last updated: 2026-05-19
   - an `i2c_master` transport adapter;
   - explicit bus/device ownership in the example;
   - `Config::nowMs`, `nowUs`, `cooperativeYield`, `i2cWrite`, and `i2cWriteRead` wiring;
-  - a periodic measurement polling loop driven by `tick()`.
+  - a native CLI matching the Arduino bring-up CLI command names, aliases,
+    help sections, prompts, colorized status/health output, diagnostics,
+    compensation controls, maintenance workflows, stress/self-test/demo flows, and
+    raw command access;
+  - a non-blocking example loop that advances pending driver work with `tick()`.
+- `tools/check_idf_example_contract.py` compares the Arduino and ESP-IDF CLI
+  help/command/raw-access surface and verifies the IDF example uses the
+  `i2c_master` API.
 
 ## Core Boundary
 
@@ -44,6 +51,7 @@ Run these checks from the repository root:
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
 pio test -e native
 pio run -e esp32s3dev
 pio run -e esp32s2dev
