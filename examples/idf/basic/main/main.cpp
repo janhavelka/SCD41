@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
@@ -147,6 +146,7 @@ constexpr uint8_t SCD41_ADDR = SCD41::cmd::I2C_ADDRESS;
 constexpr uint32_t STRESS_PROGRESS_UPDATES = 10U;
 constexpr uint32_t DEFAULT_STRESS_COUNT = 100U;
 constexpr uint32_t MAX_STRESS_COUNT = 100000U;
+constexpr size_t CLI_LINE_CAPACITY = 128U;
 
 #define LOG_COLOR_RESULT(ok) ((ok) ? LOG_COLOR_GREEN : LOG_COLOR_RED)
 #define LOG_PRINT_WITH_TAG(tagColor, tag, fmt, ...) \
@@ -254,7 +254,7 @@ void cooperativeYield(void*) {
   taskYIELD();
 }
 
-uint32_t millis() {
+uint32_t idfNowMs() {
   return nowMs(nullptr);
 }
 
@@ -368,7 +368,71 @@ void printToggleState(const char* label, bool enabled) {
   std::printf("  %s: %s%s%s\n", label, toggleColor(enabled), onOff(enabled), LOG_COLOR_RESET);
 }
 
-std::string trimCopy(const std::string& input) {
+struct Line {
+  static constexpr size_t npos = static_cast<size_t>(-1);
+
+  char text[CLI_LINE_CAPACITY] = {};
+  size_t len = 0;
+
+  void clear() {
+    len = 0;
+    text[0] = '\0';
+  }
+
+  bool assign(const char* src, size_t srcLen) {
+    if (src == nullptr) {
+      clear();
+      return false;
+    }
+    const bool fits = srcLen < CLI_LINE_CAPACITY;
+    const size_t copyLen = fits ? srcLen : (CLI_LINE_CAPACITY - 1U);
+    if (copyLen > 0U) {
+      std::memcpy(text, src, copyLen);
+    }
+    len = copyLen;
+    text[len] = '\0';
+    return fits;
+  }
+
+  bool assign(const char* src) {
+    return assign(src, (src == nullptr) ? 0U : std::strlen(src));
+  }
+
+  bool empty() const {
+    return len == 0U;
+  }
+
+  size_t size() const {
+    return len;
+  }
+
+  const char* c_str() const {
+    return text;
+  }
+
+  char operator[](size_t index) const {
+    return (index < len) ? text[index] : '\0';
+  }
+
+  size_t find(char needle) const {
+    for (size_t i = 0; i < len; ++i) {
+      if (text[i] == needle) {
+        return i;
+      }
+    }
+    return npos;
+  }
+};
+
+bool operator==(const Line& lhs, const char* rhs) {
+  return std::strcmp(lhs.c_str(), (rhs == nullptr) ? "" : rhs) == 0;
+}
+
+bool operator!=(const Line& lhs, const char* rhs) {
+  return !(lhs == rhs);
+}
+
+void trimCopy(const Line& input, Line& output) {
   size_t first = 0;
   while (first < input.size() && (input[first] == ' ' || input[first] == '\t')) {
     ++first;
@@ -377,27 +441,32 @@ std::string trimCopy(const std::string& input) {
   while (last > first && (input[last - 1U] == ' ' || input[last - 1U] == '\t')) {
     --last;
   }
-  return input.substr(first, last - first);
+  (void)output.assign(input.c_str() + first, last - first);
 }
 
-bool splitHeadTail(const std::string& input, std::string& head, std::string& tail) {
-  const std::string trimmed = trimCopy(input);
+bool splitHeadTail(const Line& input, Line& head, Line& tail) {
+  Line trimmed;
+  trimCopy(input, trimmed);
   const size_t split = trimmed.find(' ');
-  if (split == std::string::npos) {
+  if (split == Line::npos) {
     head = trimmed;
     tail.clear();
   } else {
-    head = trimCopy(trimmed.substr(0, split));
-    tail = trimCopy(trimmed.substr(split + 1U));
+    Line rawHead;
+    Line rawTail;
+    (void)rawHead.assign(trimmed.c_str(), split);
+    (void)rawTail.assign(trimmed.c_str() + split + 1U, trimmed.size() - split - 1U);
+    trimCopy(rawHead, head);
+    trimCopy(rawTail, tail);
   }
   return !head.empty();
 }
 
-bool hasLeadingMinus(const std::string& token) {
+bool hasLeadingMinus(const Line& token) {
   return !token.empty() && token[0] == '-';
 }
 
-bool parseU16(const std::string& token, uint16_t& outValue) {
+bool parseU16(const Line& token, uint16_t& outValue) {
   if (token.empty() || hasLeadingMinus(token)) {
     return false;
   }
@@ -410,7 +479,7 @@ bool parseU16(const std::string& token, uint16_t& outValue) {
   return true;
 }
 
-bool parseU32(const std::string& token, uint32_t& outValue) {
+bool parseU32(const Line& token, uint32_t& outValue) {
   if (token.empty() || hasLeadingMinus(token)) {
     return false;
   }
@@ -423,7 +492,7 @@ bool parseU32(const std::string& token, uint32_t& outValue) {
   return true;
 }
 
-bool parseFloat(const std::string& token, float& outValue) {
+bool parseFloat(const Line& token, float& outValue) {
   if (token.empty()) {
     return false;
   }
@@ -432,7 +501,7 @@ bool parseFloat(const std::string& token, float& outValue) {
   return !(end == token.c_str() || *end != '\0');
 }
 
-bool parseBool01(const std::string& token, bool& outValue) {
+bool parseBool01(const Line& token, bool& outValue) {
   if (token == "1" || token == "on" || token == "true" || token == "enable") {
     outValue = true;
     return true;
@@ -444,8 +513,8 @@ bool parseBool01(const std::string& token, bool& outValue) {
   return false;
 }
 
-bool readLine(std::string& outLine) {
-  static char buffer[128] = {};
+bool readLine(Line& outLine) {
+  static char buffer[CLI_LINE_CAPACITY] = {};
   static size_t length = 0;
   static bool overflowed = false;
 
@@ -471,10 +540,15 @@ bool readLine(std::string& outLine) {
       if (overflowed) {
         length = 0;
         overflowed = false;
+        outLine.clear();
+        LOGW("Command too long (max %u characters); discarded",
+             static_cast<unsigned>(CLI_LINE_CAPACITY - 1U));
         return false;
       }
       buffer[length] = '\0';
-      outLine = trimCopy(buffer);
+      Line raw;
+      (void)raw.assign(buffer, length);
+      trimCopy(raw, outLine);
       length = 0;
       return !outLine.empty();
     }
@@ -630,7 +704,7 @@ void printStressProgress(uint32_t completed, uint32_t total, uint32_t okCount, u
 void resetStressStats(int target) {
   gStressStats = StressStats{};
   gStressStats.active = true;
-  gStressStats.startMs = millis();
+  gStressStats.startMs = idfNowMs();
   gStressStats.successBefore = device.totalSuccess();
   gStressStats.failBefore = device.totalFailures();
   gStressStats.target = target;
@@ -676,7 +750,7 @@ void updateStressStats(const app_driver::Measurement& sample) {
 
 void finishStressStats() {
   gStressStats.active = false;
-  gStressStats.endMs = millis();
+  gStressStats.endMs = idfNowMs();
   const uint32_t successDelta = device.totalSuccess() - gStressStats.successBefore;
   const uint32_t failDelta = device.totalFailures() - gStressStats.failBefore;
   const uint32_t durationMs = gStressStats.endMs - gStressStats.startMs;
@@ -810,7 +884,7 @@ void printCompensatedSample(const app_driver::CompensatedSample& sample) {
 }
 
 void printDriverHealth() {
-  const uint32_t now = millis();
+  const uint32_t now = idfNowMs();
   const uint32_t totalOk = device.totalSuccess();
   const uint32_t totalFail = device.totalFailures();
   const uint32_t total = totalOk + totalFail;
@@ -1038,7 +1112,7 @@ void printFrcResultView() {
 }
 
 void printPendingWorkView(const char* title = "=== Pending Work ===") {
-  const uint32_t now = millis();
+  const uint32_t now = idfNowMs();
   const uint32_t pendingLatencyMs =
       (gPendingRead && gPendingStartMs > 0U) ? (now - gPendingStartMs) : 0U;
 
@@ -1070,7 +1144,7 @@ void printCommandCompletionView(app_driver::PendingCommand completed) {
 }
 
 void printStatusView() {
-  const uint32_t now = millis();
+  const uint32_t now = idfNowMs();
 
   std::printf("=== Status ===\n");
   std::printf("  initialized: %s%s%s\n",
@@ -1163,7 +1237,7 @@ void printStatusView() {
 }
 
 void printSampleView() {
-  const uint32_t now = millis();
+  const uint32_t now = idfNowMs();
   std::printf("=== Sample ===\n");
 
   std::printf("  measurement_ready: %s%s%s\n",
@@ -1298,7 +1372,7 @@ void printDriverView() {
   }
 
   const uint32_t pendingLatencyMs =
-      (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+      (gPendingRead && gPendingStartMs > 0U) ? (idfNowMs() - gPendingStartMs) : 0U;
   std::printf("  mode: %s\n", app_driver::modeToString(snap.operatingMode));
   std::printf("  single_shot_mode: %s\n", singleShotModeToString(snap.singleShotMode));
   std::printf("  pending: %s\n", app_driver::pendingToString(snap.pendingCommand));
@@ -1309,7 +1383,7 @@ void printDriverView() {
   std::printf("  measurement_ready_ms: %lu\n",
               static_cast<unsigned long>(device.measurementReadyMs()));
   std::printf("  pending_latency_ms: %lu\n", static_cast<unsigned long>(pendingLatencyMs));
-  std::printf("  sample_age_ms: %lu\n", static_cast<unsigned long>(device.sampleAgeMs(millis())));
+  std::printf("  sample_age_ms: %lu\n", static_cast<unsigned long>(device.sampleAgeMs(idfNowMs())));
   std::printf("  missed_samples_estimate: %lu\n",
               static_cast<unsigned long>(snap.missedSamples));
   std::printf("  last_sample_co2_valid: %s\n", yesNo(snap.lastSampleCo2Valid));
@@ -1394,7 +1468,7 @@ app_driver::Status scheduleMeasurement() {
   const app_driver::Status st = device.requestMeasurement();
   if (st.inProgress()) {
     gPendingRead = true;
-    gPendingStartMs = millis();
+    gPendingStartMs = idfNowMs();
   } else if (!st.ok()) {
     gPendingRead = false;
     gPendingStartMs = 0;
@@ -1455,7 +1529,7 @@ void handleMeasurementReady() {
 
   app_driver::Measurement sample;
   const app_driver::Status st = device.getMeasurement(sample);
-  const uint32_t latencyMs = (gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+  const uint32_t latencyMs = (gPendingStartMs > 0U) ? (idfNowMs() - gPendingStartMs) : 0U;
   gPendingRead = false;
   gPendingStartMs = 0;
   if (!st.ok()) {
@@ -1760,16 +1834,16 @@ void printHelp() {
               LOG_COLOR_RESET);
 }
 
-void processConvert(const std::string& tail) {
-  std::string first;
-  std::string rest;
+void processConvert(const Line& tail) {
+  Line first;
+  Line rest;
   if (!splitHeadTail(tail, first, rest)) {
     LOGW("Usage: convert <rawT> <rawRH> [co2]");
     return;
   }
 
-  std::string second;
-  std::string third;
+  Line second;
+  Line third;
   if (!splitHeadTail(rest, second, third)) {
     LOGW("Usage: convert <rawT> <rawRH> [co2]");
     return;
@@ -1793,9 +1867,9 @@ void processConvert(const std::string& tail) {
               static_cast<double>(app_driver::Device::convertHumidityPct(rawRh)));
 }
 
-void processCommand(const std::string& cmdLine) {
-  std::string head;
-  std::string tail;
+void processCommand(const Line& cmdLine) {
+  Line head;
+  Line tail;
   if (!splitHeadTail(cmdLine, head, tail)) {
     return;
   }
@@ -1906,7 +1980,7 @@ void processCommand(const std::string& cmdLine) {
     const app_driver::Status st = device.readMeasurement(sample);
     if (st.ok()) {
       const uint32_t latencyMs =
-          (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+          (gPendingRead && gPendingStartMs > 0U) ? (idfNowMs() - gPendingStartMs) : 0U;
       gPendingRead = false;
       gPendingStartMs = 0;
       if (gVerbose && latencyMs > 0U) {
@@ -1950,7 +2024,7 @@ void processCommand(const std::string& cmdLine) {
       return;
     }
     const uint32_t latencyMs =
-        (gPendingRead && gPendingStartMs > 0U) ? (millis() - gPendingStartMs) : 0U;
+        (gPendingRead && gPendingStartMs > 0U) ? (idfNowMs() - gPendingStartMs) : 0U;
     gPendingRead = false;
     gPendingStartMs = 0;
     if (gVerbose && latencyMs > 0U) {
@@ -2101,7 +2175,7 @@ void processCommand(const std::string& cmdLine) {
     }
     if (st.inProgress()) {
       gPendingRead = true;
-      gPendingStartMs = millis();
+      gPendingStartMs = idfNowMs();
     }
     printStatus(st);
     if (st.inProgress()) {
@@ -2411,8 +2485,8 @@ void processCommand(const std::string& cmdLine) {
   }
 
   if (head == "command") {
-    std::string sub;
-    std::string rest;
+    Line sub;
+    Line rest;
     if (!splitHeadTail(tail, sub, rest)) {
       LOGW("Usage: command write|write_data|read|read_word|read_words ...");
       return;
@@ -2429,8 +2503,8 @@ void processCommand(const std::string& cmdLine) {
     }
 
     if (sub == "write_data") {
-      std::string cmdToken;
-      std::string dataToken;
+      Line cmdToken;
+      Line dataToken;
       if (!splitHeadTail(rest, cmdToken, dataToken)) {
         LOGW("Usage: command write_data <cmd> <data>");
         return;
@@ -2446,8 +2520,8 @@ void processCommand(const std::string& cmdLine) {
     }
 
     if (sub == "read") {
-      std::string cmdToken;
-      std::string lenToken;
+      Line cmdToken;
+      Line lenToken;
       if (!splitHeadTail(rest, cmdToken, lenToken)) {
         LOGW("Usage: command read <cmd> <len>");
         return;
@@ -2489,8 +2563,8 @@ void processCommand(const std::string& cmdLine) {
     }
 
     if (sub == "read_words") {
-      std::string cmdToken;
-      std::string countToken;
+      Line cmdToken;
+      Line countToken;
       if (!splitHeadTail(rest, cmdToken, countToken)) {
         LOGW("Usage: command read_words <cmd> <count>");
         return;
@@ -2595,13 +2669,13 @@ extern "C" void app_main(void) {
   setupCli();
 
   while (true) {
-    device.tick(millis());
+    device.tick(idfNowMs());
     handlePendingTransitions();
     handleMeasurementReady();
 
     if (gVerbose && gPendingRead) {
       static uint32_t lastLogMs = 0;
-      const uint32_t now = millis();
+      const uint32_t now = idfNowMs();
       if ((now - lastLogMs) >= 1000U) {
         lastLogMs = now;
         std::printf("pending=%s ready=%s watch=%s stress=%d\n",
@@ -2612,7 +2686,7 @@ extern "C" void app_main(void) {
       }
     }
 
-    std::string line;
+    Line line;
     if (readLine(line)) {
       processCommand(line);
       printPrompt();

@@ -1,6 +1,6 @@
 # SCD41 ESP-IDF v6.0.1 Port Status
 
-Last updated: 2026-05-19
+Last updated: 2026-05-24
 
 Scope: implemented core portability changes plus an ESP-IDF component/example. Arduino/PlatformIO support remains intact.
 
@@ -14,6 +14,8 @@ Official ESP-IDF references:
 - Public API is in `include/SCD41/`; implementation is in `src/SCD41.cpp`.
 - `library.json` is package metadata for Arduino and ESP-IDF consumers; `platformio.ini` remains the Arduino/native-test project file.
 - Root `CMakeLists.txt` registers the core as an ESP-IDF component.
+- `examples/idf/basic` uses native ESP-IDF APIs and a fixed-size CLI input
+  buffer. Commands longer than 127 characters are rejected and discarded.
 - The driver already uses injected I2C callbacks from `Config`; library code does not call `Wire` directly.
 - The SCD41 address is fixed at `0x62`.
 - The driver supports periodic measurement, low-power periodic measurement, single-shot commands, RHT-only single shot, stop periodic, power down, wake up, serial number, identity, compensation, ASC, persist settings, reinit, factory reset, self test, forced recalibration, raw command helpers, and health tracking.
@@ -44,12 +46,15 @@ Official ESP-IDF references:
 
 Implemented:
 
-1. The core driver compiles without Arduino or ESP-IDF framework headers.
+1. The core driver is structured to avoid Arduino or ESP-IDF framework headers.
 2. ESP-IDF timing/yield behavior is injected by the example through `Config::nowMs`, `Config::nowUs`, and `Config::cooperativeYield`.
 3. Root `CMakeLists.txt` provides `idf_component_register`.
 4. `examples/idf/basic` provides an ESP-IDF v6 `i2c_master` adapter and a native CLI matching the Arduino bring-up CLI command contract.
 5. Arduino examples remain separate and are not part of the IDF component target.
 6. The IDF example maps `esp_err_t` values to library `Status` codes and advertises only the timeout capability.
+7. The IDF example command parser uses bounded `char` storage only; the
+   contract checker rejects `<string>`, `std::string`, heap allocation calls,
+   Arduino compatibility tokens, and Arduino-style `millis()` shims.
 
 Still application-owned:
 
@@ -236,6 +241,8 @@ ESP-IDF examples:
    Include top-level and `main` CMake files, component path wiring, and
    `extern "C" void app_main(void)`. Done.
 6. Build with ESP-IDF v6.0.1 for ESP32-S2 and ESP32-S3. Pending local ESP-IDF environment.
-7. Run Arduino and native builds to confirm existing users are unaffected. Done for native, ESP32-S3 Arduino, and ESP32-S2 Arduino via PlatformIO.
+7. Run Arduino and native builds to confirm existing users are unaffected.
+   Pending local PlatformIO/Arduino toolchain availability in this workspace
+   pass; do not treat static checks as compile validation.
 8. Run hardware tests for probe, CRC, periodic measurement, single-shot, wake-up, stop-periodic, maintenance commands, and fault injection. Pending hardware.
 9. Update README and changelog for the implemented port. Done.

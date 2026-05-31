@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Core timing guard now rejects Arduino and ESP-IDF framework headers in core/public headers and `src/`.
+- ESP-IDF CLI parsing now uses fixed-size command buffers, rejects overlong
+  commands, and is guarded against `<string>`, `std::string`, and heap-backed
+  parser regressions.
 - README now describes the ESP-IDF component/example flow.
 - `library.json` now declares both Arduino and ESP-IDF framework compatibility.
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.

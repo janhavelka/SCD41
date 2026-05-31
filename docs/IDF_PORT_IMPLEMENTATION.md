@@ -1,6 +1,6 @@
 # SCD41 ESP-IDF Port Implementation
 
-Last updated: 2026-05-19
+Last updated: 2026-05-24
 
 ## Implemented
 
@@ -17,10 +17,14 @@ Last updated: 2026-05-19
     help sections, prompts, colorized status/health output, diagnostics,
     compensation controls, maintenance workflows, stress/self-test/demo flows, and
     raw command access;
+  - fixed-size command input storage with a 127-character command limit and
+    clean rejection of overlong commands;
   - a non-blocking example loop that advances pending driver work with `tick()`.
 - `tools/check_idf_example_contract.py` compares the Arduino and ESP-IDF CLI
   help/command/raw-access surface, verifies the IDF example uses the
-  `i2c_master` API, and rejects Arduino compatibility facades.
+  `i2c_master` API, rejects Arduino compatibility facades, and rejects
+  heap-backed parser regressions such as `<string>`, `std::string`, `new`, and
+  C allocation calls.
 
 ## Core Boundary
 
