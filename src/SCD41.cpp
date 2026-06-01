@@ -5,7 +5,7 @@
 
 #include "SCD41/SCD41.h"
 
-#include <Arduino.h>
+#include "PlatformTime.h"
 
 #include <cmath>
 #include <cstring>
@@ -1996,18 +1996,18 @@ SensorVariant SCD41::_variantFromSerialWord(uint16_t word0) {
 }
 
 uint32_t SCD41::_nowMs() const {
-  return (_config.nowMs != nullptr) ? _config.nowMs(_config.timeUser) : millis();
+  return (_config.nowMs != nullptr) ? _config.nowMs(_config.timeUser) : platform::nowMs();
 }
 
 uint32_t SCD41::_nowUs() const {
-  return (_config.nowUs != nullptr) ? _config.nowUs(_config.timeUser) : micros();
+  return (_config.nowUs != nullptr) ? _config.nowUs(_config.timeUser) : platform::nowUs();
 }
 
 void SCD41::_cooperativeYield() const {
   if (_config.cooperativeYield != nullptr) {
     _config.cooperativeYield(_config.timeUser);
   } else {
-    yield();
+    platform::cooperativeYield();
   }
 }
 

@@ -74,9 +74,9 @@ struct Config {
   void* controlUser = nullptr;           ///< User context for busReset/powerCycle
 
   // === Timing hooks (optional) ===
-  NowMsFn nowMs = nullptr;            ///< Monotonic millisecond source
-  NowUsFn nowUs = nullptr;            ///< Monotonic microsecond source
-  YieldFn cooperativeYield = nullptr; ///< Cooperative scheduler hint
+  NowMsFn nowMs = nullptr;            ///< Monotonic millisecond source; IDF apps should inject this explicitly
+  NowUsFn nowUs = nullptr;            ///< Monotonic microsecond source; IDF apps should inject this explicitly
+  YieldFn cooperativeYield = nullptr; ///< Cooperative scheduler hint; IDF apps should inject this explicitly
   void* timeUser = nullptr;           ///< User context for timing hooks
 
   // === Transport settings ===

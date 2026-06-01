@@ -1175,6 +1175,36 @@ void runDiagnostics() {
                 LOG_COLOR_RESET);
 }
 
+void runDemo() {
+  Serial.println("=== Demo ===");
+  if (!device.isInitialized()) {
+    printStatus(app_driver::Status::Error(app_driver::Err::NOT_INITIALIZED, "begin() not called"));
+    return;
+  }
+
+  if (device.pendingCommand() != app_driver::PendingCommand::NONE || device.measurementPending()) {
+    Serial.println("  Driver already has pending work");
+    printPendingWorkView();
+    return;
+  }
+
+  if (device.measurementReady()) {
+    app_driver::Measurement sample;
+    const app_driver::Status st = device.getMeasurement(sample);
+    printStatus(st);
+    if (st.ok()) {
+      printMeasurement(sample);
+    }
+    return;
+  }
+
+  const app_driver::Status st = scheduleMeasurement();
+  printStatus(st);
+  if (st.inProgress()) {
+    printPendingWorkView();
+  }
+}
+
 void printHelp() {
   Serial.println();
   cli::printHelpHeader("SCD41 CLI Help");
@@ -1190,6 +1220,7 @@ void printHelp() {
   cli::printHelpItem("probe", "Probe device without health tracking");
   cli::printHelpItem("recover", "Attempt manual driver recovery");
   cli::printHelpItem("diag", "Run safe diagnostics and health invariants");
+  cli::printHelpItem("demo", "Run a safe one-sample managed measurement workflow");
   cli::printHelpItem("drv", "Print driver state and health");
   cli::printHelpItem("drv1 / state", "Print compact health view");
   cli::printHelpItem("cfg", "Show current example config");
@@ -1205,7 +1236,7 @@ void printHelp() {
   cli::printHelpItem("comp", "Print the last compensated sample");
   cli::printHelpItem("dataready", "Read get_data_ready_status");
   cli::printHelpItem("watch [0|1]", "Continuously schedule measurements");
-  cli::printHelpItem("stress [N]", "Async measurement stress test with summary");
+  cli::printHelpItem("stress [N=100, 1..100000]", "Async measurement stress test with summary");
   cli::printHelpItem("single [full|rht]", "Show or set idle single-shot mode");
   cli::printHelpItem("single_start [full|rht]", "Start a one-shot full or RHT-only command");
   cli::printHelpItem("convert <rawT> <rawRH> [co2]", "Convert raw values using library helpers");
@@ -1219,13 +1250,13 @@ void printHelp() {
   cli::printHelpSection("Identity And Compensation");
   cli::printHelpItem("serial", "Read and print serial number and variant");
   cli::printHelpItem("variant", "Read and print current variant");
-  cli::printHelpItem("toffset [degC]", "Show or set temperature offset");
-  cli::printHelpItem("altitude [m]", "Show or set sensor altitude");
-  cli::printHelpItem("pressure [Pa]", "Show or set ambient pressure compensation");
+  cli::printHelpItem("toffset [degC, 0..20]", "Show or set temperature offset");
+  cli::printHelpItem("altitude [m, 0..3000]", "Show or set sensor altitude");
+  cli::printHelpItem("pressure [Pa, 70000..120000]", "Show or set ambient pressure compensation");
   cli::printHelpItem("asc_enabled [0|1]", "Show or set automatic self-calibration enable");
-  cli::printHelpItem("asc_target [ppm]", "Show or set ASC target");
-  cli::printHelpItem("asc_initial [hours]", "Show or set ASC initial period");
-  cli::printHelpItem("asc_standard [hours]", "Show or set ASC standard period");
+  cli::printHelpItem("asc_target [ppm, 1..40000]", "Show or set ASC target");
+  cli::printHelpItem("asc_initial [hours, 0 or 4-step]", "Show or set ASC initial period");
+  cli::printHelpItem("asc_standard [hours, >0 4-step]", "Show or set ASC standard period");
 
   cli::printHelpSection("Maintenance");
   cli::printHelpItem("persist", "Persist EEPROM-backed settings");
@@ -1239,9 +1270,9 @@ void printHelp() {
   cli::printHelpSection("Raw Commands");
   cli::printHelpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
   cli::printHelpItem("command write_data <cmd> <data>", "Issue an immediate command with one CRC-packed data word");
-  cli::printHelpItem("command read <cmd> <len>", "Issue a short raw read command and print response bytes");
+  cli::printHelpItem("command read <cmd> <len, 1..9>", "Issue a short raw read command and print response bytes");
   cli::printHelpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
-  cli::printHelpItem("command read_words <cmd> <count>", "Issue a short read command and decode CRC-checked words");
+  cli::printHelpItem("command read_words <cmd> <count, 1..3>", "Issue a short read command and decode CRC-checked words");
   Serial.printf("  %sNote:%s raw commands are immediate diagnostics and do not reconcile cached driver state\n",
                 LOG_COLOR_GRAY,
                 LOG_COLOR_RESET);
@@ -1353,6 +1384,11 @@ void processCommand(const String& cmdLine) {
 
   if (head == "diag") {
     runDiagnostics();
+    return;
+  }
+
+  if (head == "demo") {
+    runDemo();
     return;
   }
 
@@ -1716,8 +1752,8 @@ void processCommand(const String& cmdLine) {
     }
 
     uint32_t altitudeM = 0;
-    if (!cmd::parseU32(tail, altitudeM) || altitudeM > 0xFFFFUL) {
-      LOGW("Expected altitude <m>");
+    if (!cmd::parseU32(tail, altitudeM) || altitudeM > SCD41::cmd::ALTITUDE_MAX_M) {
+      LOGW("Expected altitude <m> in 0..3000");
       return;
     }
     printStatus(device.setSensorAltitudeM(static_cast<uint16_t>(altitudeM)));

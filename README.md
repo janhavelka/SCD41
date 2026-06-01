@@ -1,12 +1,13 @@
 # SCD41 Driver Library
 
-Production-grade PlatformIO/Arduino package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3.
+Production-grade PlatformIO/Arduino and ESP-IDF component package for the Sensirion SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor on ESP32-S2 / ESP32-S3.
 
 ## Overview
 
 This repository follows the same managed I2C library pattern used across the workspace:
 
 - injected I2C transport, no direct `Wire` dependency in library code
+- framework-neutral core with Arduino and ESP-IDF integration behind callbacks/adapters
 - explicit `Status` return values on every fallible operation
 - 4-state health tracking: `UNINIT`, `READY`, `DEGRADED`, `OFFLINE`
 - deterministic timing with bounded waits only
@@ -143,6 +144,22 @@ lib_deps =
 
 Copy [include/SCD41](include/SCD41) and [src](src) into your project.
 
+### ESP-IDF Component
+
+The repository root can be used as an ESP-IDF component through
+`EXTRA_COMPONENT_DIRS` or your component manager workflow. The core driver owns
+no I2C bus, pins, power rail, logging, or scheduler policy; applications provide
+transport and timing callbacks through `SCD41::Config`.
+
+The core component does not include Arduino or ESP-IDF framework headers. IDF
+applications should inject `Config::nowMs`, `Config::nowUs`, and
+`Config::cooperativeYield` so all driver timing follows the application
+scheduler.
+
+See [examples/idf/basic](examples/idf/basic) for an ESP-IDF v6-style
+`i2c_master` adapter and native bring-up CLI with the same user-visible
+command contract as the Arduino serial CLI.
+
 ## Quick Start
 
 ```cpp
@@ -235,16 +252,24 @@ use `getLastMeasurement()`.
 
 [examples/01_basic_bringup_cli](examples/01_basic_bringup_cli) provides a family-style serial REPL for bring-up and diagnostics.
 
+[examples/idf/basic](examples/idf/basic) provides a native ESP-IDF CLI project
+that owns the I2C bus/device handles and wires them into the same transport
+callback contract used by Arduino examples.
+
 Main command groups:
 
-- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
+- Common: `help`, `version`, `info`, `scan`, `begin`, `end`, `probe`, `recover`, `diag`, `demo`, `drv`, `drv1`, `state`, `cfg`, `settings`, `status`, `verbose`
 - Measurement: `read`, `fetch`, `sample`, `last`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
 - Mode and power: `mode`, `periodic`, `sleep`, `wake`
 - Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
 - Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `selftest_result`, `frc`, `frc_result`
 - Raw commands: `command write`, `command write_data`, `command read`, `command read_word`, `command read_words`
 
-`read` follows the managed driver path: it prints a sample immediately if one is already ready, or
+The Arduino and ESP-IDF examples intentionally expose the same command names,
+aliases, help sections, prompts, colorized status/health output, diagnostics,
+the safe one-sample `demo` workflow, maintenance workflows, measurement flows,
+compensation controls, and raw command access. `read` follows the managed driver
+path: it prints a sample immediately if one is already ready, or
 it schedules a managed fetch when no sample is pending yet. `fetch` is the explicit direct-read path
 for a sample that is expected to be ready now. `verbose` follows the family CLI convention and acts
 as a toggle with no argument, or as an explicit setter with `0` / `1`. `status` is the concise
@@ -279,6 +304,7 @@ command read_word 0xE4B8
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
+python tools/check_idf_example_contract.py
 pio test -e native
 pio run -e esp32s3dev
 pio run -e esp32s2dev
@@ -298,6 +324,8 @@ pio run -e esp32s2dev
 - <a href="CHANGELOG.md">CHANGELOG.md</a> - release history
 - <a href="AGENTS.md">AGENTS.md</a> - repository engineering rules
 - <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> - explicit assumptions and scope notes
+- <a href="docs/IDF_PORT.md">docs/IDF_PORT.md</a> - ESP-IDF portability guidance
+- <a href="docs/IDF_PORT_IMPLEMENTATION.md">docs/IDF_PORT_IMPLEMENTATION.md</a> - implemented IDF component/example notes
 - <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
 
 ## License
