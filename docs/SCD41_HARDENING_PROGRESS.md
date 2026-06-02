@@ -2,78 +2,63 @@
 
 ## Current Chunk
 
-- Prompt: `07_tests_ci_package_proof_guard_scripts_example_parity`
+- Prompt: `08_hil_matrix_final_report_and_release_gate`
 - Branch: `hardening/scd41-industry-readiness`
-- Starting commit: `9ff92fe`
-- Scope: test organization, CI gates, package-content proof, generated `Version.h`
-  consumer safety, guard script hardening, and ESP-IDF example build wiring.
-- Explicitly out of scope: hardware/HIL execution, destructive command hardware
-  validation, and final release tagging.
+- Starting commit: `77a0e5f`
+- Scope: hardware/HIL validation matrix, optional safe serial runner, final
+  hardening report, release/merge gate language, and final local validation.
+- Explicitly out of scope: inventing hardware results, running destructive
+  flows without explicit operator approval, and tagging a release.
 
 ## Baseline State
 
 - `git branch --show-current`: `hardening/scd41-industry-readiness`
-- `git status --short`: no output before Prompt 07 edits
-- `git rev-parse --short HEAD`: `9ff92fe`
+- `git status --short`: no output before Prompt 08 edits
+- `git rev-parse --short HEAD`: `77a0e5f`
 
 ## Subagent Reviews
 
-- Test architecture: recommended preserving the root native test app for this
-  chunk, adding logical runner sections, and replacing obvious private-field
-  assertions with public API checks where practical.
-- CI: recommended separate jobs for guards, native tests, Arduino PlatformIO
-  builds, package proof, and native ESP-IDF example builds.
-- IDF build: recommended building `examples/idf/basic` for `esp32s3` and
-  `esp32s2` with ESP-IDF v6.0.1.
-- Package: recommended tracking generated `include/SCD41/Version.h`, running
-  `generate_version.py check`, and inspecting package tarball contents.
-- Guard scripts: recommended scanning stripped code for timing, framework,
-  heap, and logging tokens, and expanding example-boundary checks.
-- Docs: recommended updating README and IDF docs so local validation matches CI.
+- HIL design: recommended safe smoke, timing/soak, fault/recovery, and
+  destructive opt-in matrices with pass/fail criteria and no hardware claims
+  without transcript evidence.
+- CLI HIL: confirmed Arduino and ESP-IDF CLIs expose the same command names and
+  supplied exact operator sequences for safe smoke, periodic, single-shot,
+  low-power periodic, power, recovery, and destructive confirmation flows.
+- Python runner: found no existing HIL tooling and recommended an optional
+  pyserial-based runner that defaults to safe tests, records raw transcripts,
+  writes JSON/Markdown summaries, and refuses destructive commands without
+  explicit gates.
+- Docs/report: recommended final report structure mapping H/M/L findings to
+  disposition and using honest HIL-pending release language.
+- Integration review: flagged unsafe claims to avoid: no HIL pass claim without
+  transcripts, no observed-CI claim without a GitHub Actions run, H-03 remains
+  documented/partial because `begin()` and `readSettings()` are still explicit
+  blocking paths, and M-08 is improved but still intentionally keeps narrow
+  white-box tests.
 
 ## Findings Addressed In This Chunk
 
-- M-09: `include/SCD41/Version.h` is now trackable and included as package
-  proof material, while remaining generated from `library.json` and marked
-  "do not edit".
-- M-09/L-06: `tools/check_package_contents.py` verifies required public/core
-  files in the packed tarball and rejects repo/build artifacts.
-- H-05: CI now includes an ESP-IDF build matrix for `examples/idf/basic` on
-  ESP32-S3 and ESP32-S2 using `espressif/esp-idf-ci-action@v1`.
-- H-05/L-04: CI now runs version, core guard, Arduino CLI contract, IDF example
-  contract, native tests, Arduino PlatformIO builds, and package proof as
-  separate jobs.
-- Guard hardening: the core guard now rejects active framework includes,
-  framework types, blocking timing calls, heap-backed containers/allocation, and
-  logging tokens from `src/` and `include/`.
-- Example parity: the IDF checker now scans all IDF example source/header files
-  plus CMake dependencies and rejects Arduino facades, legacy IDF I2C includes,
-  heap-backed parser regressions, and CLI parity drift.
-- Example boundaries: the Arduino CLI checker now parses command handlers/help
-  aliases, checks timing hook assignments structurally, and enforces that
-  Arduino/example-common code does not leak into the core or IDF example.
-- M-08: native tests now have logical runner sections and a `test/README.md`
-  documenting the remaining narrow white-box policy.
-- M-08: identity/variant tests now use public `readSensorVariant()` and
-  `getIdentity()` assertions where private-field access was unnecessary.
-- Docs: README and ESP-IDF docs now include package inspection and ESP-IDF
-  build commands, while keeping hardware/HIL validation explicitly separate.
+- H-05 remaining HIL gap: added `docs/SCD41_HARDWARE_VALIDATION.md` with safe
+  smoke, timing/soak, fault/recovery, destructive opt-in, evidence, and verdict
+  rules.
+- H-05 remaining HIL gap: added optional `tools/scd41_hil_runner.py` for
+  serial CLI evidence capture. It requires an explicit port, runs safe commands
+  by default, writes transcript/JSON/Markdown artifacts, and refuses destructive
+  flows unless `--include-destructive` and the exact confirmation phrase are
+  supplied.
+- Release discipline: added `docs/SCD41_HARDENING_FINAL_REPORT.md` mapping each
+  exploration finding to disposition, evidence, merge gate, release gate, local
+  validation status, CI status, and HIL status.
+- Docs: README now links the hardware validation matrix and final hardening
+  report.
 
 ## Files Changed
 
-- `.github/workflows/ci.yml`
-- `.gitignore`
 - `README.md`
-- `docs/IDF_PORT.md`
-- `docs/IDF_PORT_IMPLEMENTATION.md`
+- `docs/SCD41_HARDENING_FINAL_REPORT.md`
+- `docs/SCD41_HARDWARE_VALIDATION.md`
 - `docs/SCD41_HARDENING_PROGRESS.md`
-- `include/SCD41/Version.h`
-- `test/README.md`
-- `test/test_basic.cpp`
-- `tools/check_cli_contract.py`
-- `tools/check_core_timing_guard.py`
-- `tools/check_idf_example_contract.py`
-- `tools/check_package_contents.py`
+- `tools/scd41_hil_runner.py`
 
 ## Checks Run
 
@@ -85,26 +70,33 @@
   - Result: passed; `CLI contract PASSED`.
 - `python tools/check_idf_example_contract.py`
   - Result: passed; `IDF example contract PASSED`.
+- `python tools/scd41_hil_runner.py --help`
+  - Result: passed; help text printed.
 - `python -m platformio test -e native`
-  - Result: passed; 82 test cases, 82 succeeded in `00:00:00.925`.
+  - Result: passed; 82 test cases, 82 succeeded in `00:00:00.395`.
 - `python -m platformio run -e esp32s3dev`
-  - Result: passed; `esp32s3dev` success in `00:00:01.272`.
+  - Result: passed; `esp32s3dev` success in `00:00:01.207`.
 - `python -m platformio run -e esp32s2dev`
-  - Result: passed; `esp32s2dev` success in `00:00:01.252`.
-- `python -m platformio pkg pack . -o dist`
-  - Result: passed; wrote `dist\SCD41-0.1.0.tar.gz`.
-- `python tools/check_package_contents.py dist/*.tar.gz`
+  - Result: passed; `esp32s2dev` success in `00:00:01.142`.
+- `python -m platformio pkg pack`
+  - Result: passed; wrote `SCD41-0.1.0.tar.gz`.
+- `python tools/check_package_contents.py SCD41-*.tar.gz`
   - Result: passed; `Package content check PASSED: SCD41-0.1.0.tar.gz`.
 
 ## Checks Not Run
 
 - Local native ESP-IDF `idf.py` builds: blocked because `idf.py` is not on PATH
-  in this workspace. CI wiring was added to run the ESP-IDF v6.0.1 matrix.
-- Hardware/HIL validation: explicitly out of scope for this chunk and no
-  hardware evidence was collected.
+  in this workspace (`CommandNotFoundException`). CI is configured to run the
+  ESP-IDF v6.0.1 matrix, but the CI run was not observed locally.
+- Hardware/HIL validation: not run because no serial port, board, SCD41, or
+  operator-approved hardware context was provided. No HIL transcript exists.
 
 ## Previously Completed Chunks
 
+- Prompt: `07_tests_ci_package_proof_guard_scripts_example_parity`
+  - Commit: `77a0e5f`
+  - Addressed test organization, CI guards, package content proof, generated
+    `Version.h` package safety, ESP-IDF CI wiring, and validation docs.
 - Prompt: `06_latency_boundaries_stale_samples_reset_epochs_probe_side_effects`
   - Commit: `9ff92fe`
   - Addressed public API latency documentation, reset/recovery sample epochs,
@@ -132,8 +124,9 @@
 
 ## Remaining Findings For Later Prompts
 
-- Opt-in HIL command handling, hardware/HIL matrix, final release gate, and
-  evidence-backed hardware validation records.
-- Refresh or supersede resolved findings in
-  `docs/SCD41_INDUSTRY_READINESS_EXPLORATION_REPORT.md` after the full
-  hardening sequence is complete.
+- Run and store safe hardware/HIL smoke transcripts on real ESP32-S2/S3 plus
+  SCD41 hardware.
+- Run soak/fault/recovery hardware tests where practical.
+- Run destructive/EEPROM/calibration hardware tests only with explicit operator
+  approval on suitable hardware, or keep them marked not run.
+- Observe final pushed CI status before merge.

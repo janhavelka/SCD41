@@ -462,6 +462,8 @@ idf.py -C examples/idf/basic -B build-esp32s2 build
 
 Hardware/HIL validation remains a separate opt-in step because it requires real
 boards, an SCD41, and explicit operator control for EEPROM/destructive commands.
+Use [docs/SCD41_HARDWARE_VALIDATION.md](docs/SCD41_HARDWARE_VALIDATION.md) for
+the manual matrix and optional runner workflow.
 
 ## Repository Notes
 
@@ -479,6 +481,8 @@ boards, an SCD41, and explicit operator control for EEPROM/destructive commands.
 - <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> - explicit assumptions and scope notes
 - <a href="docs/IDF_PORT.md">docs/IDF_PORT.md</a> - ESP-IDF portability guidance
 - <a href="docs/IDF_PORT_IMPLEMENTATION.md">docs/IDF_PORT_IMPLEMENTATION.md</a> - implemented IDF component/example notes
+- <a href="docs/SCD41_HARDWARE_VALIDATION.md">docs/SCD41_HARDWARE_VALIDATION.md</a> - opt-in hardware/HIL matrix and evidence rules
+- <a href="docs/SCD41_HARDENING_FINAL_REPORT.md">docs/SCD41_HARDENING_FINAL_REPORT.md</a> - final hardening disposition and release gate
 - <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
 
 ## License
