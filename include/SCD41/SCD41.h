@@ -125,6 +125,10 @@ struct SettingsSnapshot {
   bool measurementPending = false; ///< True while a sample fetch is in flight
   bool measurementReady = false; ///< True when a cached sample can be consumed
   bool hasSample = false; ///< True after at least one sample has been cached
+  bool hasFreshSample = false; ///< True when the cached sample belongs to `sensorEpoch`
+  bool sampleStale = false; ///< True when the cached sample belongs to an older sensor epoch
+  uint32_t sensorEpoch = 0; ///< Driver-observed sensor runtime epoch; 0 before initialization
+  uint32_t sampleEpoch = 0; ///< Epoch associated with the cached sample
   uint32_t measurementReadyMs = 0; ///< Earliest time a pending sample may become ready
   uint32_t sampleTimestampMs = 0; ///< Timestamp of the last stored sample
   uint32_t missedSamples = 0; ///< Estimated missed periodic samples since last fetch
@@ -166,6 +170,8 @@ public:
   // =========================================================================
 
   /// Initialize the driver, wait the configured power-up settle time, and verify device identity.
+  /// @note Blocking startup API: waits up to `Config::powerUpDelayMs`, then performs one
+  ///       CRC-checked `get_serial_number` command with command-spacing guards.
   /// @note Performs I2C and may perform bounded waits; do not call from ISRs.
   /// @param config Transport, timing, recovery, and policy settings
   /// @return Status::Ok() on success, error otherwise
@@ -174,7 +180,7 @@ public:
   /// @note May perform I2C when a pending command or measurement becomes due; do not call from ISRs.
   /// @note Before a successful `begin()`, this is a no-op and returns OK.
   /// @note Processes at most one due async completion per call, with pending commands before
-  ///       scheduled periodic fetches.
+  ///       scheduled periodic fetches. No-due calls perform no I2C.
   /// @return OK when no completion is due, a due completion succeeds, or a measurement is still
   ///         not ready. Returns and stores non-OK async completion failures.
   /// @note The `nowMs` argument is retained for source compatibility. Scheduling uses
@@ -197,9 +203,12 @@ public:
   // Diagnostics
   // =========================================================================
 
-  /// Probe for device presence without updating runtime health counters.
+  /// Probe for device presence without updating runtime health counters or command-spacing state.
+  /// @note Diagnostic-only raw access. It still honors the current command-spacing guard before
+  ///       touching I2C, but restores the driver's spacing timestamp afterward.
   Status probe();
   /// Attempt manual recovery using probe, optional bus reset, and optional power cycle hooks.
+  /// @note Power-cycle recovery starts a new sensor epoch and marks cached samples stale.
   Status recover();
 
   // =========================================================================
@@ -242,8 +251,16 @@ public:
   Status requestMeasurement();
 
   bool measurementPending() const { return _measurementRequested; } ///< True while a sample fetch is still pending inside the driver
-  bool measurementReady() const { return _measurementReady; } ///< True when `getMeasurement()` can consume a cached sample
-  bool hasSample() const { return _hasSample; } ///< True after at least one sample has been cached
+  bool measurementReady() const { return _measurementReady && hasFreshSample(); } ///< True when `getMeasurement()` can consume a fresh cached sample
+  bool hasSample() const { return _hasSample; } ///< True after at least one sample has been cached, even if stale
+  bool hasFreshSample() const {
+    return _hasSample && _sampleEpoch == _sensorEpoch;
+  } ///< True when the cached sample belongs to the current sensor epoch
+  bool sampleStale() const {
+    return _hasSample && _sampleEpoch != _sensorEpoch;
+  } ///< True when reset/recovery created a newer sensor epoch than the cached sample
+  uint32_t sensorEpoch() const { return _sensorEpoch; } ///< Current driver-observed sensor epoch
+  uint32_t sampleEpoch() const { return _sampleEpoch; } ///< Epoch associated with the cached sample
   uint32_t measurementReadyMs() const { return _measurementReadyMs; } ///< Earliest time a pending measurement may become available
   bool lastSampleCo2Valid() const { return _lastSampleCo2Valid; } ///< False for RHT-only single-shot samples
   /// Timestamp of the cached sample.
@@ -263,14 +280,17 @@ public:
   /// Consume the cached converted sample and clear the ready flag.
   Status getMeasurement(Measurement& out);
   /// Return the most recently cached converted sample without clearing the ready flag.
+  /// @note May return a stale historical cache; check `hasFreshSample()` or `sampleStale()`.
   Status getLastMeasurement(Measurement& out) const;
   /// Return the last raw sample without clearing the ready flag.
   /// @param[out] out Last cached raw words
   /// @return Status::Ok() on success, MEASUREMENT_NOT_READY until a sample has been cached
+  /// @note May return a stale historical cache; check `hasFreshSample()` or `sampleStale()`.
   Status getRawSample(RawSample& out) const;
   /// Return the last fixed-point converted sample without clearing the ready flag.
   /// @param[out] out Last cached fixed-point sample
   /// @return Status::Ok() on success, MEASUREMENT_NOT_READY until a sample has been cached
+  /// @note May return a stale historical cache; check `hasFreshSample()` or `sampleStale()`.
   Status getCompensatedSample(CompensatedSample& out) const;
   /// Read the sensor data-ready state into a simple boolean.
   Status readDataReadyStatus(bool& ready);
@@ -366,16 +386,20 @@ public:
   // =========================================================================
 
   /// Persist the supported runtime settings to EEPROM.
+  /// @note Tick-driven command: start writes the command and `tick()` completes the EEPROM settle.
   /// @warning EEPROM-writing maintenance command. Keep application and diagnostic entry points
   ///          explicit and operator-confirmed.
   Status startPersistSettings();
   /// Reload persisted settings from EEPROM into runtime state.
+  /// @note Tick-driven command. Starts a new sensor epoch and marks cached samples stale.
   Status startReinit();
   /// Restore factory defaults and erase stored calibration history.
+  /// @note Tick-driven command. Starts a new sensor epoch and marks cached samples stale.
   /// @warning Destructive maintenance command. Keep application and diagnostic entry points
   ///          explicit and operator-confirmed.
   Status startFactoryReset();
   /// Start the 10 s sensor self-test.
+  /// @note Tick-driven command: `tick()` reads the result when due.
   Status startSelfTest();
   bool selfTestReady() const { return _selfTestCompleted; } ///< True after self-test completion has been processed
   /// Return the interpreted self-test result, reporting failure as `COMMAND_FAILED`.
@@ -384,6 +408,7 @@ public:
   Status getSelfTestRawResult(uint16_t& rawResult);
 
   /// Start forced recalibration with a reference concentration in ppm.
+  /// @note Tick-driven command: `tick()` reads the result when due.
   Status startForcedRecalibration(uint16_t referencePpm);
   bool forcedRecalibrationReady() const { return _forcedRecalibrationCompleted; } ///< True after FRC completion has been processed
   /// Return the interpreted forced-recalibration correction in ppm.
@@ -398,6 +423,8 @@ public:
   /// Return a snapshot of local driver state without issuing live I2C reads.
   Status getSettings(SettingsSnapshot& out) const;
   /// Return a best-effort state and live-configuration snapshot.
+  /// @note Blocking diagnostic live refresh. Idle mode issues multiple CRC-checked live reads;
+  ///       periodic mode refreshes ambient pressure only; busy/power-down modes return cache only.
   /// @note In periodic mode only ambient pressure is refreshed because other configuration
   ///       commands are idle-only. When busy or powered down, only local state is returned.
   Status readSettings(SettingsSnapshot& out);
@@ -491,6 +518,8 @@ private:
   Status _readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData = false);
   Status _readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData);
   Status _readCommandRawBytes(uint16_t command, uint8_t* out, size_t len, bool unsafeRawBytes);
+  Status _restoreProbeCommandSpacing(uint32_t savedLastCommandUs, bool savedLastCommandValid,
+                                     const Status& probeStatus);
   Status _recordProtocolStatus(const Status& st, bool tracked);
 
   // =========================================================================
@@ -510,6 +539,8 @@ private:
   void _recordAsyncStatus(AsyncOperation operation, const Status& status);
   void _setBusyError(Status& st) const;
   void _updatePeriodicMissedSamples(uint32_t nowMs);
+  void _advanceSensorEpoch();
+  void _markSampleStale();
   void _storeSample(const RawSample& sample, bool co2Valid);
 
   // =========================================================================
@@ -578,6 +609,8 @@ private:
   bool _measurementRequested = false;
   bool _measurementReady = false;
   bool _hasSample = false;
+  uint32_t _sensorEpoch = 0;
+  uint32_t _sampleEpoch = 0;
   uint32_t _measurementReadyMs = 0;
   uint32_t _periodicStartMs = 0;
   uint32_t _lastFetchMs = 0;

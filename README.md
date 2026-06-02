@@ -121,7 +121,7 @@ shared.
 The public driver follows the same family conventions as the mature workspace libraries:
 
 - lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
-- measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, `hasSample()`
+- measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, `hasSample()`, `hasFreshSample()`, `sampleStale()`, `sensorEpoch()`, `sampleEpoch()`
 - state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`, `totalProtocolFailures()`, `totalCrcFailures()`, `consecutiveProtocolFailures()`, `lastProtocolErrorMs()`, `lastProtocolError()`
 - measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
@@ -130,7 +130,7 @@ The public driver follows the same family conventions as the mature workspace li
 - compensation/config: `setTemperatureOffsetC()` (finite values only), `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
 - raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()`
-- snapshots: `getSettings()` for local driver state, including `hasSample`, and `readSettings()` for a best-effort state plus live-configuration snapshot
+- snapshots: `getSettings()` for local driver state, including sample freshness/epoch fields, and `readSettings()` for a best-effort state plus live-configuration snapshot
 
 `readSettings()` is mode-dependent by design:
 
@@ -150,25 +150,58 @@ Transport callbacks must treat `Status::Ok()` as an exact-transfer contract: a w
 
 Cached raw, fixed-point, and converted sample access is gated by whether any
 sample has ever been cached (`hasSample()` / `SettingsSnapshot::hasSample`), not
-by `measurementReady` or by a nonzero timestamp. `getMeasurement()` can consume
-the current ready flag while the cached sample remains available through the
-snapshot and cached-sample helpers.
+by a nonzero timestamp. Freshness is separate: `hasFreshSample()` is true only
+when the cached sample belongs to the current `sensorEpoch()`, and
+`sampleStale()` is true when `reinit`, factory reset, or power-cycle recovery has
+started a newer sensor epoch. `measurementReady()` and `getMeasurement()` expose
+only fresh unconsumed samples. `getLastMeasurement()`, `getRawSample()`, and
+`getCompensatedSample()` may still return a retained historical cache for
+diagnostics; check the freshness accessors or `SettingsSnapshot` epoch fields
+before treating it as current sensor output.
 
-## Measurement Timing Summary
+## Public API Latency Contract
 
-| Operation | Typical bounded execution window |
-| --- | --- |
-| `read_measurement`, get/set compensation values, `get_serial_number` | 1 ms |
-| `wake_up`, `reinit` | 30 ms |
-| `measure_single_shot_rht_only` | 50 ms |
-| `perform_forced_recalibration` | 400 ms |
-| `stop_periodic_measurement` | 500 ms |
-| `persist_settings` | 800 ms |
-| `perform_factory_reset` | 1200 ms |
-| `measure_single_shot` | 5000 ms |
-| `perform_self_test` | 10000 ms |
+Notation:
+
+- `W` / `R`: one injected I2C write / read callback. Sensor read commands are shaped as one command write plus one read callback.
+- `T`: `Config::i2cTimeoutMs`.
+- `D`: `Config::commandDelayMs`; `Gprev` is any remaining guard before the first transaction, bounded by `D`.
+- `RD`: the larger of the 1 ms short-command execution wait and `D`.
+- `P`: `Config::powerUpDelayMs`.
+- `N`: number of live fields read by `readSettings()`.
+
+| API group | Class | I2C callbacks | Built-in wait or deadline | Worst-case success terms |
+| --- | --- | ---: | --- | --- |
+| Inline getters, health counters, conversion helpers, `sampleAgeMs()` | cache-only | 0 | none | CPU only |
+| `getSettings()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, result accessors | local/cache | 0 | none | CPU only |
+| `begin()` | blocking startup | `1W + 1R` | waits `P`, then CRC-checked serial read | `P + Gprev + 2T + RD` |
+| `tick()` before begin or no due work | scheduler | 0 | none | CPU only |
+| `tick()` due state-only command (`STOP_PERIODIC`, `POWER_DOWN`, `WAKE_UP`, `PERSIST_SETTINGS`, `REINIT`, `FACTORY_RESET`, `POWER_CYCLE`) | tick-driven completion | 0 | deadline already elapsed | CPU only |
+| `tick()` due self-test or FRC | tick-driven completion | `1R` | reads the result word after the 10 s / 400 ms deadline | `Gprev + T` |
+| `tick()` due measurement, not ready | tick-driven completion | `1W + 1R` | data-ready read; reschedules `dataReadyRetryMs` | `Gprev + 2T + RD` |
+| `tick()` due measurement, ready | tick-driven completion | `2W + 2R` | data-ready read plus `read_measurement` | `Gprev + 4T + 2RD + D` |
+| `probe()` | diagnostic-only | `1W + 1R` | serial read, or data-ready read in periodic mode; drains post-probe `D` then restores driver spacing state | `Gprev + 2T + RD + D` |
+| `recover()` | manual recovery | 0 to `2W + 2R`, plus optional callbacks | recover backoff; optional app `busReset`; optional app `powerCycle` schedules `P` | up to `Gprev + 4T + 2RD + D + busReset + powerCycle` before scheduled settle |
+| `requestMeasurement()` in idle, `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()` | tick-driven start | `1W` | schedules 5 s or 50 ms execution | start call `Gprev + T`; completion through `tick()` |
+| `requestMeasurement()` in periodic mode | local schedule | 0 | schedules the next fetch deadline | CPU only now; completion through `tick()` |
+| `readMeasurement()` | mixed | 0, `1W + 1R`, or `2W + 2R` | consumes fresh cache, completes a due single-shot, or probes/fetches periodic data | same as due measurement path |
+| `readDataReadyStatus()`, `readSerialNumber()`, identity/variant cache miss, typed live getters | short read | `1W + 1R` | 1 ms short-command wait plus command spacing | `Gprev + 2T + RD` |
+| offset/altitude/pressure/ASC setters | short write | `1W` | payload write plus 1 ms short-command settle | `Gprev + T + 1 ms` |
+| `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()` | mode start | `1W` | no long settle; periodic sample cadence is 5 s or 30 s | `Gprev + T` |
+| `stopPeriodicMeasurement()` | tick-driven start | `1W` | schedules 500 ms settle before idle-only commands | start call `Gprev + T`; completion through `tick()` |
+| `powerDown()` / `wakeUp()` | tick-driven start | `1W` | power-down schedules 1 ms; wake schedules `P` and accepts precise wake NACK | start call `Gprev + T`; completion through `tick()` |
+| `startPersistSettings()` | EEPROM, tick-driven | `1W` | schedules 800 ms EEPROM settle | start call `Gprev + T`; explicit opt-in only |
+| `startReinit()` | reset epoch, tick-driven | `1W` | schedules 30 ms settle and marks cached samples stale immediately | start call `Gprev + T`; completion through `tick()` |
+| `startFactoryReset()` | destructive reset epoch, tick-driven | `1W` | schedules 1200 ms settle and marks cached samples stale immediately | start call `Gprev + T`; explicit opt-in only |
+| `startSelfTest()` | tick-driven | `1W` | schedules 10 s result read | start call `Gprev + T`; due tick `Gprev + T` |
+| `startForcedRecalibration()` | calibration, tick-driven | `1W` | schedules 400 ms result read | start call `Gprev + T`; due tick `Gprev + T` |
+| `readSettings()` | blocking diagnostic live refresh | periodic: `N=1`; idle common fields: `N=4`; idle SCD41 fields: `N=7` | chained live reads; busy/power-down returns local cache only | `Gprev + 2N*T + N*RD + (N-1)*D` |
+| raw `writeCommand()`, `writeCommandWithData()` | diagnostic write | `1W` | managed/long/stateful commands rejected | `Gprev + T` |
+| raw `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()` | diagnostic read | `1W + 1R` | 1 ms short-command wait plus command spacing; CRC checked for word helpers | `Gprev + 2T + RD` |
 
 Long operations are modeled as bounded start/poll/read flows driven by `tick()` rather than blocking the public call for hundreds of milliseconds or seconds. Short synchronous wait guards also have a finite stalled-timebase escape path, so a broken injected clock/yield hook returns `TIMEOUT` instead of spinning indefinitely.
+
+`begin()` remains an explicitly blocking compatibility startup API. `readSettings()` remains an explicitly blocking diagnostic live refresh. Neither is hidden inside the steady-state loop; latency-sensitive applications should call them during controlled startup or diagnostics windows.
 
 ## Conversion Rules
 

@@ -91,6 +91,8 @@ Status SCD41::begin(const Config& config) {
   _measurementRequested = false;
   _measurementReady = false;
   _hasSample = false;
+  _sensorEpoch = 0;
+  _sampleEpoch = 0;
   _measurementReadyMs = 0;
   _periodicStartMs = 0;
   _lastFetchMs = 0;
@@ -174,6 +176,7 @@ Status SCD41::begin(const Config& config) {
                          static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
   }
 
+  _sensorEpoch = 1;
   _initialized = true;
   _driverState = DriverState::READY;
   return Status::Ok();
@@ -223,11 +226,16 @@ void SCD41::end() {
   _measurementRequested = false;
   _measurementReady = false;
   _hasSample = false;
+  _sensorEpoch = 0;
+  _sampleEpoch = 0;
   _measurementReadyMs = 0;
   _periodicStartMs = 0;
   _lastFetchMs = 0;
   _sampleTimestampMs = 0;
   _missedSamples = 0;
+  _lastSampleCo2Valid = false;
+  _rawSample = RawSample{};
+  _compSample = CompensatedSample{};
   _lastCommandValid = false;
   _totalProtocolFailures = 0;
   _totalCrcFailures = 0;
@@ -253,9 +261,13 @@ Status SCD41::probe() {
     return Status::Error(Err::BUSY, "Sensor is powered down");
   }
 
+  const uint32_t savedLastCommandUs = _lastCommandUs;
+  const bool savedLastCommandValid = _lastCommandValid;
+
   if (isPeriodicActive()) {
     uint16_t raw = 0;
     Status st = _readWord(cmd::CMD_GET_DATA_READY_STATUS, raw, false);
+    st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
     if (!st.ok()) {
       if (_isI2cFailure(st.code)) {
         return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
@@ -267,6 +279,7 @@ Status SCD41::probe() {
 
   uint16_t words[3] = {};
   Status st = _readWords(cmd::CMD_GET_SERIAL_NUMBER, words, 3, false);
+  st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
   if (!st.ok()) {
     if (_isI2cFailure(st.code)) {
       return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
@@ -338,6 +351,7 @@ Status SCD41::recover() {
       }
       _operatingMode = OperatingMode::IDLE;
       _clearMeasurementRequest();
+      _advanceSensorEpoch();
       return _schedulePendingCommand(PendingCommand::POWER_CYCLE, _config.powerUpDelayMs);
     }
 
@@ -451,6 +465,10 @@ Status SCD41::getMeasurement(Measurement& out) {
   }
   if (!_measurementReady) {
     return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  }
+  if (!hasFreshSample()) {
+    _measurementReady = false;
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "Cached sample is stale");
   }
 
   out.co2Ppm = _rawSample.rawCo2;
@@ -1056,6 +1074,7 @@ Status SCD41::startReinit() {
   if (!st.ok()) {
     return st;
   }
+  _advanceSensorEpoch();
   return _schedulePendingCommand(PendingCommand::REINIT, cmd::EXECUTION_TIME_REINIT_MS);
 }
 
@@ -1073,6 +1092,7 @@ Status SCD41::startFactoryReset() {
   if (!st.ok()) {
     return st;
   }
+  _advanceSensorEpoch();
   return _schedulePendingCommand(PendingCommand::FACTORY_RESET,
                                  cmd::EXECUTION_TIME_FACTORY_RESET_MS);
 }
@@ -1212,8 +1232,12 @@ Status SCD41::getSettings(SettingsSnapshot& out) const {
   out.lastProtocolErrorMs = _lastProtocolErrorMs;
   out.lastProtocolError = _lastProtocolError;
   out.measurementPending = _measurementRequested;
-  out.measurementReady = _measurementReady;
+  out.measurementReady = measurementReady();
   out.hasSample = _hasSample;
+  out.hasFreshSample = hasFreshSample();
+  out.sampleStale = sampleStale();
+  out.sensorEpoch = _sensorEpoch;
+  out.sampleEpoch = _sampleEpoch;
   out.measurementReadyMs = _measurementReadyMs;
   out.sampleTimestampMs = _sampleTimestampMs;
   out.missedSamples = _missedSamples;
@@ -1244,31 +1268,49 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   }
 
   if (isPeriodicActive()) {
-    return getAmbientPressurePa(out.ambientPressurePa);
+    uint32_t ambientPressurePa = 0;
+    st = getAmbientPressurePa(ambientPressurePa);
+    if (!st.ok()) {
+      return st;
+    }
+    st = getSettings(out);
+    if (!st.ok()) {
+      return st;
+    }
+    out.ambientPressurePa = ambientPressurePa;
+    return Status::Ok();
   }
 
-  st = getTemperatureOffsetC_x1000(out.temperatureOffsetC_x1000);
+  int32_t temperatureOffsetC_x1000 = 0;
+  uint16_t sensorAltitudeM = 0;
+  uint32_t ambientPressurePa = 0;
+  bool automaticSelfCalibrationEnabled = false;
+  uint16_t automaticSelfCalibrationTargetPpm = 0;
+  uint16_t automaticSelfCalibrationInitialPeriodHours = 0;
+  uint16_t automaticSelfCalibrationStandardPeriodHours = 0;
+
+  st = getTemperatureOffsetC_x1000(temperatureOffsetC_x1000);
   if (!st.ok()) {
     return st;
   }
 
-  st = getSensorAltitudeM(out.sensorAltitudeM);
+  st = getSensorAltitudeM(sensorAltitudeM);
   if (!st.ok()) {
     return st;
   }
 
-  st = getAmbientPressurePa(out.ambientPressurePa);
+  st = getAmbientPressurePa(ambientPressurePa);
   if (!st.ok()) {
     return st;
   }
 
-  st = getAutomaticSelfCalibrationEnabled(out.automaticSelfCalibrationEnabled);
+  st = getAutomaticSelfCalibrationEnabled(automaticSelfCalibrationEnabled);
   if (!st.ok()) {
     return st;
   }
 
   bool allLiveFieldsRead = true;
-  st = getAutomaticSelfCalibrationTargetPpm(out.automaticSelfCalibrationTargetPpm);
+  st = getAutomaticSelfCalibrationTargetPpm(automaticSelfCalibrationTargetPpm);
   if (!st.ok()) {
     if (!st.is(Err::UNSUPPORTED)) {
       return st;
@@ -1277,7 +1319,7 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   }
 
   st = getAutomaticSelfCalibrationInitialPeriodHours(
-      out.automaticSelfCalibrationInitialPeriodHours);
+      automaticSelfCalibrationInitialPeriodHours);
   if (!st.ok()) {
     if (!st.is(Err::UNSUPPORTED)) {
       return st;
@@ -1286,7 +1328,7 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   }
 
   st = getAutomaticSelfCalibrationStandardPeriodHours(
-      out.automaticSelfCalibrationStandardPeriodHours);
+      automaticSelfCalibrationStandardPeriodHours);
   if (!st.ok()) {
     if (!st.is(Err::UNSUPPORTED)) {
       return st;
@@ -1294,6 +1336,17 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
     allLiveFieldsRead = false;
   }
 
+  st = getSettings(out);
+  if (!st.ok()) {
+    return st;
+  }
+  out.temperatureOffsetC_x1000 = temperatureOffsetC_x1000;
+  out.sensorAltitudeM = sensorAltitudeM;
+  out.ambientPressurePa = ambientPressurePa;
+  out.automaticSelfCalibrationEnabled = automaticSelfCalibrationEnabled;
+  out.automaticSelfCalibrationTargetPpm = automaticSelfCalibrationTargetPpm;
+  out.automaticSelfCalibrationInitialPeriodHours = automaticSelfCalibrationInitialPeriodHours;
+  out.automaticSelfCalibrationStandardPeriodHours = automaticSelfCalibrationStandardPeriodHours;
   out.liveConfigValid = allLiveFieldsRead;
   return Status::Ok();
 }
@@ -1831,6 +1884,27 @@ Status SCD41::_readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData
   return Status::Ok();
 }
 
+Status SCD41::_restoreProbeCommandSpacing(uint32_t savedLastCommandUs,
+                                          bool savedLastCommandValid,
+                                          const Status& probeStatus) {
+  const bool touchedSpacing =
+      _lastCommandValid &&
+      (!savedLastCommandValid || _lastCommandUs != savedLastCommandUs);
+
+  Status drainStatus = Status::Ok();
+  if (touchedSpacing) {
+    drainStatus = _ensureCommandDelay();
+  }
+
+  _lastCommandUs = savedLastCommandUs;
+  _lastCommandValid = savedLastCommandValid;
+
+  if (probeStatus.ok() && !drainStatus.ok()) {
+    return drainStatus;
+  }
+  return probeStatus;
+}
+
 Status SCD41::_updateHealth(const Status& st) {
   if (!_initialized || st.inProgress()) {
     return st;
@@ -2027,6 +2101,21 @@ void SCD41::_updatePeriodicMissedSamples(uint32_t nowMs) {
   }
 }
 
+void SCD41::_advanceSensorEpoch() {
+  if (_sensorEpoch == std::numeric_limits<uint32_t>::max()) {
+    _sensorEpoch = 1;
+    _sampleEpoch = 0;
+  } else {
+    ++_sensorEpoch;
+  }
+  _markSampleStale();
+}
+
+void SCD41::_markSampleStale() {
+  _measurementReady = false;
+  _clearMeasurementRequest();
+}
+
 void SCD41::_storeSample(const RawSample& sample, bool co2Valid) {
   const uint32_t now = _nowMs();
   if (isPeriodicActive()) {
@@ -2042,6 +2131,7 @@ void SCD41::_storeSample(const RawSample& sample, bool co2Valid) {
   _compSample.co2Valid = co2Valid;
   _sampleTimestampMs = now;
   _hasSample = true;
+  _sampleEpoch = _sensorEpoch;
   _measurementReady = true;
   _clearMeasurementRequest();
 }

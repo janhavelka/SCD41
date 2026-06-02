@@ -214,6 +214,41 @@ void queueBeginSuccess(ScriptedTransport& bus) {
   queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
 }
 
+void cacheFreshSingleShotSample(SCD41Device& device, ScriptedTransport& bus,
+                                uint16_t co2 = 601) {
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, co2, 20000, 30000);
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+
+  bus.nowMs = 5200;
+  bus.nowUs = 5200000;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_TRUE(device.hasSample());
+  TEST_ASSERT_TRUE(device.hasFreshSample());
+  TEST_ASSERT_FALSE(device.sampleStale());
+  TEST_ASSERT_TRUE(device.measurementReady());
+}
+
+void assertCachedSampleIsStale(const SCD41Device& device, uint32_t oldEpoch) {
+  TEST_ASSERT_TRUE(device.hasSample());
+  TEST_ASSERT_FALSE(device.hasFreshSample());
+  TEST_ASSERT_TRUE(device.sampleStale());
+  TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_TRUE(device.sensorEpoch() != oldEpoch);
+  TEST_ASSERT_EQUAL_UINT32(oldEpoch, device.sampleEpoch());
+
+  SettingsSnapshot snap = {};
+  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
+  TEST_ASSERT_TRUE(snap.hasSample);
+  TEST_ASSERT_FALSE(snap.hasFreshSample);
+  TEST_ASSERT_TRUE(snap.sampleStale);
+  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), snap.sensorEpoch);
+  TEST_ASSERT_EQUAL_UINT32(device.sampleEpoch(), snap.sampleEpoch);
+}
+
 uint16_t lastWriteCommand(const ScriptedTransport& bus) {
   return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[0]) << 8) | bus.lastWrite[1]);
 }
@@ -520,6 +555,77 @@ void test_probe_works_after_variant_mismatch_begin() {
   TEST_ASSERT_TRUE(device.probe().ok());
 }
 
+void test_probe_does_not_update_health_or_command_spacing_state() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+
+  device._lastCommandValid = true;
+  device._lastCommandUs = 100000;
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  bus.yieldCount = 0;
+  const uint32_t probeStartUs = bus.nowUs;
+
+  TEST_ASSERT_TRUE(device.probe().ok());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_TRUE(device._lastCommandValid);
+  TEST_ASSERT_EQUAL_UINT32(100000u, device._lastCommandUs);
+  TEST_ASSERT_TRUE(bus.yieldCount > 0);
+  TEST_ASSERT_TRUE((bus.nowUs - probeStartUs) >= 3000u);
+
+  queueReadWord(bus, 0x0001);
+  bool ready = false;
+  TEST_ASSERT_TRUE(device.readDataReadyStatus(ready).ok());
+  TEST_ASSERT_TRUE(ready);
+}
+
+void test_probe_failure_does_not_update_health_or_command_spacing_state() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  (void)device._updateHealth(Status::Error(Err::I2C_TIMEOUT, "seed health"));
+  const DriverState stateBefore = device.state();
+  const uint32_t totalSuccessBefore = device.totalSuccess();
+  const uint32_t totalFailuresBefore = device.totalFailures();
+  const uint8_t consecutiveFailuresBefore = device.consecutiveFailures();
+  const uint32_t lastOkMsBefore = device.lastOkMs();
+  const uint32_t lastErrorMsBefore = device.lastErrorMs();
+  const Err lastErrorBefore = device.lastError().code;
+
+  device._lastCommandValid = true;
+  device._lastCommandUs = 200000;
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "probe timeout"));
+  bus.nowMs = 200;
+  bus.nowUs = 200000;
+
+  const Status st = device.probe();
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::DEVICE_NOT_FOUND),
+                    static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(stateBefore), static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_EQUAL_UINT32(totalSuccessBefore, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(totalFailuresBefore, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT8(consecutiveFailuresBefore, device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(lastOkMsBefore, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(lastErrorMsBefore, device.lastErrorMs());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(lastErrorBefore),
+                    static_cast<uint8_t>(device.lastError().code));
+  TEST_ASSERT_TRUE(device._lastCommandValid);
+  TEST_ASSERT_EQUAL_UINT32(200000u, device._lastCommandUs);
+}
+
 void test_single_shot_measurement_flow() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
@@ -678,6 +784,8 @@ void test_periodic_async_fetch_failure_preserves_cached_sample() {
                     static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_FALSE(device.measurementPending());
   TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_TRUE(device.hasFreshSample());
+  TEST_ASSERT_FALSE(device.sampleStale());
 
   Measurement last = {};
   TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
@@ -974,6 +1082,10 @@ void test_measurement_helpers_track_pending_and_preserve_last_sample() {
   SettingsSnapshot snap = {};
   TEST_ASSERT_TRUE(device.getSettings(snap).ok());
   TEST_ASSERT_TRUE(snap.hasSample);
+  TEST_ASSERT_TRUE(snap.hasFreshSample);
+  TEST_ASSERT_FALSE(snap.sampleStale);
+  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), snap.sensorEpoch);
+  TEST_ASSERT_EQUAL_UINT32(device.sampleEpoch(), snap.sampleEpoch);
 
   Measurement last = {};
   TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
@@ -1006,6 +1118,8 @@ void test_zero_timestamp_sample_is_still_available() {
   device._storeSample(injected, true);
   TEST_ASSERT_EQUAL_UINT32(0u, device.sampleTimestampMs());
   TEST_ASSERT_TRUE(device.hasSample());
+  TEST_ASSERT_TRUE(device.hasFreshSample());
+  TEST_ASSERT_FALSE(device.sampleStale());
 
   Measurement last = {};
   TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
@@ -1022,6 +1136,116 @@ void test_zero_timestamp_sample_is_still_available() {
   SettingsSnapshot snap = {};
   TEST_ASSERT_TRUE(device.getSettings(snap).ok());
   TEST_ASSERT_TRUE(snap.hasSample);
+  TEST_ASSERT_TRUE(snap.hasFreshSample);
+  TEST_ASSERT_FALSE(snap.sampleStale);
+}
+
+void test_reinit_marks_cached_sample_stale_across_epoch() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  cacheFreshSingleShotSample(device, bus, 610);
+  const uint32_t oldEpoch = device.sampleEpoch();
+
+  TEST_ASSERT_TRUE(device.startReinit().inProgress());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_REINIT, lastWriteCommand(bus));
+  assertCachedSampleIsStale(device, oldEpoch);
+
+  bus.nowMs = 5300;
+  bus.nowUs = 5300000;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::REINIT),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  assertCachedSampleIsStale(device, oldEpoch);
+}
+
+void test_factory_reset_marks_cached_sample_stale_across_epoch() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  cacheFreshSingleShotSample(device, bus, 611);
+  const uint32_t oldEpoch = device.sampleEpoch();
+
+  TEST_ASSERT_TRUE(device.startFactoryReset().inProgress());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FACTORY_RESET, lastWriteCommand(bus));
+  assertCachedSampleIsStale(device, oldEpoch);
+
+  bus.nowMs = 6500;
+  bus.nowUs = 6500000;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FACTORY_RESET),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  assertCachedSampleIsStale(device, oldEpoch);
+}
+
+void test_power_cycle_recover_marks_cached_sample_stale_across_epoch() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.powerCycle = scriptedPowerCycle;
+  cfg.controlUser = &bus;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  cacheFreshSingleShotSample(device, bus, 612);
+  const uint32_t oldEpoch = device.sampleEpoch();
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
+
+  const Status recoverSt = device.recover();
+  TEST_ASSERT_TRUE(recoverSt.inProgress());
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.powerCycleCalls);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  assertCachedSampleIsStale(device, oldEpoch);
+
+  bus.nowMs = 5300 + cfg.powerUpDelayMs;
+  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  assertCachedSampleIsStale(device, oldEpoch);
+}
+
+void test_periodic_read_after_epoch_change_produces_fresh_sample() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  cacheFreshSingleShotSample(device, bus, 613);
+  const uint32_t oldEpoch = device.sampleEpoch();
+
+  TEST_ASSERT_TRUE(device.startReinit().inProgress());
+  assertCachedSampleIsStale(device, oldEpoch);
+  bus.nowMs = 5300;
+  bus.nowUs = 5300000;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+
+  bus.nowMs = 6000;
+  bus.nowUs = 6000000;
+  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 700, 18000, 40000);
+  bus.nowMs = 11000;
+  bus.nowUs = 11000000;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+
+  TEST_ASSERT_TRUE(device.hasSample());
+  TEST_ASSERT_TRUE(device.hasFreshSample());
+  TEST_ASSERT_FALSE(device.sampleStale());
+  TEST_ASSERT_TRUE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), device.sampleEpoch());
+  Measurement sample = {};
+  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
+  TEST_ASSERT_EQUAL_UINT16(700u, sample.co2Ppm);
 }
 
 void test_offline_request_measurement_does_not_schedule_or_touch_bus() {
@@ -2039,6 +2263,8 @@ int main(int, char**) {
   RUN_TEST(test_begin_reads_serial_and_variant);
   RUN_TEST(test_begin_rejects_non_scd41_variant);
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
+  RUN_TEST(test_probe_does_not_update_health_or_command_spacing_state);
+  RUN_TEST(test_probe_failure_does_not_update_health_or_command_spacing_state);
   RUN_TEST(test_single_shot_measurement_flow);
   RUN_TEST(test_tick_no_due_returns_ok_without_i2c);
   RUN_TEST(test_tick_before_begin_returns_ok_noop);
@@ -2057,6 +2283,10 @@ int main(int, char**) {
   RUN_TEST(test_direct_read_measurement_reads_periodic_sample);
   RUN_TEST(test_measurement_helpers_track_pending_and_preserve_last_sample);
   RUN_TEST(test_zero_timestamp_sample_is_still_available);
+  RUN_TEST(test_reinit_marks_cached_sample_stale_across_epoch);
+  RUN_TEST(test_factory_reset_marks_cached_sample_stale_across_epoch);
+  RUN_TEST(test_power_cycle_recover_marks_cached_sample_stale_across_epoch);
+  RUN_TEST(test_periodic_read_after_epoch_change_produces_fresh_sample);
   RUN_TEST(test_offline_request_measurement_does_not_schedule_or_touch_bus);
   RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
