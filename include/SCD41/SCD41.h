@@ -121,17 +121,35 @@ struct SettingsSnapshot {
 };
 
 /// Managed SCD41 driver with tracked health, bounded waits, and explicit state transitions.
+///
+/// @warning Driver instances are not internally thread-safe. Call public APIs from one task or
+///          loop context, or serialize all access externally.
+/// @warning Public APIs are not ISR-safe. Use interrupts only to notify application code, then
+///          call the driver from normal task context.
+/// @warning Transport callbacks must not recursively call into the same `SCD41` instance.
+/// @note Unless an API is explicitly documented as cache-only, public APIs may perform I2C and/or
+///       bounded waits while enforcing command spacing and short command execution windows.
 class SCD41 {
 public:
+  /// Construct an uninitialized driver instance.
+  SCD41() = default;
+
+  SCD41(const SCD41&) = delete;
+  SCD41& operator=(const SCD41&) = delete;
+  SCD41(SCD41&&) = delete;
+  SCD41& operator=(SCD41&&) = delete;
+
   // =========================================================================
   // Lifecycle
   // =========================================================================
 
   /// Initialize the driver, wait the configured power-up settle time, and verify device identity.
+  /// @note Performs I2C and may perform bounded waits; do not call from ISRs.
   /// @param config Transport, timing, recovery, and policy settings
   /// @return Status::Ok() on success, error otherwise
   Status begin(const Config& config);
   /// Advance pending command completion using the caller's monotonic millisecond clock.
+  /// @note May perform I2C when a pending command or measurement becomes due; do not call from ISRs.
   /// @param nowMs Current monotonic timestamp in milliseconds
   void tick(uint32_t nowMs);
   /// Reset the driver to `UNINIT` and clear runtime state.
@@ -295,10 +313,14 @@ public:
   // =========================================================================
 
   /// Persist the supported runtime settings to EEPROM.
+  /// @warning EEPROM-writing maintenance command. Keep application and diagnostic entry points
+  ///          explicit and operator-confirmed.
   Status startPersistSettings();
   /// Reload persisted settings from EEPROM into runtime state.
   Status startReinit();
   /// Restore factory defaults and erase stored calibration history.
+  /// @warning Destructive maintenance command. Keep application and diagnostic entry points
+  ///          explicit and operator-confirmed.
   Status startFactoryReset();
   /// Start the 10 s sensor self-test.
   Status startSelfTest();

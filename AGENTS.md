@@ -56,6 +56,30 @@ Rules:
 
 ---
 
+## Hardening Contract Rules (Mandatory)
+
+- Core public headers and `src/` must remain framework-neutral: no `Arduino.h`,
+  `Wire.h`, ESP-IDF headers, FreeRTOS headers, framework logging APIs, dynamic
+  framework strings, or global bus ownership.
+- SCD41 core must use injected I2C transport. The driver must not own, configure,
+  or reset the bus except through explicit application-provided callbacks.
+- Public APIs that can fail must expose `Status` or a documented status/result
+  channel.
+- Long SCD41 command completions must never silently disappear. Async failures
+  must be observable by the application through an explicit result channel.
+- Timing must use one coherent clock model. Do not mix unrelated time sources for
+  scheduling and completion checks.
+- Public APIs are not ISR-safe.
+- Driver instances are not internally thread-safe unless explicitly changed and
+  tested. Applications must serialize multi-task access externally.
+- Transport callbacks must not recursively call into the same `SCD41` instance.
+- EEPROM-writing and destructive commands must be opt-in and clearly confirmed in
+  examples, diagnostics, and HIL scripts.
+- Do not claim ESP-IDF build validation, hardware validation, or HIL validation
+  without real command output or recorded hardware evidence.
+
+---
+
 ## I2C Manager + Transport (Required)
 
 - The library MUST NOT own I2C. It never touches `Wire` directly.

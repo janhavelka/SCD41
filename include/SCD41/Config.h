@@ -64,6 +64,7 @@ enum class SingleShotMode : uint8_t {
 /// Driver configuration.
 /// @note The library never owns the I2C peripheral. The caller provides all transport and
 ///       optional recovery hooks through this structure.
+/// @note Callback user contexts must remain valid for as long as the driver may call them.
 struct Config {
   // === I2C transport (required) ===
   I2cWriteFn i2cWrite = nullptr;         ///< I2C write function pointer

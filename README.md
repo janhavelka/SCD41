@@ -51,7 +51,9 @@ This split keeps long device operations explicit and predictable. Public calls d
 ## Thread, ISR, And Recovery Model
 
 - The driver is single-threaded: call public APIs from one task or loop context, or serialize access externally.
-- Do not call I2C-backed APIs from ISRs. Use an interrupt only to set an application flag, then call the driver from normal task context.
+- Do not call public driver APIs from ISRs. Use an interrupt only to set an application flag, then call the driver from normal task context.
+- The driver does not perform internal locking. Transport callbacks must not recursively call into the same driver instance, and callback user contexts must outlive driver use.
+- Public APIs may perform I2C and/or bounded command-spacing waits unless explicitly documented as cache-only helpers.
 - `OFFLINE` is latched. Normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch the bus.
 - `probe()` remains a raw diagnostic check and does not update health counters. `recover()` and explicit reset commands such as `startReinit()` and `startFactoryReset()` may access I2C while offline.
 

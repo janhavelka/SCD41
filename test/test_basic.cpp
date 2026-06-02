@@ -3,6 +3,7 @@
 
 #include <unity.h>
 #include <math.h>
+#include <type_traits>
 
 #include "Arduino.h"
 #include "Wire.h"
@@ -22,6 +23,15 @@ uint32_t gMicrosStep = 0;
 
 using namespace SCD41;
 using SCD41Device = SCD41::SCD41;
+
+static_assert(!std::is_copy_constructible<SCD41Device>::value,
+              "SCD41 driver must not be copy constructible");
+static_assert(!std::is_copy_assignable<SCD41Device>::value,
+              "SCD41 driver must not be copy assignable");
+static_assert(!std::is_move_constructible<SCD41Device>::value,
+              "SCD41 driver must not be move constructible");
+static_assert(!std::is_move_assignable<SCD41Device>::value,
+              "SCD41 driver must not be move assignable");
 
 namespace {
 
