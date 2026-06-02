@@ -1815,12 +1815,12 @@ void printHelp() {
   printHelpItem("asc_standard [hours, >0 4-step]", "Show or set ASC standard period");
 
   printHelpSection("Maintenance");
-  printHelpItem("persist", "Persist EEPROM-backed settings");
+  printHelpItem("persist confirm", "Write EEPROM-backed settings to EEPROM");
   printHelpItem("reinit", "Reload persisted settings into RAM");
-  printHelpItem("factory_reset", "Perform factory reset");
+  printHelpItem("factory_reset confirm", "Erase stored settings and calibration history");
   printHelpItem("selftest", "Run the 10 s self-test");
   printHelpItem("selftest_result", "Print the current self-test result state");
-  printHelpItem("frc <reference_ppm>", "Start forced recalibration");
+  printHelpItem("frc confirm <reference_ppm>", "Start forced recalibration");
   printHelpItem("frc_result", "Print the current forced recalibration result state");
 
   printHelpSection("Raw Commands");
@@ -2424,6 +2424,10 @@ void processCommand(const Line& cmdLine) {
   }
 
   if (head == "persist") {
+    if (tail != "confirm") {
+      LOGW("use 'persist confirm' to write EEPROM");
+      return;
+    }
     const app_driver::Status st = device.startPersistSettings();
     printStatus(st);
     if (st.inProgress()) {
@@ -2442,10 +2446,14 @@ void processCommand(const Line& cmdLine) {
   }
 
   if (head == "factory_reset") {
-    clearSettingsCache();
+    if (tail != "confirm") {
+      LOGW("use 'factory_reset confirm' to erase/reset settings");
+      return;
+    }
     const app_driver::Status st = device.startFactoryReset();
     printStatus(st);
     if (st.inProgress()) {
+      clearSettingsCache();
       printPendingWorkView();
     }
     return;
@@ -2466,9 +2474,15 @@ void processCommand(const Line& cmdLine) {
   }
 
   if (head == "frc") {
+    Line confirmToken;
+    Line referenceToken;
+    if (!splitHeadTail(tail, confirmToken, referenceToken) || confirmToken != "confirm") {
+      LOGW("use 'frc confirm <reference_ppm>' to update calibration history");
+      return;
+    }
     uint16_t referencePpm = 0;
-    if (!parseU16(tail, referencePpm)) {
-      LOGW("Usage: frc <reference_ppm>");
+    if (!parseU16(referenceToken, referencePpm)) {
+      LOGW("Usage: frc confirm <reference_ppm>");
       return;
     }
     const app_driver::Status st = device.startForcedRecalibration(referencePpm);

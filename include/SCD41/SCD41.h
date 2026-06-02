@@ -282,12 +282,15 @@ public:
   // =========================================================================
 
   /// Set the preferred idle single-shot mode used by `requestMeasurement()`.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setSingleShotMode(SingleShotMode mode);
   /// Return the preferred idle single-shot mode.
   Status getSingleShotMode(SingleShotMode& out) const;
   /// Start a full single-shot CO2 + temperature + humidity measurement.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status startSingleShotMeasurement();
   /// Start a single-shot temperature + humidity measurement with invalid CO2 output.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status startSingleShotRhtOnlyMeasurement();
   /// Start standard periodic measurement mode.
   Status startPeriodicMeasurement();
@@ -296,10 +299,12 @@ public:
   /// Stop periodic or low-power periodic mode and schedule the required settle window.
   Status stopPeriodicMeasurement();
   /// Enter the sensor power-down state.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status powerDown();
   /// Wake the sensor from power-down and schedule the required settle window.
   /// @note SCD41 normally NACKs `wake_up`. Only precise address/data NACK statuses are treated
   ///       as expected; generic I2C errors, bus errors, and timeouts remain tracked failures.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status wakeUp();
 
   /// Read and cache the 48-bit serial number.
@@ -338,16 +343,22 @@ public:
   /// Read the automatic-self-calibration enable state.
   Status getAutomaticSelfCalibrationEnabled(bool& enabled);
   /// Set the automatic-self-calibration target concentration in ppm.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationTargetPpm(uint16_t ppm);
   /// Read the automatic-self-calibration target concentration in ppm.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status getAutomaticSelfCalibrationTargetPpm(uint16_t& out);
   /// Set the ASC initial period in hours.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationInitialPeriodHours(uint16_t hours);
   /// Read the ASC initial period in hours.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status getAutomaticSelfCalibrationInitialPeriodHours(uint16_t& out);
   /// Set the ASC standard period in hours.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationStandardPeriodHours(uint16_t hours);
   /// Read the ASC standard period in hours.
+  /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status getAutomaticSelfCalibrationStandardPeriodHours(uint16_t& out);
 
   // =========================================================================
@@ -438,12 +449,16 @@ public:
   /// Convert a raw SCD41 humidity word to milli-percent relative humidity.
   static uint32_t convertHumidityPct_x1000(uint16_t raw);
   /// Encode a temperature offset in degrees Celsius for the SCD41 command word.
+  /// @note Uses the datasheet scale `round(offsetC * 65535 / 175)`.
   static uint16_t encodeTemperatureOffsetC(float offsetC);
   /// Encode a temperature offset in milli-degrees Celsius for the SCD41 command word.
+  /// @note Uses nearest-integer rounding on the datasheet `65535 / 175` scale.
   static uint16_t encodeTemperatureOffsetC_x1000(int32_t offsetC_x1000);
   /// Decode a raw temperature-offset word to degrees Celsius.
+  /// @note Milli-degree conversion rounds to the nearest integer.
   static float decodeTemperatureOffsetC(uint16_t raw);
   /// Decode a raw temperature-offset word to milli-degrees Celsius.
+  /// @note Uses nearest-integer rounding on `raw * 175000 / 65535`.
   static int32_t decodeTemperatureOffsetC_x1000(uint16_t raw);
   /// Encode an ambient-pressure override in pascals for the SCD41 command word.
   static uint16_t encodeAmbientPressurePa(uint32_t pressurePa);
@@ -517,6 +532,7 @@ private:
   static AsyncOperation _asyncOperationForPending(PendingCommand command);
   static bool _isWordReturningCommand(uint16_t command);
   static bool _isWordPayloadCommand(uint16_t command);
+  static bool _isSCD41OnlyCommand(uint16_t command);
 
   uint32_t _nowMs() const;
   uint32_t _nowUs() const;
@@ -524,6 +540,7 @@ private:
   uint32_t _periodMsForMode() const;
   uint32_t _periodicFetchMarginMs() const;
   uint32_t _periodicReadyMs(uint32_t nowMs) const;
+  Status _requireSCD41Variant(const char* opName) const;
   Status _validateRawCommand(uint16_t command) const;
   static bool _isPeriodicAllowedCommand(uint16_t command);
   static bool _isManagedOnlyRawCommand(uint16_t command);

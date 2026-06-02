@@ -209,7 +209,7 @@ uint8_t sensirion_common_generate_crc(const uint8_t* data, uint16_t count) {
 | `start_periodic_measurement` | 0x21B1 | Write | — | No | Start periodic mode (1 measurement/5 s) |
 | `read_measurement` | 0xEC05 | Read 9 bytes | 1 ms | Yes | Read CO₂, T, RH (3 words + CRC each). NACKs if buffer empty |
 | `stop_periodic_measurement` | 0x3F86 | Write | 500 ms | Yes | Stop periodic/LP periodic mode |
-| `set_temperature_offset` | 0x241D | Write + data | 1 ms | No | Set T offset; word = offset_°C × 65536 / 175 |
+| `set_temperature_offset` | 0x241D | Write + data | 1 ms | No | Set T offset; word = offset_°C × 65535 / 175 |
 | `get_temperature_offset` | 0x2318 | Read 3 bytes | 1 ms | No | Read current T offset; °C = word × 175 / 65535 |
 | `set_sensor_altitude` | 0x2427 | Write + data | 1 ms | No | Set altitude (0–3000 m) for pressure comp. |
 | `get_sensor_altitude` | 0x2322 | Read 3 bytes | 1 ms | No | Read altitude setting (meters) |
@@ -365,15 +365,19 @@ Where:
 
 ### Commands
 
-- Set offset: `set_temperature_offset` (0x241D) — value = offset × 2¹⁶ / 175
+- Set offset: `set_temperature_offset` (0x241D) — value = offset × (2¹⁶ - 1) / 175
 - Get offset: `get_temperature_offset` (0x2318)
 - Offset is **volatile** — lost on power cycle unless saved with `persist_settings`
 
 ### Encoding
 
 ```
-word = (uint16_t)(offset_deg_c * 65536.0 / 175.0)
+word = round_to_nearest_uint16(offset_deg_c * 65535.0 / 175.0)
 ```
+
+The driver uses nearest-integer rounding when encoding the command word and nearest
+milli-degree rounding when decoding a readback word. This pins deterministic integer
+behavior while following the datasheet scale factor of `2^16 - 1`.
 
 ---
 

@@ -82,6 +82,14 @@ REQUIRED_IDF_TOKENS = [
     "const app_driver::Status tickSt = device.tick",
     "printStatus(tickSt)",
 ]
+DESTRUCTIVE_CONFIRMATION_TOKENS = [
+    'printHelpItem("persist confirm"',
+    'printHelpItem("factory_reset confirm"',
+    'printHelpItem("frc confirm <reference_ppm>"',
+    "use 'persist confirm' to write EEPROM",
+    "use 'factory_reset confirm' to erase/reset settings",
+    "use 'frc confirm <reference_ppm>' to update calibration history",
+]
 
 FORBIDDEN_IDF_PATTERNS = {
     "Arduino.h": re.compile(r"#\s*include\s*[<\"]Arduino\.h[>\"]"),
@@ -142,6 +150,48 @@ def aliases_from_help(items: list[str]) -> set[str]:
     return {alias for alias in aliases if alias}
 
 
+def command_block(text: str, command: str) -> str:
+    marker = f'if (head == "{command}")'
+    start = text.find(marker)
+    if start < 0:
+        fail(f"command handler for '{command}' missing")
+    next_start = text.find('\n  if (head == "', start + len(marker))
+    if next_start < 0:
+        next_start = len(text)
+    return text[start:next_start]
+
+
+def ensure_order(block: str, before: str, after: str, label: str) -> None:
+    before_pos = block.find(before)
+    after_pos = block.find(after)
+    if before_pos < 0:
+        fail(f"{label}: missing '{before}'")
+    if after_pos < 0:
+        fail(f"{label}: missing '{after}'")
+    if before_pos > after_pos:
+        fail(f"{label}: '{before}' must appear before '{after}'")
+
+
+def check_destructive_confirmations(text: str, label: str) -> None:
+    for token in DESTRUCTIVE_CONFIRMATION_TOKENS:
+        if token not in text:
+            fail(f"{label}: destructive confirmation token missing: {token}")
+
+    persist = command_block(text, "persist")
+    ensure_order(persist, 'tail != "confirm"', "device.startPersistSettings()",
+                 f"{label} persist confirmation")
+
+    factory_reset = command_block(text, "factory_reset")
+    ensure_order(factory_reset, 'tail != "confirm"', "device.startFactoryReset()",
+                 f"{label} factory_reset confirmation")
+    ensure_order(factory_reset, 'tail != "confirm"', "clearSettingsCache()",
+                 f"{label} factory_reset cache clear")
+
+    frc = command_block(text, "frc")
+    ensure_order(frc, "confirm", "device.startForcedRecalibration",
+                 f"{label} frc confirmation")
+
+
 def main() -> int:
     arduino = read(ARDUINO_MAIN)
     idf = read(IDF_MAIN)
@@ -179,6 +229,9 @@ def main() -> int:
         fail(f"IDF CLI missing raw subcommands: {sorted(MANDATORY_RAW_SUBCOMMANDS - idf_raw)}")
     if arduino_raw != idf_raw:
         fail(f"raw subcommand sets differ: Arduino={sorted(arduino_raw)}, IDF={sorted(idf_raw)}")
+
+    check_destructive_confirmations(arduino, "Arduino CLI")
+    check_destructive_confirmations(idf, "IDF CLI")
 
     combined_idf = idf + "\n" + transport
     for label, pattern in FORBIDDEN_IDF_PATTERNS.items():

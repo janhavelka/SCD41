@@ -534,6 +534,10 @@ Status SCD41::setSingleShotMode(SingleShotMode mode) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
+  Status st = _requireSCD41Variant("single-shot mode");
+  if (!st.ok()) {
+    return st;
+  }
   if (!isValidSingleShotMode(mode)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid single-shot mode");
   }
@@ -593,6 +597,10 @@ Status SCD41::startLowPowerPeriodicMeasurement() {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
+  Status st = _requireSCD41Variant("low-power periodic");
+  if (!st.ok()) {
+    return st;
+  }
   if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
     return Status::Error(Err::BUSY, "Operation in progress");
   }
@@ -605,11 +613,7 @@ Status SCD41::startLowPowerPeriodicMeasurement() {
   if (_operatingMode == OperatingMode::PERIODIC) {
     return Status::Error(Err::BUSY, "Stop periodic first");
   }
-  if (_sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "Low-power periodic requires SCD41");
-  }
-
-  Status st = _writeCommand(cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT, true);
+  st = _writeCommand(cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT, true);
   if (!st.ok()) {
     return st;
   }
@@ -650,6 +654,10 @@ Status SCD41::powerDown() {
   if (!st.ok()) {
     return st;
   }
+  st = _requireSCD41Variant("power down");
+  if (!st.ok()) {
+    return st;
+  }
 
   st = _writeCommand(cmd::CMD_POWER_DOWN, true);
   if (!st.ok()) {
@@ -665,11 +673,15 @@ Status SCD41::wakeUp() {
   if (_pendingCommand != PendingCommand::NONE) {
     return Status::Error(Err::BUSY, "Command in progress");
   }
+  Status st = _requireSCD41Variant("wake up");
+  if (!st.ok()) {
+    return st;
+  }
   if (_operatingMode != OperatingMode::POWER_DOWN) {
     return Status::Error(Err::INVALID_PARAM, "Sensor is not powered down");
   }
 
-  Status st = _writeCommand(cmd::CMD_WAKE_UP, true, true);
+  st = _writeCommand(cmd::CMD_WAKE_UP, true, true);
   if (!st.ok()) {
     return st;
   }
@@ -900,13 +912,14 @@ Status SCD41::setAutomaticSelfCalibrationTargetPpm(uint16_t ppm) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "ASC target requires SCD41");
+  Status st = _requireSCD41Variant("ASC target");
+  if (!st.ok()) {
+    return st;
   }
   if (ppm < 1 || ppm > cmd::CO2_MAX_PPM) {
     return Status::Error(Err::INVALID_PARAM, "ASC target out of range");
   }
-  Status st = _ensureIdleForConfig("set ASC target");
+  st = _ensureIdleForConfig("set ASC target");
   if (!st.ok()) {
     return st;
   }
@@ -922,10 +935,11 @@ Status SCD41::getAutomaticSelfCalibrationTargetPpm(uint16_t& out) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  if (_sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "ASC target requires SCD41");
+  Status st = _requireSCD41Variant("ASC target");
+  if (!st.ok()) {
+    return st;
   }
-  Status st = _ensureIdleForConfig("get ASC target");
+  st = _ensureIdleForConfig("get ASC target");
   if (!st.ok()) {
     return st;
   }
@@ -937,10 +951,14 @@ Status SCD41::setAutomaticSelfCalibrationInitialPeriodHours(uint16_t hours) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
+  Status st = _requireSCD41Variant("ASC initial period");
+  if (!st.ok()) {
+    return st;
+  }
   if (hours != 0 && (hours % cmd::ASC_PERIOD_STEP_HOURS) != 0) {
     return Status::Error(Err::INVALID_PARAM, "Initial ASC period must be multiple of 4 h");
   }
-  Status st = _ensureIdleForConfig("set ASC initial period");
+  st = _ensureIdleForConfig("set ASC initial period");
   if (!st.ok()) {
     return st;
   }
@@ -956,7 +974,11 @@ Status SCD41::getAutomaticSelfCalibrationInitialPeriodHours(uint16_t& out) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  Status st = _ensureIdleForConfig("get ASC initial period");
+  Status st = _requireSCD41Variant("ASC initial period");
+  if (!st.ok()) {
+    return st;
+  }
+  st = _ensureIdleForConfig("get ASC initial period");
   if (!st.ok()) {
     return st;
   }
@@ -968,10 +990,14 @@ Status SCD41::setAutomaticSelfCalibrationStandardPeriodHours(uint16_t hours) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
+  Status st = _requireSCD41Variant("ASC standard period");
+  if (!st.ok()) {
+    return st;
+  }
   if (hours == 0 || (hours % cmd::ASC_PERIOD_STEP_HOURS) != 0) {
     return Status::Error(Err::INVALID_PARAM, "Standard ASC period must be positive multiple of 4 h");
   }
-  Status st = _ensureIdleForConfig("set ASC standard period");
+  st = _ensureIdleForConfig("set ASC standard period");
   if (!st.ok()) {
     return st;
   }
@@ -987,7 +1013,11 @@ Status SCD41::getAutomaticSelfCalibrationStandardPeriodHours(uint16_t& out) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
-  Status st = _ensureIdleForConfig("get ASC standard period");
+  Status st = _requireSCD41Variant("ASC standard period");
+  if (!st.ok()) {
+    return st;
+  }
+  st = _ensureIdleForConfig("get ASC standard period");
   if (!st.ok()) {
     return st;
   }
@@ -1237,24 +1267,34 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
     return st;
   }
 
+  bool allLiveFieldsRead = true;
   st = getAutomaticSelfCalibrationTargetPpm(out.automaticSelfCalibrationTargetPpm);
-  if (!st.ok() && !st.is(Err::UNSUPPORTED)) {
-    return st;
+  if (!st.ok()) {
+    if (!st.is(Err::UNSUPPORTED)) {
+      return st;
+    }
+    allLiveFieldsRead = false;
   }
 
   st = getAutomaticSelfCalibrationInitialPeriodHours(
       out.automaticSelfCalibrationInitialPeriodHours);
   if (!st.ok()) {
-    return st;
+    if (!st.is(Err::UNSUPPORTED)) {
+      return st;
+    }
+    allLiveFieldsRead = false;
   }
 
   st = getAutomaticSelfCalibrationStandardPeriodHours(
       out.automaticSelfCalibrationStandardPeriodHours);
   if (!st.ok()) {
-    return st;
+    if (!st.is(Err::UNSUPPORTED)) {
+      return st;
+    }
+    allLiveFieldsRead = false;
   }
 
-  out.liveConfigValid = true;
+  out.liveConfigValid = allLiveFieldsRead;
   return Status::Ok();
 }
 
@@ -1413,6 +1453,9 @@ Status SCD41::_validateRawCommand(uint16_t command) const {
   if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
     return Status::Error(Err::BUSY, "Operation in progress");
   }
+  if (_isSCD41OnlyCommand(command) && _sensorVariant != SensorVariant::SCD41) {
+    return Status::Error(Err::UNSUPPORTED, "Command requires SCD41");
+  }
   if (_isManagedOnlyRawCommand(command)) {
     return Status::Error(Err::UNSUPPORTED, "Use typed API for managed command");
   }
@@ -1423,6 +1466,15 @@ Status SCD41::_validateRawCommand(uint16_t command) const {
     return Status::Error(Err::BUSY, "Command not allowed during periodic measurement");
   }
   return Status::Ok();
+}
+
+Status SCD41::_requireSCD41Variant(const char* opName) const {
+  if (_sensorVariant == SensorVariant::SCD41) {
+    return Status::Ok();
+  }
+  return Status::Error(Err::UNSUPPORTED,
+                       (opName == nullptr) ? "Operation requires SCD41" : opName,
+                       static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
 }
 
 bool SCD41::_isPeriodicAllowedCommand(uint16_t command) {
@@ -1483,6 +1535,25 @@ bool SCD41::_isWordPayloadCommand(uint16_t command) {
     case cmd::CMD_SET_ASC_TARGET:
     case cmd::CMD_SET_ASC_INITIAL_PERIOD:
     case cmd::CMD_SET_ASC_STANDARD_PERIOD:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool SCD41::_isSCD41OnlyCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
+    case cmd::CMD_SET_ASC_TARGET:
+    case cmd::CMD_GET_ASC_TARGET:
+    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
+    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
+    case cmd::CMD_MEASURE_SINGLE_SHOT:
+    case cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY:
+    case cmd::CMD_POWER_DOWN:
+    case cmd::CMD_WAKE_UP:
       return true;
     default:
       return false;

@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reference documentation now separates compact SCD41 notes from full PDF extraction under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
 - Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
 - Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
+- SCD41-only public APIs and known raw command words now return `UNSUPPORTED`
+  on non-SCD41 variants when `strictVariantCheck=false` is used for diagnostics.
+- Arduino and ESP-IDF CLI examples now require confirmation tokens for EEPROM
+  writes, factory reset, and forced recalibration: `persist confirm`,
+  `factory_reset confirm`, and `frc confirm <reference_ppm>`.
+- Temperature-offset documentation now consistently uses the datasheet
+  `65535 / 175` scale and documents nearest-integer rounding for public helper
+  conversions.
 
 ### Added
 - `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.

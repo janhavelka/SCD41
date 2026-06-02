@@ -222,6 +222,18 @@ uint16_t lastWriteWord(const ScriptedTransport& bus) {
   return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[2]) << 8) | bus.lastWrite[3]);
 }
 
+void assertUnsupportedNoI2c(const Status& st, const ScriptedTransport& bus,
+                            size_t writeCalls, size_t readCalls) {
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_UINT32(writeCalls, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readCalls, bus.readCalls);
+}
+
+bool isWithinInt32(int32_t actual, int32_t expected, int32_t tolerance) {
+  const int32_t delta = (actual >= expected) ? (actual - expected) : (expected - actual);
+  return delta <= tolerance;
+}
+
 }  // namespace
 
 void setUp() {
@@ -362,6 +374,24 @@ void test_crc_and_conversion_helpers() {
   TEST_ASSERT_EQUAL_INT(4000, SCD41Device::decodeTemperatureOffsetC_x1000(rawOffset));
   TEST_ASSERT_EQUAL_UINT16(1013u, SCD41Device::encodeAmbientPressurePa(101300));
   TEST_ASSERT_EQUAL_UINT32(101300u, SCD41Device::decodeAmbientPressurePa(1013));
+}
+
+void test_temperature_offset_static_vectors_match_datasheet_scale() {
+  TEST_ASSERT_EQUAL_HEX16(0x0000, SCD41Device::encodeTemperatureOffsetC_x1000(0));
+  TEST_ASSERT_EQUAL_HEX16(0x05DA, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
+  TEST_ASSERT_EQUAL_HEX16(0x07E6, SCD41Device::encodeTemperatureOffsetC_x1000(5400));
+  TEST_ASSERT_EQUAL_HEX16(0x0912, SCD41Device::encodeTemperatureOffsetC_x1000(6200));
+  TEST_ASSERT_EQUAL_HEX16(0x1D42, SCD41Device::encodeTemperatureOffsetC_x1000(20000));
+  TEST_ASSERT_EQUAL_HEX16(0x05B4, SCD41Device::encodeTemperatureOffsetC_x1000(3900));
+
+  TEST_ASSERT_EQUAL_INT(0, SCD41Device::decodeTemperatureOffsetC_x1000(0x0000));
+  TEST_ASSERT_EQUAL_INT(4000, SCD41Device::decodeTemperatureOffsetC_x1000(0x05DA));
+  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x07E6),
+                                 5400, 1));
+  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x0912),
+                                 6200, 1));
+  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x1D42),
+                                 20000, 1));
 }
 
 void test_begin_waits_power_up_delay_and_does_not_track_startup_io() {
@@ -1055,6 +1085,119 @@ void test_low_power_periodic_start_and_variant_guard() {
                     static_cast<uint8_t>(otherDevice.startSingleShotMeasurement().code));
 }
 
+void test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.strictVariantCheck = false;
+  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD40),
+                    static_cast<uint8_t>(device._sensorVariant));
+  const size_t writesBefore = bus.writeCalls;
+  const size_t readsBefore = bus.readCalls;
+
+  assertUnsupportedNoI2c(device.setSingleShotMode(SingleShotMode::T_RH_ONLY), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.requestMeasurement(), bus, writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.startSingleShotMeasurement(), bus, writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.startSingleShotRhtOnlyMeasurement(), bus, writesBefore,
+                         readsBefore);
+  assertUnsupportedNoI2c(device.startLowPowerPeriodicMeasurement(), bus, writesBefore,
+                         readsBefore);
+  assertUnsupportedNoI2c(device.powerDown(), bus, writesBefore, readsBefore);
+
+  device._operatingMode = OperatingMode::POWER_DOWN;
+  assertUnsupportedNoI2c(device.wakeUp(), bus, writesBefore, readsBefore);
+  device._operatingMode = OperatingMode::IDLE;
+
+  uint16_t word = 0;
+  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationTargetPpm(400), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationTargetPpm(word), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationInitialPeriodHours(44), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationInitialPeriodHours(word), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationStandardPeriodHours(156), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationStandardPeriodHours(word), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.writeCommandWithData(cmd::CMD_SET_ASC_INITIAL_PERIOD, 44), bus,
+                         writesBefore, readsBefore);
+  assertUnsupportedNoI2c(device.readWordCommand(cmd::CMD_GET_ASC_STANDARD_PERIOD, word), bus,
+                         writesBefore, readsBefore);
+
+  uint8_t raw[cmd::WORD_RESPONSE_LEN] = {};
+  assertUnsupportedNoI2c(device.readCommandUnsafe(cmd::CMD_GET_ASC_INITIAL_PERIOD, raw,
+                                                  sizeof(raw)),
+                         bus, writesBefore, readsBefore);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.state()));
+}
+
+void test_strict_disabled_blocks_other_known_non_scd41_variants() {
+  const uint16_t variantWords[] = {0x2001, 0x5001, 0xF001};
+  const SensorVariant expectedVariants[] = {
+      SensorVariant::SCD42,
+      SensorVariant::SCD43,
+      SensorVariant::UNKNOWN,
+  };
+
+  for (size_t i = 0; i < (sizeof(variantWords) / sizeof(variantWords[0])); ++i) {
+    ScriptedTransport bus;
+    Config cfg = makeConfig(bus);
+    cfg.strictVariantCheck = false;
+    queueReadSerial(bus, variantWords[i], 0x2222, 0x3333);
+
+    SCD41Device device;
+    TEST_ASSERT_TRUE(device.begin(cfg).ok());
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(expectedVariants[i]),
+                      static_cast<uint8_t>(device._sensorVariant));
+    const size_t writesBefore = bus.writeCalls;
+    const size_t readsBefore = bus.readCalls;
+
+    assertUnsupportedNoI2c(device.startSingleShotMeasurement(), bus, writesBefore, readsBefore);
+    assertUnsupportedNoI2c(device.powerDown(), bus, writesBefore, readsBefore);
+    assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationTargetPpm(400), bus,
+                           writesBefore, readsBefore);
+    assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationInitialPeriodHours(44), bus,
+                           writesBefore, readsBefore);
+  }
+}
+
+void test_read_settings_on_non_scd41_skips_scd41_only_live_fields() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.strictVariantCheck = false;
+  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
+  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
+  queueReadWord(bus, 123);
+  queueReadWord(bus, 1013);
+  queueReadWord(bus, 1);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  SettingsSnapshot snap = {};
+  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
+  TEST_ASSERT_FALSE(snap.liveConfigValid);
+  TEST_ASSERT_EQUAL_INT(4000, snap.temperatureOffsetC_x1000);
+  TEST_ASSERT_EQUAL_UINT16(123u, snap.sensorAltitudeM);
+  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
+  TEST_ASSERT_TRUE(snap.automaticSelfCalibrationEnabled);
+  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationTargetPpm);
+  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationInitialPeriodHours);
+  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationStandardPeriodHours);
+  TEST_ASSERT_EQUAL_UINT32(5u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(5u, bus.readCalls);
+}
+
 void test_periodic_mode_allows_ambient_pressure_override() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
@@ -1089,6 +1232,81 @@ void test_temperature_offset_roundtrip() {
   int32_t offsetC_x1000 = 0;
   TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
   TEST_ASSERT_EQUAL_INT(4000, offsetC_x1000);
+}
+
+void test_set_temperature_offset_writes_vector_payloads() {
+  const int32_t offsets[] = {0, 4000, 20000};
+  const uint16_t expectedRaw[] = {0x0000, 0x05DA, 0x1D42};
+
+  for (size_t i = 0; i < (sizeof(offsets) / sizeof(offsets[0])); ++i) {
+    ScriptedTransport bus;
+    Config cfg = makeConfig(bus);
+    queueBeginSuccess(bus);
+
+    SCD41Device device;
+    TEST_ASSERT_TRUE(device.begin(cfg).ok());
+    TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(offsets[i]).ok());
+    TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_TEMPERATURE_OFFSET, lastWriteCommand(bus));
+    TEST_ASSERT_EQUAL_HEX16(expectedRaw[i], lastWriteWord(bus));
+    TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
+  }
+
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  const size_t writesBefore = bus.writeCalls;
+  const size_t readsBefore = bus.readCalls;
+
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(device.setTemperatureOffsetC_x1000(-1).code));
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(device.setTemperatureOffsetC_x1000(20001).code));
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+}
+
+void test_get_temperature_offset_decodes_datasheet_vectors() {
+  const uint16_t rawWords[] = {0x0000, 0x05DA, 0x0912, 0x1D42};
+  const int32_t expectedMdegC[] = {0, 4000, 6200, 20000};
+
+  for (size_t i = 0; i < (sizeof(rawWords) / sizeof(rawWords[0])); ++i) {
+    ScriptedTransport bus;
+    Config cfg = makeConfig(bus);
+    queueBeginSuccess(bus);
+    queueReadWord(bus, rawWords[i]);
+
+    SCD41Device device;
+    TEST_ASSERT_TRUE(device.begin(cfg).ok());
+    int32_t offsetC_x1000 = 0;
+    TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
+    TEST_ASSERT_TRUE(isWithinInt32(offsetC_x1000, expectedMdegC[i], 1));
+  }
+}
+
+void test_temperature_offset_readback_roundtrip_vector_matrix() {
+  const int32_t offsets[] = {0, 4000, 5400, 6200, 20000};
+  const uint16_t rawWords[] = {0x0000, 0x05DA, 0x07E6, 0x0912, 0x1D42};
+
+  for (size_t i = 0; i < (sizeof(offsets) / sizeof(offsets[0])); ++i) {
+    ScriptedTransport bus;
+    Config cfg = makeConfig(bus);
+    queueBeginSuccess(bus);
+    queueReadWord(bus, rawWords[i]);
+
+    SCD41Device device;
+    TEST_ASSERT_TRUE(device.begin(cfg).ok());
+    TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(offsets[i]).ok());
+    TEST_ASSERT_EQUAL_HEX16(rawWords[i], lastWriteWord(bus));
+
+    int32_t offsetC_x1000 = 0;
+    TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
+    TEST_ASSERT_TRUE(isWithinInt32(offsetC_x1000, offsets[i], 1));
+  }
 }
 
 void test_temperature_offset_rejects_non_finite_values() {
@@ -1475,9 +1693,26 @@ void test_asc_period_validation() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
   queueBeginSuccess(bus);
+  queueReadWord(bus, 44);
+  queueReadWord(bus, 156);
 
   SCD41Device device;
   TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.setAutomaticSelfCalibrationInitialPeriodHours(44).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_ASC_INITIAL_PERIOD, lastWriteCommand(bus));
+  TEST_ASSERT_EQUAL_UINT16(44u, lastWriteWord(bus));
+
+  TEST_ASSERT_TRUE(device.setAutomaticSelfCalibrationStandardPeriodHours(156).ok());
+  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_ASC_STANDARD_PERIOD, lastWriteCommand(bus));
+  TEST_ASSERT_EQUAL_UINT16(156u, lastWriteWord(bus));
+
+  uint16_t hours = 0;
+  TEST_ASSERT_TRUE(device.getAutomaticSelfCalibrationInitialPeriodHours(hours).ok());
+  TEST_ASSERT_EQUAL_UINT16(44u, hours);
+
+  TEST_ASSERT_TRUE(device.getAutomaticSelfCalibrationStandardPeriodHours(hours).ok());
+  TEST_ASSERT_EQUAL_UINT16(156u, hours);
+
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
                     static_cast<uint8_t>(
                         device.setAutomaticSelfCalibrationInitialPeriodHours(2).code));
@@ -1489,7 +1724,7 @@ void test_asc_period_validation() {
                         device.setAutomaticSelfCalibrationStandardPeriodHours(6).code));
 }
 
-void test_persist_reinit_factory_reset_schedule() {
+void test_simulated_persist_reinit_factory_reset_schedule() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
   queueBeginSuccess(bus);
@@ -1796,6 +2031,7 @@ int main(int, char**) {
   RUN_TEST(test_begin_with_arduino_style_timing_hooks_succeeds);
   RUN_TEST(test_time_elapsed_handles_u32_wraparound);
   RUN_TEST(test_crc_and_conversion_helpers);
+  RUN_TEST(test_temperature_offset_static_vectors_match_datasheet_scale);
   RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
   RUN_TEST(test_update_health_ignores_in_progress);
   RUN_TEST(test_begin_wait_guard_times_out_if_time_source_stalls);
@@ -1824,8 +2060,14 @@ int main(int, char**) {
   RUN_TEST(test_offline_request_measurement_does_not_schedule_or_touch_bus);
   RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
+  RUN_TEST(test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c);
+  RUN_TEST(test_strict_disabled_blocks_other_known_non_scd41_variants);
+  RUN_TEST(test_read_settings_on_non_scd41_skips_scd41_only_live_fields);
   RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
   RUN_TEST(test_temperature_offset_roundtrip);
+  RUN_TEST(test_set_temperature_offset_writes_vector_payloads);
+  RUN_TEST(test_get_temperature_offset_decodes_datasheet_vectors);
+  RUN_TEST(test_temperature_offset_readback_roundtrip_vector_matrix);
   RUN_TEST(test_temperature_offset_rejects_non_finite_values);
   RUN_TEST(test_low_level_command_helpers_work);
   RUN_TEST(test_low_level_raw_read_rejects_oversized_buffer_without_i2c);
@@ -1844,7 +2086,7 @@ int main(int, char**) {
   RUN_TEST(test_read_settings_reads_live_device_configuration);
   RUN_TEST(test_read_settings_reads_periodic_ambient_pressure_only);
   RUN_TEST(test_asc_period_validation);
-  RUN_TEST(test_persist_reinit_factory_reset_schedule);
+  RUN_TEST(test_simulated_persist_reinit_factory_reset_schedule);
   RUN_TEST(test_wake_up_accepts_expected_nack);
   RUN_TEST(test_wake_up_accepts_precise_data_nack);
   RUN_TEST(test_wake_up_generic_timeout_and_bus_errors_fail_and_track_health);

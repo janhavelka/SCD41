@@ -102,6 +102,20 @@ completed before scheduled periodic fetches, so applications should call
 - `persist_settings` writes EEPROM. Sensirion rates this storage for at least 2000 write cycles, so persistence must remain explicit and infrequent.
 - The sensor can draw 175-205 mA peak current during the photoacoustic pulse. Budget the supply accordingly and place at least 10 uF bulk capacitance near the device.
 
+## Variant Support Boundary
+
+This package is production-targeted at SCD41. `begin()` validates serial-number
+variant bits as SCD41 by default. Setting `Config::strictVariantCheck=false` is a
+diagnostic escape hatch that lets `begin()` complete on observed SCD40, SCD42,
+SCD43, or unknown variants, but it does not enable family-device support.
+
+When a non-SCD41 variant is initialized this way, known SCD41-only operations
+return `UNSUPPORTED`: low-power periodic mode, single-shot CO2/RHT commands,
+power-down and wake-up, ASC target, ASC initial/standard period commands, and
+raw helper access to those known command words. Common SCD4x diagnostic and
+configuration commands remain available where the local docs identify them as
+shared.
+
 ## Public API
 
 The public driver follows the same family conventions as the mature workspace libraries:
@@ -172,6 +186,13 @@ humidity_milliPct = ((12500 * raw) >> 13)
 ```
 
 `get_data_ready_status` is true when `(word & 0x07FF) != 0`.
+
+Temperature-offset helpers use the datasheet scale factor `2^16 - 1`:
+
+```text
+temperature_offset_word = round(offset_degC * 65535 / 175)
+temperature_offset_mdegC = round(word * 175000 / 65535)
+```
 
 ## Installation
 
@@ -336,7 +357,7 @@ Main command groups:
 - Measurement: `read`, `fetch`, `sample`, `last`, `raw`, `comp`, `dataready`, `watch`, `stress`, `single`, `single_start`, `convert`
 - Mode and power: `mode`, `periodic`, `sleep`, `wake`
 - Identity and compensation: `serial`, `variant`, `toffset`, `altitude`, `pressure`, `asc_enabled`, `asc_target`, `asc_initial`, `asc_standard`
-- Maintenance: `persist`, `reinit`, `factory_reset`, `selftest`, `selftest_result`, `frc`, `frc_result`
+- Maintenance: `persist confirm`, `reinit`, `factory_reset confirm`, `selftest`, `selftest_result`, `frc confirm <reference_ppm>`, `frc_result`
 - Raw commands: `command write`, `command write_data`, `command read`, `command read_word`, `command read_words`
 
 The Arduino and ESP-IDF examples intentionally expose the same command names,
@@ -361,6 +382,12 @@ explicit unsafe byte dump without CRC validation; use `command read_word` or `co
 CRC-checked word responses. Managed transitions such as periodic-mode entry/exit, wake-up, self-test,
 and forced recalibration should be driven through the typed commands so the driver state stays coherent.
 
+EEPROM-writing and persistent calibration commands require explicit operator
+confirmation in both CLIs. Bare `persist`, `factory_reset`, and `frc` commands
+refuse with the required confirmation form; only `persist confirm`,
+`factory_reset confirm`, and `frc confirm <reference_ppm>` execute those
+maintenance flows.
+
 Typical bring-up flow:
 
 ```text
@@ -371,8 +398,8 @@ periodic on
 watch 1
 watch 0
 selftest
-frc 400
-persist
+frc confirm 400
+persist confirm
 command read_word 0xE4B8
 ```
 

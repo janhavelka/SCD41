@@ -24,7 +24,10 @@ Official ESP-IDF references:
   source-compatible timestamp from the same clock domain. Due async completion
   failures are returned by `tick()` and retained through `lastAsyncStatus()`.
 - The driver validates Sensirion CRC-8 on command words and measurement words. CRC mismatches update protocol telemetry separately from I2C transport health.
-- Serial number variant checking currently expects variant bits `[15:12] == 0x1` unless disabled in `Config`.
+- Serial number variant checking currently expects variant bits `[15:12] == 0x1`
+  unless disabled in `Config`. Disabling the check is diagnostic only; known
+  SCD41-only APIs and raw command words still return `UNSUPPORTED` on observed
+  non-SCD41 variants.
 
 ## Arduino Dependencies
 
