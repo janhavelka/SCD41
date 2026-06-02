@@ -1,6 +1,6 @@
 # SCD41 ESP-IDF Port Implementation
 
-Last updated: 2026-05-24
+Last updated: 2026-06-02
 
 ## Implemented
 
@@ -42,8 +42,9 @@ The IDF example maps `esp_err_t` values to library `Status` codes:
 
 The example advertises only `TransportCapability::TIMEOUT`; it does not
 advertise `READ_HEADER_NACK` because the standard IDF APIs do not prove the NACK
-phase. Wake-up command NACK behavior remains handled by the driver through its
-existing expected-NACK path.
+phase. Wake-up command NACK behavior remains handled by the driver only when the
+transport reports a precise address/data NACK; generic `ESP_ERR_INVALID_RESPONSE`
+continues to map to `Err::I2C_ERROR`.
 
 ## Validation
 
@@ -54,9 +55,9 @@ python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
-pio test -e native
-pio run -e esp32s3dev
-pio run -e esp32s2dev
+python -m platformio test -e native
+python -m platformio run -e esp32s3dev
+python -m platformio run -e esp32s2dev
 ```
 
 Run these checks from `examples/idf/basic` in an ESP-IDF v6 environment:

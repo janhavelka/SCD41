@@ -12,7 +12,7 @@ namespace SCD41 {
 /// Optional transport capabilities the driver can use for more precise error mapping.
 enum class TransportCapability : uint8_t {
   NONE = 0,
-  READ_HEADER_NACK = 1 << 0, ///< Transport can reliably report read-header NACK
+  READ_HEADER_NACK = 1 << 0, ///< Transport can prove read-header/no-data NACK separately from generic read failure
   TIMEOUT = 1 << 1,          ///< Transport can reliably report timeouts
   BUS_ERROR = 1 << 2         ///< Transport can reliably report bus errors
 };
@@ -29,6 +29,9 @@ inline constexpr bool hasCapability(TransportCapability caps, TransportCapabilit
 }
 
 /// I2C write callback used for command-only and command-plus-data transfers.
+/// @note The callback must complete synchronously before returning. `Status::Ok()` means exactly
+///       `len` bytes were accepted by the transport. Short writes must return a non-OK status and
+///       should put the actual byte count in `Status::detail` when available.
 using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
                               uint32_t timeoutMs, void* user);
 
@@ -36,6 +39,10 @@ using I2cWriteFn = Status (*)(uint8_t addr, const uint8_t* data, size_t len,
 /// @note The current driver issues the command phase separately through `i2cWrite()` and then
 ///       performs the read phase with `txLen == 0`. Callers should not assume combined
 ///       write+read transactions are required.
+/// @note The callback must complete synchronously before returning. `Status::Ok()` means exactly
+///       `rxLen` bytes were written into `rxData`; short or zero-byte reads must return non-OK
+///       status and should put the actual byte count in `Status::detail` when available.
+/// @note `txLen == 0` permits `txData == nullptr`; `rxLen > 0` requires non-null `rxData`.
 using I2cWriteReadFn = Status (*)(uint8_t addr, const uint8_t* txData, size_t txLen,
                                   uint8_t* rxData, size_t rxLen, uint32_t timeoutMs,
                                   void* user);

@@ -32,7 +32,7 @@ The library covers the practical documented SCD41 runtime surface:
 - automatic self-calibration enable, target, and period controls
 - forced recalibration, persist settings, reinit, self-test, factory reset, power-down, and wake-up
 - live settings readback via `readSettings()`
-- public raw command helpers via `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, and `readWordsCommand()`
+- public diagnostic command helpers via `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, and `readWordsCommand()`
 
 ## Driver Model
 
@@ -94,7 +94,7 @@ completed before scheduled periodic fetches, so applications should call
 - The sensor must be given up to 30 ms after power-up before the first command. `begin()` honors `Config::powerUpDelayMs` before probing the serial number.
 - All commands are 16-bit, MSB-first. Every returned 16-bit word is followed by a CRC byte.
 - During command execution, read attempts may NACK. This is normal busy behavior.
-- `wake_up` is special: the device NACKs the command by design, then wakes within 30 ms.
+- `wake_up` is special: the device NACKs the command by design, then wakes within 30 ms. Only precise address/data NACK statuses are treated as expected wake-up behavior; generic I2C errors, timeouts, and bus faults remain tracked failures.
 - While periodic measurement is active, only `read_measurement`, `get_data_ready_status`, `set_ambient_pressure`, `get_ambient_pressure`, and `stop_periodic_measurement` are valid.
 - `stop_periodic_measurement` requires a 500 ms settle window before idle-only commands.
 - Low-power periodic mode trades some CO2 accuracy for lower average current.
@@ -108,14 +108,14 @@ The public driver follows the same family conventions as the mature workspace li
 
 - lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
 - measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, `hasSample()`
-- state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`
+- state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`, `totalProtocolFailures()`, `totalCrcFailures()`, `consecutiveProtocolFailures()`, `lastProtocolErrorMs()`, `lastProtocolError()`
 - measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
 - mode/query helpers: `getSingleShotMode()`, `getIdentity()`, `readSerialNumber()`, `readSensorVariant()`
 - named single-shot commands: `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()`
 - compensation/config: `setTemperatureOffsetC()` (finite values only), `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
-- raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readWordCommand()`, `readWordsCommand()`
+- raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()`
 - snapshots: `getSettings()` for local driver state, including `hasSample`, and `readSettings()` for a best-effort state plus live-configuration snapshot
 
 `readSettings()` is mode-dependent by design:
@@ -125,6 +125,14 @@ The public driver follows the same family conventions as the mature workspace li
 - while a command is pending, a measurement is in progress, or the sensor is powered down, it returns the local driver snapshot without live refresh
 
 The raw command helpers are limited to immediate, non-stateful diagnostic transactions. Managed mode transitions and long-running commands must still use the typed APIs, and the raw helpers continue to enforce the sensor's periodic-mode command restrictions. Raw read helpers reject buffers larger than the largest documented SCD41 response (9 bytes), invalid buffers, and locally invalid requests before touching I2C.
+
+`readWordCommand()` and `readWordsCommand()` are the supported low-level helpers for word-returning SCD41 commands because they validate the Sensirion CRC byte on every returned 16-bit word. CRC mismatches return `CRC_MISMATCH` and update protocol telemetry: `totalProtocolFailures()`, `totalCrcFailures()`, `consecutiveProtocolFailures()`, `lastProtocolError()`, and `lastProtocolErrorMs()`. This telemetry is intentionally separate from I2C transport health, so CRC errors do not increment `totalFailures()` or move `DriverState` to `DEGRADED`/`OFFLINE`; a later successful CRC-checked word read resets only the consecutive protocol-failure counter.
+
+`readCommand()` is an unvalidated diagnostic byte-read compatibility API. It rejects known word-returning SCD41 commands so production paths do not bypass CRC validation accidentally. `readCommandUnsafe()` is the explicit opt-in byte dump path for diagnostics; it does not validate CRCs and malformed payloads do not update protocol telemetry. Raw byte reads no longer map arbitrary read-header NACKs to `MEASUREMENT_NOT_READY`; that mapping is reserved for managed measurement contexts where the SCD41 protocol defines "not ready" as a valid outcome.
+
+`writeCommand()` rejects known SCD41 word-payload and word-returning commands so callers do not send a valid command word with the wrong transaction shape. Use `writeCommandWithData()` for known one-word payload commands and the CRC-checked read helpers for known word responses. Unknown diagnostic command values remain available for lab use after the normal managed-command and periodic-mode guards pass.
+
+Transport callbacks must treat `Status::Ok()` as an exact-transfer contract: a write callback accepted every requested byte, and a read callback filled every requested response byte. Short writes, zero-byte reads when bytes were requested, and short reads must return a non-OK status with the actual byte count in `Status::detail` when available.
 
 Cached raw, fixed-point, and converted sample access is gated by whether any
 sample has ever been cached (`hasSample()` / `SettingsSnapshot::hasSample`), not
@@ -208,16 +216,21 @@ static SCD41::Status i2cWrite(uint8_t addr, const uint8_t* data, size_t len,
     return SCD41::Status::Error(SCD41::Err::INVALID_CONFIG, "Wire instance is null");
   }
   wire->beginTransmission(addr);
-  wire->write(data, len);
+  const size_t written = wire->write(data, len);
   const uint8_t result = wire->endTransmission(true);
   switch (result) {
-    case 0: return SCD41::Status::Ok();
+    case 0: break;
     case 2: return SCD41::Status::Error(SCD41::Err::I2C_NACK_ADDR, "I2C NACK addr", result);
     case 3: return SCD41::Status::Error(SCD41::Err::I2C_NACK_DATA, "I2C NACK data", result);
     case 4: return SCD41::Status::Error(SCD41::Err::I2C_BUS, "I2C bus error", result);
     case 5: return SCD41::Status::Error(SCD41::Err::I2C_TIMEOUT, "I2C timeout", result);
     default: return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C write failed", result);
   }
+  if (written != len) {
+    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C write incomplete",
+                                static_cast<int32_t>(written));
+  }
+  return SCD41::Status::Ok();
 }
 
 static SCD41::Status i2cWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
@@ -231,9 +244,18 @@ static SCD41::Status i2cWriteRead(uint8_t addr, const uint8_t* txData, size_t tx
   if (txLen != 0) {
     return SCD41::Status::Error(SCD41::Err::INVALID_PARAM, "Combined write+read not supported");
   }
+  if (rxLen == 0) {
+    return SCD41::Status::Ok();
+  }
   const size_t received = wire->requestFrom(addr, rxLen);
+  if (received == 0) {
+    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C read returned 0 bytes", 0);
+  }
   if (received != rxLen) {
-    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C read failed",
+    for (size_t i = 0; i < received; ++i) {
+      (void)wire->read();
+    }
+    return SCD41::Status::Error(SCD41::Err::I2C_ERROR, "I2C read incomplete",
                                 static_cast<int32_t>(received));
   }
   for (size_t i = 0; i < rxLen; ++i) {
@@ -334,9 +356,10 @@ Both CLI examples capture `Status st = tick(...)` on every loop pass and print n
 completion statuses. `MEASUREMENT_NOT_READY` is intentionally quiet because it only means no new
 sample or command result is available yet.
 
-The raw command CLI is intentionally limited to immediate diagnostic commands. Managed transitions such
-as periodic-mode entry/exit, wake-up, self-test, and forced recalibration should be driven through the
-typed commands so the driver state stays coherent.
+The raw command CLI is intentionally limited to immediate diagnostic commands. `command read` is an
+explicit unsafe byte dump without CRC validation; use `command read_word` or `command read_words` for
+CRC-checked word responses. Managed transitions such as periodic-mode entry/exit, wake-up, self-test,
+and forced recalibration should be driven through the typed commands so the driver state stays coherent.
 
 Typical bring-up flow:
 
@@ -360,9 +383,9 @@ python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
-pio test -e native
-pio run -e esp32s3dev
-pio run -e esp32s2dev
+python -m platformio test -e native
+python -m platformio run -e esp32s3dev
+python -m platformio run -e esp32s2dev
 ```
 
 ## Repository Notes

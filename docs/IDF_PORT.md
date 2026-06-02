@@ -1,6 +1,6 @@
 # SCD41 ESP-IDF v6.0.1 Port Status
 
-Last updated: 2026-05-24
+Last updated: 2026-06-02
 
 Scope: implemented core portability changes plus an ESP-IDF component/example. Arduino/PlatformIO support remains intact.
 
@@ -23,7 +23,7 @@ Official ESP-IDF references:
   Scheduling uses the required `Config::nowMs` hook; the `tick()` argument is a
   source-compatible timestamp from the same clock domain. Due async completion
   failures are returned by `tick()` and retained through `lastAsyncStatus()`.
-- The driver validates Sensirion CRC-8 on command words and measurement words.
+- The driver validates Sensirion CRC-8 on command words and measurement words. CRC mismatches update protocol telemetry separately from I2C transport health.
 - Serial number variant checking currently expects variant bits `[15:12] == 0x1` unless disabled in `Config`.
 
 ## Arduino Dependencies
@@ -148,6 +148,11 @@ Expected behavior:
 - Clamp or reject `timeoutMs` before passing it to ESP-IDF's signed
   `xfer_timeout_ms`; never allow overflow to become `-1` because `-1` waits
   forever.
+- `Status::Ok()` is an exact-transfer contract. A write callback must have
+  accepted every requested byte, and a read callback must have filled every
+  requested response byte. Return a non-OK status for short writes, zero-byte
+  reads when bytes were requested, or short reads, with the actual byte count in
+  `Status.detail` when the adapter can observe it.
 - Map `ESP_OK` to `Err::OK`.
 - Map `ESP_ERR_TIMEOUT` to `Err::I2C_TIMEOUT`.
 - Map `ESP_ERR_INVALID_ARG` to `Err::INVALID_PARAM`.
@@ -163,7 +168,10 @@ Expected behavior:
   Set it only if a custom adapter can reliably distinguish a read-header NACK
   from timeout, arbitration, and bus faults; otherwise expected no-data paths can
   mask real transport failures.
-- Wake-up can produce an expected NACK on some flows. Preserve the driver's existing wake-up handling instead of treating every wake-up NACK as a fatal adapter setup error.
+- Wake-up can produce an expected NACK on some flows. Only adapters that can
+  prove address/data NACK should map it to `Err::I2C_NACK_ADDR` or
+  `Err::I2C_NACK_DATA`; generic `ESP_ERR_INVALID_RESPONSE` remains
+  `Err::I2C_ERROR` so the driver can track possible bus faults.
 
 ## CMake and Component Plan
 
@@ -220,7 +228,8 @@ ESP-IDF examples:
 - Run repository contract checks, including `python tools/check_idf_example_contract.py`, to keep Arduino and ESP-IDF CLI behavior aligned.
 - Add an ESP-IDF example build for ESP32-S2 and ESP32-S3.
 - Hardware smoke test probe and serial-number read at fixed address `0x62`.
-- Verify CRC failure injection returns the expected status and does not update measurement state.
+- Verify CRC failure injection returns the expected status, updates protocol
+  telemetry, and does not update measurement state or I2C health counters.
 - Verify command spacing, 30 ms power-up delay, and long command deadlines.
 - Verify `stopPeriodicMeasurement()` honors the 500 ms completion time before new commands.
 - Verify wake-up behavior, including expected NACK handling.

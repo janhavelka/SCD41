@@ -77,6 +77,11 @@ Status SCD41::begin(const Config& config) {
   _consecutiveFailures = 0;
   _totalFailures = 0;
   _totalSuccess = 0;
+  _totalProtocolFailures = 0;
+  _totalCrcFailures = 0;
+  _consecutiveProtocolFailures = 0;
+  _lastProtocolErrorMs = 0;
+  _lastProtocolError = Status::Ok();
   _allowOfflineI2c = false;
   _lastAsyncStatus = Status::Ok();
   _lastAsyncOperation = AsyncOperation::NONE;
@@ -224,6 +229,11 @@ void SCD41::end() {
   _sampleTimestampMs = 0;
   _missedSamples = 0;
   _lastCommandValid = false;
+  _totalProtocolFailures = 0;
+  _totalCrcFailures = 0;
+  _consecutiveProtocolFailures = 0;
+  _lastProtocolErrorMs = 0;
+  _lastProtocolError = Status::Ok();
   clearLastAsyncStatus();
 }
 
@@ -1166,6 +1176,11 @@ Status SCD41::getSettings(SettingsSnapshot& out) const {
   out.i2cAddress = _config.i2cAddress;
   out.i2cTimeoutMs = _config.i2cTimeoutMs;
   out.offlineThreshold = _config.offlineThreshold;
+  out.totalProtocolFailures = _totalProtocolFailures;
+  out.totalCrcFailures = _totalCrcFailures;
+  out.consecutiveProtocolFailures = _consecutiveProtocolFailures;
+  out.lastProtocolErrorMs = _lastProtocolErrorMs;
+  out.lastProtocolError = _lastProtocolError;
   out.measurementPending = _measurementRequested;
   out.measurementReady = _measurementReady;
   out.hasSample = _hasSample;
@@ -1247,11 +1262,20 @@ Status SCD41::writeCommand(uint16_t command, bool allowExpectedNack) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
+  if (allowExpectedNack) {
+    return Status::Error(Err::UNSUPPORTED, "Expected NACK is managed only");
+  }
   Status st = _validateRawCommand(command);
   if (!st.ok()) {
     return st;
   }
-  return _writeCommand(command, true, allowExpectedNack);
+  if (_isWordReturningCommand(command)) {
+    return Status::Error(Err::UNSUPPORTED, "Use CRC-checked read helper");
+  }
+  if (_isWordPayloadCommand(command)) {
+    return Status::Error(Err::UNSUPPORTED, "Use data-word write helper");
+  }
+  return _writeCommand(command, true, false);
 }
 
 Status SCD41::writeCommandWithData(uint16_t command, uint16_t data) {
@@ -1262,10 +1286,23 @@ Status SCD41::writeCommandWithData(uint16_t command, uint16_t data) {
   if (!st.ok()) {
     return st;
   }
+  if (!_isWordPayloadCommand(command) && _isWordReturningCommand(command)) {
+    return Status::Error(Err::UNSUPPORTED, "Command is read-only");
+  }
   return _writeCommandWithData(command, data, true);
 }
 
 Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allowNoData) {
+  (void)allowNoData;
+  return _readCommandRawBytes(command, out, len, false);
+}
+
+Status SCD41::readCommandUnsafe(uint16_t command, uint8_t* out, size_t len) {
+  return _readCommandRawBytes(command, out, len, true);
+}
+
+Status SCD41::_readCommandRawBytes(uint16_t command, uint8_t* out, size_t len,
+                                   bool unsafeRawBytes) {
   if (!_initialized) {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
@@ -1279,6 +1316,9 @@ Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allow
   if (!st.ok()) {
     return st;
   }
+  if (!unsafeRawBytes && _isWordReturningCommand(command)) {
+    return Status::Error(Err::UNSUPPORTED, "Use CRC-checked word helper");
+  }
 
   st = _writeCommand(command, true);
   if (!st.ok()) {
@@ -1290,7 +1330,7 @@ Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allow
     return st;
   }
 
-  return _readOnly(out, len, true, allowNoData);
+  return _readOnly(out, len, true, false);
 }
 
 Status SCD41::readWordCommand(uint16_t command, uint16_t& out) {
@@ -1416,6 +1456,39 @@ bool SCD41::_isManagedOnlyRawCommand(uint16_t command) {
   }
 }
 
+bool SCD41::_isWordReturningCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_READ_MEASUREMENT:
+    case cmd::CMD_GET_TEMPERATURE_OFFSET:
+    case cmd::CMD_GET_SENSOR_ALTITUDE:
+    case cmd::CMD_GET_AMBIENT_PRESSURE:
+    case cmd::CMD_GET_ASC_ENABLED:
+    case cmd::CMD_GET_ASC_TARGET:
+    case cmd::CMD_GET_DATA_READY_STATUS:
+    case cmd::CMD_GET_SERIAL_NUMBER:
+    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool SCD41::_isWordPayloadCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_SET_TEMPERATURE_OFFSET:
+    case cmd::CMD_SET_SENSOR_ALTITUDE:
+    case cmd::CMD_SET_AMBIENT_PRESSURE:
+    case cmd::CMD_SET_ASC_ENABLED:
+    case cmd::CMD_SET_ASC_TARGET:
+    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
+      return true;
+    default:
+      return false;
+  }
+}
+
 Status SCD41::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
   if (_config.i2cWriteRead == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "I2C read callback not set");
@@ -1454,9 +1527,8 @@ Status SCD41::_i2cWriteTrackedAllowExpectedNack(const uint8_t* buf, size_t len) 
   if (st.ok()) {
     return _updateHealth(st);
   }
-  if (st.code == Err::I2C_NACK_ADDR || st.code == Err::I2C_NACK_DATA ||
-      st.code == Err::I2C_ERROR) {
-    return _updateHealth(Status::Ok());
+  if (st.code == Err::I2C_NACK_ADDR || st.code == Err::I2C_NACK_DATA) {
+    return Status::Ok();
   }
   return _updateHealth(st);
 }
@@ -1600,13 +1672,13 @@ Status SCD41::_readWords(uint16_t cmd, uint16_t* values, size_t count, bool trac
     const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
     const uint8_t expected = _crc8(&buf[offset], 2);
     if (buf[offset + 2] != expected) {
-      return Status::Error(Err::CRC_MISMATCH, "CRC mismatch");
+      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
     }
     values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
                                       static_cast<uint16_t>(buf[offset + 1]));
   }
 
-  return Status::Ok();
+  return _recordProtocolStatus(Status::Ok(), tracked);
 }
 
 Status SCD41::_readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData) {
@@ -1632,13 +1704,37 @@ Status SCD41::_readWordsOnly(uint16_t* values, size_t count, bool tracked, bool 
     const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
     const uint8_t expected = _crc8(&buf[offset], 2);
     if (buf[offset + 2] != expected) {
-      return Status::Error(Err::CRC_MISMATCH, "CRC mismatch");
+      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
     }
     values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
                                       static_cast<uint16_t>(buf[offset + 1]));
   }
 
-  return Status::Ok();
+  return _recordProtocolStatus(Status::Ok(), tracked);
+}
+
+Status SCD41::_recordProtocolStatus(const Status& st, bool tracked) {
+  if (!tracked || !_initialized || st.inProgress()) {
+    return st;
+  }
+  if (st.ok()) {
+    _consecutiveProtocolFailures = 0;
+    return st;
+  }
+  if (st.code == Err::CRC_MISMATCH) {
+    _lastProtocolErrorMs = _nowMs();
+    _lastProtocolError = st;
+    if (_totalProtocolFailures != std::numeric_limits<uint32_t>::max()) {
+      ++_totalProtocolFailures;
+    }
+    if (_totalCrcFailures != std::numeric_limits<uint32_t>::max()) {
+      ++_totalCrcFailures;
+    }
+    if (_consecutiveProtocolFailures != std::numeric_limits<uint8_t>::max()) {
+      ++_consecutiveProtocolFailures;
+    }
+  }
+  return st;
 }
 
 Status SCD41::_readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData) {

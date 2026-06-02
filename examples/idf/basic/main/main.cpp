@@ -1826,7 +1826,7 @@ void printHelp() {
   printHelpSection("Raw Commands");
   printHelpItem("command write <cmd>", "Issue an immediate non-stateful raw 16-bit command");
   printHelpItem("command write_data <cmd> <data>", "Issue an immediate command with one CRC-packed data word");
-  printHelpItem("command read <cmd> <len, 1..9>", "Issue a short raw read command and print response bytes");
+  printHelpItem("command read <cmd> <len, 1..9>", "UNSAFE raw byte read without CRC validation");
   printHelpItem("command read_word <cmd>", "Issue a short read command and decode one CRC-checked word");
   printHelpItem("command read_words <cmd> <count, 1..3>", "Issue a short read command and decode CRC-checked words");
   std::printf("  %sNote:%s raw commands are immediate diagnostics and do not reconcile cached driver state\n",
@@ -2534,7 +2534,8 @@ void processCommand(const Line& cmdLine) {
         return;
       }
       uint8_t buf[SCD41::cmd::MEASUREMENT_RESPONSE_LEN] = {};
-      const app_driver::Status st = device.readCommand(command, buf, static_cast<size_t>(len));
+      const app_driver::Status st =
+          device.readCommandUnsafe(command, buf, static_cast<size_t>(len));
       printStatus(st);
       if (!st.ok()) {
         return;

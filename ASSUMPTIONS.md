@@ -8,7 +8,7 @@ This repository now contains the full SCD41 driver, tests, and example tree. The
 - Presence detection in `begin()` should use `get_serial_number` and validate variant bits `[15:12] == 0x1`.
 - The intended public package naming is `SCD41::` with the main header at `include/SCD41/SCD41.h`.
 - Long sensor operations such as self-test, single-shot measurement, persistence, and factory reset must be represented as bounded, `tick()`-driven flows rather than blocking for 50 ms to 10 s inside a public API.
-- `wake_up` command NACK is expected behavior and should be handled as a special success path followed by a bounded 30 ms settle window.
+- `wake_up` command NACK is expected behavior only when the transport reports a precise address/data NACK; generic I2C errors, timeouts, and bus faults remain tracked failures.
 - Ambient pressure payloads are interpreted as `Pa / 100`, with the documented valid range `700..1200`.
 - EEPROM writes remain explicit maintenance operations only. Runtime compensation changes do not imply persistence.
 - The first single-shot CO2 readings after power-up or mode transitions may be unreliable and should be treated as warm-up samples in higher-level application logic.

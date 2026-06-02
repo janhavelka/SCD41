@@ -33,7 +33,7 @@ enum class Err : uint8_t {
 /// @note `msg` must point to a static string. The driver does not allocate message storage.
 struct Status {
   Err code = Err::OK;      ///< Result code
-  int32_t detail = 0;   ///< Implementation-specific detail (e.g. raw transport error)
+  int32_t detail = 0;   ///< Raw platform error, actual short transfer byte count, or 0
   const char* msg = ""; ///< Static string describing the error
 
   /// Construct an OK status by default.

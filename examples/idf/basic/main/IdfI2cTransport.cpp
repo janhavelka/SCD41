@@ -83,7 +83,7 @@ SCD41::Status idfI2cWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
 
   IdfI2cContext* ctx = static_cast<IdfI2cContext*>(user);
   const int timeout = timeoutToIdf(timeoutMs);
-  if (rxLen == 0U) {
+  if (txLen == 0U && rxLen == 0U) {
     return SCD41::Status::Ok();
   }
   if (txLen == 0U) {

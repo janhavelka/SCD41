@@ -117,6 +117,11 @@ struct SettingsSnapshot {
   uint8_t i2cAddress = cmd::I2C_ADDRESS; ///< Configured I2C address
   uint32_t i2cTimeoutMs = 50; ///< Configured transport timeout
   uint8_t offlineThreshold = 5; ///< Failure threshold used for OFFLINE transition
+  uint32_t totalProtocolFailures = 0; ///< Lifetime tracked protocol-level failure counter
+  uint32_t totalCrcFailures = 0; ///< Lifetime CRC mismatch counter
+  uint8_t consecutiveProtocolFailures = 0; ///< Protocol failures since last CRC-checked success
+  uint32_t lastProtocolErrorMs = 0; ///< Timestamp of the last protocol failure
+  Status lastProtocolError = Status::Ok(); ///< Most recent protocol-level failure status
   bool measurementPending = false; ///< True while a sample fetch is in flight
   bool measurementReady = false; ///< True when a cached sample can be consumed
   bool hasSample = false; ///< True after at least one sample has been cached
@@ -221,6 +226,11 @@ public:
   uint8_t consecutiveFailures() const { return _consecutiveFailures; } ///< Failures since the last success
   uint32_t totalFailures() const { return _totalFailures; } ///< Lifetime tracked I2C failure counter
   uint32_t totalSuccess() const { return _totalSuccess; } ///< Lifetime tracked I2C success counter
+  uint32_t totalProtocolFailures() const { return _totalProtocolFailures; } ///< Lifetime protocol failure counter
+  uint32_t totalCrcFailures() const { return _totalCrcFailures; } ///< Lifetime CRC mismatch counter
+  uint8_t consecutiveProtocolFailures() const { return _consecutiveProtocolFailures; } ///< Protocol failures since the last CRC-checked success
+  uint32_t lastProtocolErrorMs() const { return _lastProtocolErrorMs; } ///< Timestamp of the last protocol failure
+  Status lastProtocolError() const { return _lastProtocolError; } ///< Most recent protocol-level failure status
 
   // =========================================================================
   // Measurement API
@@ -288,6 +298,8 @@ public:
   /// Enter the sensor power-down state.
   Status powerDown();
   /// Wake the sensor from power-down and schedule the required settle window.
+  /// @note SCD41 normally NACKs `wake_up`. Only precise address/data NACK statuses are treated
+  ///       as expected; generic I2C errors, bus errors, and timeouts remain tracked failures.
   Status wakeUp();
 
   /// Read and cache the 48-bit serial number.
@@ -383,17 +395,27 @@ public:
   // Low-Level Command Access
   // =========================================================================
 
-  /// Issue an immediate raw 16-bit command that does not require managed driver state updates.
-  /// @note Managed state-transition commands are rejected. `allowExpectedNack` is intended only
-  ///       for commands whose device-side NACK is part of the documented protocol behavior.
+  /// Issue an immediate diagnostic 16-bit command that does not require managed driver state updates.
+  /// @note Managed state-transition commands are rejected. `allowExpectedNack` is retained for
+  ///       source compatibility but returns UNSUPPORTED; expected-NACK handling is managed by
+  ///       `wakeUp()` only. Known word-payload and word-returning commands are rejected here
+  ///       so callers use the matching CRC-aware helper shape.
   Status writeCommand(uint16_t command, bool allowExpectedNack = false);
-  /// Issue an immediate raw command with one CRC-protected payload word.
+  /// Issue an immediate diagnostic command with one CRC-protected payload word.
+  /// @note Known read-only word-returning commands are rejected.
   Status writeCommandWithData(uint16_t command, uint16_t data);
-  /// Issue an immediate short read command and return the raw response bytes.
-  /// @note `allowNoData` maps a transport-reported read-header NACK to `MEASUREMENT_NOT_READY`
-  ///       only when the transport declares `TransportCapability::READ_HEADER_NACK`.
-  ///       SCD41 read responses are bounded to 9 bytes; larger reads are rejected before I2C.
+  /// Issue an immediate unvalidated diagnostic read and return raw response bytes.
+  /// @warning This API does not validate SCD41 word CRCs. Use `readWordCommand()` or
+  ///          `readWordsCommand()` for word-returning commands in production paths.
+  /// @note Known word-returning SCD41 commands are rejected here. Use `readCommandUnsafe()` only
+  ///       for explicit diagnostic byte dumps.
+  /// @param allowNoData Deprecated compatibility parameter; ignored. Raw read-header NACKs remain
+  ///        tracked I2C failures.
   Status readCommand(uint16_t command, uint8_t* out, size_t len, bool allowNoData = false);
+  /// Issue an immediate unvalidated diagnostic read and return raw response bytes.
+  /// @warning Unsafe diagnostic path: returned words are not CRC-checked and malformed payloads
+  ///          do not update protocol telemetry.
+  Status readCommandUnsafe(uint16_t command, uint8_t* out, size_t len);
   /// Issue an immediate short read command and decode one CRC-checked word.
   Status readWordCommand(uint16_t command, uint16_t& out);
   /// Issue an immediate short read command and decode multiple CRC-checked words.
@@ -453,6 +475,8 @@ private:
   Status _readWords(uint16_t cmd, uint16_t* values, size_t count, bool tracked);
   Status _readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData = false);
   Status _readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData);
+  Status _readCommandRawBytes(uint16_t command, uint8_t* out, size_t len, bool unsafeRawBytes);
+  Status _recordProtocolStatus(const Status& st, bool tracked);
 
   // =========================================================================
   // Command scheduling / health
@@ -491,6 +515,8 @@ private:
   static uint8_t _crc8(const uint8_t* data, size_t len);
   static SensorVariant _variantFromSerialWord(uint16_t word0);
   static AsyncOperation _asyncOperationForPending(PendingCommand command);
+  static bool _isWordReturningCommand(uint16_t command);
+  static bool _isWordPayloadCommand(uint16_t command);
 
   uint32_t _nowMs() const;
   uint32_t _nowUs() const;
@@ -519,6 +545,11 @@ private:
   uint8_t _consecutiveFailures = 0;
   uint32_t _totalFailures = 0;
   uint32_t _totalSuccess = 0;
+  uint32_t _totalProtocolFailures = 0;
+  uint32_t _totalCrcFailures = 0;
+  uint8_t _consecutiveProtocolFailures = 0;
+  uint32_t _lastProtocolErrorMs = 0;
+  Status _lastProtocolError = Status::Ok();
   bool _allowOfflineI2c = false;
   Status _lastAsyncStatus = Status::Ok();
   AsyncOperation _lastAsyncOperation = AsyncOperation::NONE;
