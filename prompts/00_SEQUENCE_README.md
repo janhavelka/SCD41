@@ -1,26 +1,56 @@
-# SCD41 Industry-Readiness Hardening — Chunked Prompt Sequence
+# SCD41 Industry-Readiness Hardening — Finding-Mapped Prompt Sequence
 
-This bundle is designed to be fed to the coding agent one prompt at a time.
+Use these prompts one by one with the coding agent. They are tailored directly to the SCD41 exploration report and are intended to fix the actual findings, not run another generic audit.
 
-The audit report classifies the repository as a strong pre-production SCD41 driver, not yet industry-grade. The main blockers are asynchronous error visibility from `tick()`, broken/default timing behavior in Arduino-facing usage, inconsistent clocks, blocking/variable latency, missing ESP-IDF proof, missing hardware/HIL evidence, and several protocol-safety gaps.
+## Important operating model
 
-Recommended order:
+- Work on the same SCD41 repository only.
+- Start from the current repository state and create/use one hardening branch: `hardening/scd41-industry-readiness`.
+- Feed prompts in numerical order.
+- Each prompt is a bounded implementation chunk.
+- The coding agent may spawn subagents in every chunk.
+- After each prompt, the coding agent must run the relevant checks, update the cumulative progress report, commit, and push/sync the branch.
+- Do not let the agent skip ahead. Later prompts depend on earlier design decisions.
+- Do not let the agent invent hardware, ESP-IDF, or CI results.
 
-1. `01_branch_agents_baseline_and_low_risk_contracts.md`
-2. `02_timing_contract_and_clock_model.md`
-3. `03_tick_async_completion_and_stale_state.md`
-4. `04_protocol_safety_crc_variant_raw_destructive.md`
-5. `05_latency_state_machine_and_public_api_bounds.md`
-6. `06_tests_ci_package_and_examples.md`
-7. `07_hil_matrix_final_report_and_release_readiness.md`
+## Finding coverage map
 
-Each prompt instructs the coder to commit and sync after completion. Do not skip ahead unless the current prompt is completed or explicitly blocked.
+| Prompt | Exploration findings addressed |
+| --- | --- |
+| 01 | Setup, branch, AGENTS, baseline evidence, copy/move M-06, Doxygen/thread/ISR L-03, docs honesty, Version.h/package M-09 initial guard |
+| 02 | H-02 default timing contract, H-04 inconsistent clocks, fallback timing, Arduino example hooks, quick-start docs |
+| 03 | H-01 silent async `tick()` failures, async status/event surfacing, periodic/single-shot/self-test/FRC failure visibility |
+| 04 | M-01 wake-up expected-NACK masking, L-01 CRC health policy, M-02/M-07 raw helper safety, M-03 truncated response contract |
+| 05 | M-04 SCD41-only variant gating, L-05 temperature-offset scale, M-10 destructive command confirmation |
+| 06 | H-03 blocking/variable latency, `begin()`/`readSettings()`/due `tick()` latency, M-05 stale cached samples across reset epochs, L-02 probe side effects |
+| 07 | M-08 test-suite structure, H-05 ESP-IDF CI/build proof, M-09 package/generated header proof, L-04/L-06 validation docs/guards |
+| 08 | H-05 hardware/HIL matrix, safe smoke, fault and destructive opt-in procedures, final report and release readiness |
 
-Expected final outcome:
+## Required cumulative report
 
-- one clean hardening branch,
-- updated `AGENTS.md`, README, Doxygen, docs, examples, CI/scripts, and native tests,
-- a comprehensive final hardening report,
-- honest readiness verdict and remaining hardware/HIL work.
+Every chunk must update this file:
 
-If a prompt reveals that an architectural decision is risky, the coder should stop and write a decision note instead of forcing a bad refactor.
+```text
+docs/SCD41_HARDENING_PROGRESS.md
+```
+
+The final chunk must produce or update:
+
+```text
+docs/SCD41_HARDENING_FINAL_REPORT.md
+```
+
+## Standard end-of-chunk routine
+
+At the end of every prompt, the coding agent must run all checks available for that chunk, then:
+
+```bash
+git diff --check
+git status --short
+git add <changed-files>
+git commit -m "<concise scope message>"
+git push -u origin hardening/scd41-industry-readiness
+```
+
+If there is no remote, no network, or push fails, the agent must say exactly that and leave the commit local. If checks cannot be run, the agent must record exactly why.
+

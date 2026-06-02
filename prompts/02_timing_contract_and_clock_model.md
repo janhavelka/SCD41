@@ -1,134 +1,105 @@
-# Prompt 02 — Timing Contract, Arduino Hooks, and Unified Clock Model
+# Prompt 02 — Fix Timing Hooks, Arduino Defaults, and One-Clock Scheduling Model
 
+Continue on `hardening/scd41-industry-readiness`. This chunk directly addresses:
 
-# Common instructions for every SCD41 hardening prompt
+- H-02: default timing contract breaks Arduino-facing usage.
+- H-04: scheduled deadlines can use inconsistent clocks.
+- Related docs/tests around timing hooks, fallback timing, quick start, and CLI example setup.
 
-You are working in the SCD41 repository. You will receive a sequence of prompts one by one. Do **not** try to complete the whole industry-readiness effort in one pass. Each prompt is a logically bounded implementation chunk. Finish the current chunk, run the requested checks, write/update the report section, commit, and sync before waiting for the next prompt.
+Do not implement async `tick()` error surfacing in this prompt; that is prompt 03. Do not do HIL or CI expansion here.
 
-Use subagents where available. Subagents must return factual, code-grounded findings, not guesses. Good subagent roles for this repository:
-
-- `core-contracts-agent`: public API, timing, tick, health, copy/move, stale state, thread/ISR contracts.
-- `protocol-agent`: SCD41/SCD4x command rules, CRC, wake-up expected-NACK, idle-only commands, variant gating, destructive commands.
-- `tests-agent`: fake transport, fault injection, black-box public tests, regression tests.
-- `examples-ci-agent`: Arduino CLI, ESP-IDF example, CI, package generation, validation docs.
-- `docs-release-agent`: README, Doxygen, final reports, hardware/HIL matrix, release claims.
-- `integration-review-agent`: final diff review before each commit.
-
-Hard rules:
-
-1. Do not invent validation results. If hardware, ESP-IDF, Docker, or CI cannot be run locally, say exactly that.
-2. Keep the core framework-neutral: no Arduino, Wire, ESP-IDF, FreeRTOS, logging framework, heap-heavy framework types, or global bus ownership in `include/` or `src/`.
-3. Driver core must not own the I2C bus. I2C ownership, locking, reset, power control, and timeout policy belong to the injected transport or application bus manager.
-4. Public fallible APIs must expose `Status` or an explicit result channel. Silent async errors are not acceptable.
-5. Long or destructive commands must be explicit, documented, and testable. EEPROM/destructive hardware commands must require clear opt-in/confirmation in examples.
-6. Prefer bounded, reviewable changes. Do not perform broad speculative rewrites.
-7. Every prompt must end with a commit and sync attempt. If sync is impossible, document why.
-
-
-## Goal
-
-Fix the timing-contract problems identified by the audit:
-
-- default timing hooks can break Arduino-facing usage,
-- fallback time returns constant zero,
-- scheduling deadlines use `_nowMs()` but `tick(nowMs)` compares with a caller-provided clock,
-- README/Arduino examples omit timing hooks.
-
-This prompt should make timing behavior explicit, consistent, and test-covered.
-
-## Start procedure
+## Required starting checks
 
 ```bash
-git status --short
 git branch --show-current
+git status --short
 ```
 
-Confirm you are on `hardening/scd41-industry-readiness`. If not, stop and report.
+Stop if the tree is dirty with unknown user changes.
 
-Pull/rebase if needed, but do not overwrite local work.
+## Subagents
 
-## Subagents to spawn
+Spawn:
 
-- `core-contracts-agent`: propose the cleanest single clock model.
-- `tests-agent`: design fake-clock tests including wraparound and deliberately divergent clock inputs.
-- `examples-ci-agent`: inspect Arduino CLI and README quick start for timing hook setup.
-- `integration-review-agent`: verify that the chosen timing model is coherent and not half-migrated.
+1. `timing-contract-subagent`: inspect `Config`, `PlatformTime`, `_nowMs()`, `_nowUs()`, `_waitMs()`, command scheduling, and `tick(nowMs)`.
+2. `arduino-example-subagent`: inspect README quick start and `examples/01_basic_bringup_cli/main.cpp` timing hook setup.
+3. `native-test-subagent`: design fake-clock tests for missing hooks, real hooks, wraparound, and deliberately divergent clocks.
+4. `compatibility-subagent`: identify public API break risk and recommend the least surprising migration path.
 
-## Design decision required
+## Fix H-02: timing hooks must not silently degrade Arduino usage
 
-Choose one timing model and apply it consistently. Do not leave two competing time sources.
+The exploration report found that `Config::nowMs`, `nowUs`, and `cooperativeYield` default null, fallback time returns constant zero, `begin()` waits 30 ms, README quick start omits hooks, and Arduino CLI omits hooks before `device.begin(gConfig)`.
 
-Preferred options:
+Implement a strict, production-safe contract:
 
-### Option A — `tick(nowMs)` owns scheduling time
+1. Define exactly which timing hooks are required for which API classes:
+   - `nowMs` required for public APIs that perform millisecond waits or schedule millisecond deadlines.
+   - `nowUs` required for SCD41 command-spacing enforcement if the implementation uses microsecond spacing.
+   - `cooperativeYield` optional, but examples should supply it where available.
+2. `begin()` must not rely on constant-zero fallback time for a nonzero `powerUpDelayMs`.
+3. If required timing hooks are missing for a path that needs them, return `INVALID_CONFIG` or a precise existing status before starting I2C side effects where practical.
+4. Alternatively, if the project design chooses to make hooks mandatory in `begin()`, document that as an intentional breaking/production-safe change.
+5. Avoid reintroducing Arduino/ESP-IDF timing calls into core.
 
-- All scheduled deadlines are created from the same `nowMs` domain passed to `tick()` / request calls.
-- APIs that schedule long work either take `nowMs` explicitly or require the driver to have a stored current time from `tick()`.
-- This is good for deterministic embedded schedulers.
+Preferred direction:
 
-### Option B — injected `Config::nowMs` owns scheduling time
+- Keep core framework-neutral.
+- Require injected time hooks in `Config` validation for normal `begin()` unless the user explicitly sets all timing waits to zero and accepts diagnostic behavior.
+- Update examples so normal users always provide hooks.
 
-- `tick()` becomes parameterless or ignores its argument after API migration.
-- All scheduling uses `_nowMs()` from the configured hook.
-- This is simpler for Arduino, but requires a valid hook for any timing-sensitive API.
+## Fix Arduino example and README quick start
 
-Pick the least-breaking clean option. If a public API break is required, document it clearly.
+In README quick start and Arduino CLI setup, install timing hooks before `begin()`:
 
-## Implement this chunk
+- `nowMs` from `millis()`.
+- `nowUs` from `micros()`.
+- `cooperativeYield` from `yield()` or a safe no-op if appropriate.
 
-### 1. Enforce/document required time hooks
+Make it clear these are example-layer hooks, not core dependencies.
 
-The audit found that null `nowMs`/`nowUs` plus fallback zero time can make waits exit by stall/timeout behavior instead of real time. Fix this by either:
+## Fix H-04: one coherent clock model
 
-- requiring timing hooks in `Config` validation when APIs need them, or
-- installing proper Arduino hooks in examples and providing a clear documented default, or
-- both.
+The report found deadlines scheduled with `_nowMs()` but compared with caller-provided `tick(nowMs)`. Fix this so one time source controls scheduled command deadlines.
 
-The Arduino README quick start and Arduino CLI must set appropriate hooks before `begin()`:
+Choose and implement one model consistently:
 
-- `nowMs` from `millis()`,
-- `nowUs` from `micros()` if command spacing uses microseconds,
-- `cooperativeYield` from `yield()` or an equivalent safe no-op if no wait can spin.
+### Preferred model A — tick argument owns scheduling time
 
-Keep these hooks in example/adapter code, not core framework code.
+- All scheduled deadlines are based on the same `nowMs` supplied to the public method that starts/schedules the command, or on a stored last-tick time only if well-defined.
+- `tick(nowMs)` compares deadlines created in the same time domain.
+- Do not mix `_nowMs()` deadlines with unrelated caller-provided `tick(nowMs)`.
 
-### 2. Remove misleading fallback behavior
+### Acceptable model B — injected clock owns scheduling time
 
-Review `PlatformTime.h` and `_nowMs()` / `_nowUs()` behavior.
+- Long-command scheduling always uses `Config::nowMs`.
+- Change or overload `tick()` so it no longer accepts a separate time domain, or make `tick(nowMs)` ignore/validate the argument consistently.
 
-If hooks are required, missing hooks should produce `INVALID_CONFIG` or a clearly documented deterministic behavior. Avoid a constant-zero fallback that makes the API look time-aware when it is not.
+Pick the least disruptive design and document the compatibility impact.
 
-### 3. Fix clock mismatch
+## Tests required
 
-The audit found scheduled deadlines are created using `_nowMs()` while `tick(nowMs)` compares with the external `nowMs` argument. Make scheduling and comparison use one consistent clock domain.
+Add native tests for:
 
-Add tests where:
+1. Default timing hooks missing with nonzero `powerUpDelayMs` returns the documented status and does not silently spin/stall.
+2. Arduino/example-style hooks allow `begin()` to succeed with a fake monotonic clock.
+3. Scheduling and `tick()` use one time domain.
+4. A deliberately divergent `Config::nowMs` and `tick(nowMs)` cannot make a command complete early/late silently; either impossible by API design or detected/documented.
+5. Wraparound-safe deadline comparison if existing code supports wraparound.
+6. `cooperativeYield` optional behavior is deterministic.
 
-- fake `Config::nowMs` differs from `tick(nowMs)`,
-- wraparound occurs near `UINT32_MAX`,
-- a long command becomes ready at the correct time,
-- a command is not completed early.
+Update or add guard/CLI contract tests if needed to require timing hooks in examples.
 
-### 4. Update docs
+## Documentation required
 
-Document clearly:
+Update README, Doxygen, and `docs/SCD41_HARDENING_PROGRESS.md` with:
 
-- which APIs require a monotonic millisecond clock,
-- whether microsecond timing is required for command spacing,
-- whether `tick()` must be called periodically,
-- what happens if timing hooks are omitted,
-- expected safe scheduler cadence.
+- Required timing hooks.
+- Which APIs require a clock.
+- How Arduino and ESP-IDF examples provide time.
+- One-clock scheduling model.
+- Migration note if `begin()` behavior changed.
 
-## Tests/checks for this chunk
-
-Add/update native tests for:
-
-1. missing timing hooks behavior,
-2. Arduino/example config contract if testable by static/contract script,
-3. unified clock model,
-4. wraparound scheduling,
-5. command-spacing timing with fake microsecond clock,
-6. no hidden framework timing in core.
+## Validation
 
 Run:
 
@@ -140,32 +111,15 @@ python tools/check_idf_example_contract.py
 python -m platformio test -e native
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
-git diff --check
-git status --short
 ```
-
-## Report update
-
-Append to `docs/SCD41_HARDENING_PROGRESS_REPORT.md`:
-
-```markdown
-## Prompt 02 — Timing Contract and Unified Clock Model
-```
-
-Include:
-
-- chosen timing model,
-- public API changes/migration notes,
-- examples updated,
-- tests added,
-- exact validation results,
-- risks left for Prompt 03.
 
 ## Commit and sync
 
 ```bash
+git diff --check
 git status --short
-git add <changed files>
-git commit -m "Fix SCD41 timing contract"
-git push
+git add include/ src/ examples/ README.md docs/ test/ tools/
+git commit -m "Fix SCD41 timing hooks and clock model"
+git push -u origin hardening/scd41-industry-readiness
 ```
+
