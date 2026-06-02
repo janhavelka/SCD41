@@ -46,10 +46,10 @@ using BusResetFn = Status (*)(void* user);
 /// Optional callback for power-cycling the sensor when bus recovery is insufficient.
 using PowerCycleFn = Status (*)(void* user);
 
-/// Monotonic millisecond time source used for `tick()` scheduling and bounded waits.
+/// Required monotonic millisecond time source used for scheduling and bounded waits.
 using NowMsFn = uint32_t (*)(void* user);
 
-/// Monotonic microsecond time source used for the 1 ms inter-command guard.
+/// Required monotonic microsecond time source used for the 1 ms inter-command guard.
 using NowUsFn = uint32_t (*)(void* user);
 
 /// Optional scheduler-friendly yield hook used inside bounded wait loops.
@@ -74,10 +74,10 @@ struct Config {
   PowerCycleFn powerCycle = nullptr;     ///< Optional sensor power-cycle callback
   void* controlUser = nullptr;           ///< User context for busReset/powerCycle
 
-  // === Timing hooks (optional) ===
-  NowMsFn nowMs = nullptr;            ///< Monotonic millisecond source; IDF apps should inject this explicitly
-  NowUsFn nowUs = nullptr;            ///< Monotonic microsecond source; IDF apps should inject this explicitly
-  YieldFn cooperativeYield = nullptr; ///< Cooperative scheduler hint; IDF apps should inject this explicitly
+  // === Timing hooks (nowMs/nowUs required, cooperativeYield optional) ===
+  NowMsFn nowMs = nullptr;            ///< Required monotonic millisecond source for waits and scheduling
+  NowUsFn nowUs = nullptr;            ///< Required monotonic microsecond source for command spacing
+  YieldFn cooperativeYield = nullptr; ///< Optional cooperative scheduler hint used during bounded waits
   void* timeUser = nullptr;           ///< User context for timing hooks
 
   // === Transport settings ===

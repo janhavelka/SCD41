@@ -34,6 +34,18 @@ static constexpr uint32_t MAX_STRESS_COUNT = 100000U;
 
 void printStatus(const app_driver::Status& st);
 
+uint32_t arduinoNowMs(void*) {
+  return millis();
+}
+
+uint32_t arduinoNowUs(void*) {
+  return micros();
+}
+
+void arduinoYield(void*) {
+  ::yield();
+}
+
 struct StressStats {
   bool active = false;
   uint32_t startMs = 0;
@@ -2065,6 +2077,9 @@ void setup() {
   gConfig.i2cWriteRead = transport::wireWriteRead;
   gConfig.i2cUser = &Wire;
   gConfig.i2cAddress = SCD41::cmd::I2C_ADDRESS;
+  gConfig.nowMs = arduinoNowMs;
+  gConfig.nowUs = arduinoNowUs;
+  gConfig.cooperativeYield = arduinoYield;
   gConfig.transportCapabilities = app_driver::TransportCapability::NONE;
   gConfig.strictVariantCheck = true;
 
@@ -2084,7 +2099,7 @@ void setup() {
 }
 
 void loop() {
-  device.tick(millis());
+  device.tick(arduinoNowMs(nullptr));
   handlePendingTransitions();
   handleMeasurementReady();
 

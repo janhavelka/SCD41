@@ -20,19 +20,23 @@ Official ESP-IDF references:
 - The SCD41 address is fixed at `0x62`.
 - The driver supports periodic measurement, low-power periodic measurement, single-shot commands, RHT-only single shot, stop periodic, power down, wake up, serial number, identity, compensation, ASC, persist settings, reinit, factory reset, self test, forced recalibration, raw command helpers, and health tracking.
 - Long-running operations are state-machine based and are advanced by `tick(uint32_t nowMs)`.
+  Scheduling uses the required `Config::nowMs` hook; the `tick()` argument is a
+  source-compatible timestamp from the same clock domain.
 - The driver validates Sensirion CRC-8 on command words and measurement words.
 - Serial number variant checking currently expects variant bits `[15:12] == 0x1` unless disabled in `Config`.
 
 ## Arduino Dependencies
 
 - `src/SCD41.cpp` no longer includes `<Arduino.h>`.
-- `src/PlatformTime.h` is framework-neutral and intentionally inert unless the application supplies timing/yield callbacks through `Config`.
+- `src/PlatformTime.h` is framework-neutral and intentionally inert. Successful
+  initialized operation requires `Config::nowMs` and `Config::nowUs`; examples
+  also supply `Config::cooperativeYield`.
 - `include/SCD41/Config.h` exposes framework-neutral callbacks:
   - `i2cWrite`
   - `i2cWriteRead`
   - `nowMs`
   - `nowUs`
-  - `cooperativeYield`
+  - optional `cooperativeYield`
   - optional `busReset`
   - optional `powerCycle`
 - `examples/01_basic_bringup_cli/main.cpp` and all `examples/common/*.h`
@@ -47,7 +51,9 @@ Official ESP-IDF references:
 Implemented:
 
 1. The core driver is structured to avoid Arduino or ESP-IDF framework headers.
-2. ESP-IDF timing/yield behavior is injected by the example through `Config::nowMs`, `Config::nowUs`, and `Config::cooperativeYield`.
+2. ESP-IDF timing behavior is injected by the example through required
+   `Config::nowMs` and `Config::nowUs` hooks; scheduler yielding is injected
+   through optional `Config::cooperativeYield`.
 3. Root `CMakeLists.txt` provides `idf_component_register`.
 4. `examples/idf/basic` provides an ESP-IDF v6 `i2c_master` adapter and a native CLI matching the Arduino bring-up CLI command contract.
 5. Arduino examples remain separate and are not part of the IDF component target.
@@ -71,7 +77,8 @@ Still application-owned:
 - `include/SCD41/Config.h`
   - No API break is required for the IDF port.
   - Keep transport, timing, yield, bus-reset, and power-cycle callbacks as the portability boundary.
-  - Under IDF, examples should always supply `nowMs`, `nowUs`, and `cooperativeYield` so timing is explicit.
+  - Applications must supply `nowMs` and `nowUs`; examples should also supply
+    `cooperativeYield` so timing waits can yield cooperatively.
 - Private shim `src/PlatformTime.h`
   - Do not include Arduino or ESP-IDF headers.
   - Keep the fallback inert; examples/applications must inject real timing through `Config`.

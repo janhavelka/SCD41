@@ -111,6 +111,12 @@ Status SCD41::begin(const Config& config) {
   if (config.i2cWrite == nullptr || config.i2cWriteRead == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "I2C callbacks not set");
   }
+  if (config.nowMs == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "nowMs callback not set");
+  }
+  if (config.nowUs == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "nowUs callback not set");
+  }
   if (config.i2cAddress != cmd::I2C_ADDRESS) {
     return Status::Error(Err::INVALID_CONFIG, "Invalid I2C address");
   }
@@ -167,16 +173,20 @@ Status SCD41::begin(const Config& config) {
 }
 
 void SCD41::tick(uint32_t nowMs) {
+  (void)nowMs;
+
   if (!_initialized) {
     return;
   }
 
-  if (_pendingCommand != PendingCommand::NONE && _timeElapsed(nowMs, _commandReadyMs)) {
-    (void)_handlePendingCommand(nowMs);
+  const uint32_t driverNowMs = _nowMs();
+
+  if (_pendingCommand != PendingCommand::NONE && _timeElapsed(driverNowMs, _commandReadyMs)) {
+    (void)_handlePendingCommand(driverNowMs);
   }
 
   if (_pendingCommand == PendingCommand::NONE && _measurementRequested &&
-      _timeElapsed(nowMs, _measurementReadyMs)) {
+      _timeElapsed(driverNowMs, _measurementReadyMs)) {
     (void)_completeMeasurement();
   }
 }
@@ -1776,10 +1786,13 @@ Status SCD41::_startSingleShot(SingleShotMode mode) {
     return st;
   }
 
+  const uint32_t readyMs = _nowMs() + execMs;
   _measurementRequested = true;
   _measurementReady = false;
-  _measurementReadyMs = _nowMs() + execMs;
-  return _schedulePendingCommand(pending, execMs);
+  _measurementReadyMs = readyMs;
+  _pendingCommand = pending;
+  _commandReadyMs = readyMs;
+  return Status{Err::IN_PROGRESS, 0, "Command scheduled"};
 }
 
 Status SCD41::_schedulePendingCommand(PendingCommand command, uint32_t delayMs) {

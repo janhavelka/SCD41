@@ -39,7 +39,7 @@ The library covers the practical documented SCD41 runtime surface:
 The driver uses a managed asynchronous model:
 
 - `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
-- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion.
+- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion. The argument is retained for source compatibility; scheduling uses the required `Config::nowMs` hook.
 - `requestMeasurement()` schedules work using the current operating mode.
 - `measurementPending()` and `measurementReadyMs()` expose the driver's local sample-fetch state directly, so applications do not need to mirror it with their own shadow flags.
 - `readMeasurement()` is the direct helper for the sensor's `read_measurement` command. It completes a due single-shot request or fetches a ready periodic sample while keeping the cached sample state coherent.
@@ -47,6 +47,20 @@ The driver uses a managed asynchronous model:
 - `getLastMeasurement()` returns the most recent converted sample without consuming the ready flag.
 
 This split keeps long device operations explicit and predictable. Public calls do not hide multi-second waits behind a single synchronous API.
+
+## Timing Model
+
+`Config::nowMs` and `Config::nowUs` are required. `nowMs` is the driver's
+canonical monotonic millisecond clock for waits, deadlines, and scheduled
+completion. `nowUs` must be a microsecond view of the same monotonic clock
+domain and is used for the 1 ms inter-command guard. `cooperativeYield` is
+optional, but Arduino and RTOS examples provide it so bounded waits can yield to
+the scheduler.
+
+`tick(uint32_t nowMs)` is kept as the lifecycle API for existing sketches and
+applications. The driver samples `Config::nowMs` internally during `tick()`, so
+pass values from the same clock domain to `tick()` and `sampleAgeMs()`. Do not
+mix wall time, RTOS ticks, and Arduino `millis()` values in one driver instance.
 
 ## Thread, ISR, And Recovery Model
 
@@ -153,10 +167,10 @@ The repository root can be used as an ESP-IDF component through
 no I2C bus, pins, power rail, logging, or scheduler policy; applications provide
 transport and timing callbacks through `SCD41::Config`.
 
-The core component does not include Arduino or ESP-IDF framework headers. IDF
-applications should inject `Config::nowMs`, `Config::nowUs`, and
-`Config::cooperativeYield` so all driver timing follows the application
-scheduler.
+The core component does not include Arduino or ESP-IDF framework headers. All
+applications must inject `Config::nowMs` and `Config::nowUs`; scheduler-aware
+applications should also inject `Config::cooperativeYield` so bounded waits can
+yield cooperatively.
 
 See [examples/idf/basic](examples/idf/basic) for an ESP-IDF v6-style
 `i2c_master` adapter and native bring-up CLI with the same user-visible
@@ -210,6 +224,18 @@ static SCD41::Status i2cWriteRead(uint8_t addr, const uint8_t* txData, size_t tx
   return SCD41::Status::Ok();
 }
 
+static uint32_t arduinoNowMs(void*) {
+  return millis();
+}
+
+static uint32_t arduinoNowUs(void*) {
+  return micros();
+}
+
+static void arduinoYield(void*) {
+  yield();
+}
+
 SCD41::SCD41 sensor;
 
 void setup() {
@@ -220,6 +246,9 @@ void setup() {
   cfg.i2cWrite = i2cWrite;
   cfg.i2cWriteRead = i2cWriteRead;
   cfg.i2cUser = &Wire;
+  cfg.nowMs = arduinoNowMs;
+  cfg.nowUs = arduinoNowUs;
+  cfg.cooperativeYield = arduinoYield;
 
   if (!sensor.begin(cfg).ok()) {
     return;
@@ -227,7 +256,7 @@ void setup() {
 }
 
 void loop() {
-  sensor.tick(millis());
+  sensor.tick(arduinoNowMs(nullptr));
 
   if (!sensor.measurementPending() && !sensor.measurementReady()) {
     (void)sensor.requestMeasurement();

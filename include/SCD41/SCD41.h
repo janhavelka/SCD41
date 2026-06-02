@@ -148,9 +148,11 @@ public:
   /// @param config Transport, timing, recovery, and policy settings
   /// @return Status::Ok() on success, error otherwise
   Status begin(const Config& config);
-  /// Advance pending command completion using the caller's monotonic millisecond clock.
+  /// Advance pending command completion using the configured monotonic millisecond clock.
   /// @note May perform I2C when a pending command or measurement becomes due; do not call from ISRs.
-  /// @param nowMs Current monotonic timestamp in milliseconds
+  /// @note The `nowMs` argument is retained for source compatibility. Scheduling uses
+  ///       `Config::nowMs`; pass the same clock domain here and to `sampleAgeMs()`.
+  /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
   void tick(uint32_t nowMs);
   /// Reset the driver to `UNINIT` and clear runtime state.
   void end();
@@ -211,7 +213,7 @@ public:
   uint32_t sampleTimestampMs() const { return _sampleTimestampMs; }
 
   /// Age of the cached sample in milliseconds.
-  /// @param nowMs Current monotonic timestamp in milliseconds
+  /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
   /// @return `nowMs - sampleTimestampMs()` when a sample exists, otherwise 0
   uint32_t sampleAgeMs(uint32_t nowMs) const {
     return _hasSample ? (nowMs - _sampleTimestampMs) : 0;

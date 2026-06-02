@@ -53,6 +53,8 @@ struct ScriptedTransport {
 
   uint32_t nowMs = 0;
   uint32_t nowUs = 0;
+  uint32_t nowMsStep = 0;
+  uint32_t nowUsStep = 0;
   uint32_t yieldCount = 0;
   bool advanceOnYield = true;
 };
@@ -139,11 +141,17 @@ Status scriptedWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
 }
 
 uint32_t scriptedNowMs(void* user) {
-  return static_cast<ScriptedTransport*>(user)->nowMs;
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  const uint32_t value = ctx->nowMs;
+  ctx->nowMs += ctx->nowMsStep;
+  return value;
 }
 
 uint32_t scriptedNowUs(void* user) {
-  return static_cast<ScriptedTransport*>(user)->nowUs;
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  const uint32_t value = ctx->nowUs;
+  ctx->nowUs += ctx->nowUsStep;
+  return value;
 }
 
 void scriptedYield(void* user) {
@@ -153,6 +161,18 @@ void scriptedYield(void* user) {
     ++ctx->nowMs;
     ctx->nowUs += 1000;
   }
+}
+
+uint32_t arduinoStyleNowMs(void*) {
+  return millis();
+}
+
+uint32_t arduinoStyleNowUs(void*) {
+  return micros();
+}
+
+void arduinoStyleYield(void*) {
+  yield();
 }
 
 Config makeConfig(ScriptedTransport& bus) {
@@ -214,6 +234,10 @@ void test_config_defaults() {
   Config cfg;
   TEST_ASSERT_EQUAL(nullptr, cfg.i2cWrite);
   TEST_ASSERT_EQUAL(nullptr, cfg.i2cWriteRead);
+  TEST_ASSERT_EQUAL(nullptr, cfg.nowMs);
+  TEST_ASSERT_EQUAL(nullptr, cfg.nowUs);
+  TEST_ASSERT_EQUAL(nullptr, cfg.cooperativeYield);
+  TEST_ASSERT_EQUAL(nullptr, cfg.timeUser);
   TEST_ASSERT_EQUAL_HEX8(0x62, cfg.i2cAddress);
   TEST_ASSERT_EQUAL_UINT32(50u, cfg.i2cTimeoutMs);
   TEST_ASSERT_EQUAL_UINT32(1u, cfg.commandDelayMs);
@@ -224,6 +248,84 @@ void test_config_defaults() {
   TEST_ASSERT_TRUE(cfg.strictVariantCheck);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(SingleShotMode::CO2_T_RH),
                     static_cast<uint8_t>(cfg.singleShotMode));
+}
+
+void test_begin_requires_now_ms_before_i2c() {
+  ScriptedTransport bus;
+  Config cfg;
+  cfg.i2cWrite = scriptedWrite;
+  cfg.i2cWriteRead = scriptedWriteRead;
+  cfg.i2cUser = &bus;
+  cfg.nowUs = scriptedNowUs;
+  cfg.timeUser = &bus;
+
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+}
+
+void test_begin_requires_now_us_before_i2c() {
+  ScriptedTransport bus;
+  Config cfg;
+  cfg.i2cWrite = scriptedWrite;
+  cfg.i2cWriteRead = scriptedWriteRead;
+  cfg.i2cUser = &bus;
+  cfg.nowMs = scriptedNowMs;
+  cfg.timeUser = &bus;
+
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+}
+
+void test_cooperative_yield_is_optional_when_clock_advances() {
+  ScriptedTransport bus;
+  bus.nowMsStep = 1;
+  bus.nowUsStep = 1000;
+  Config cfg = makeConfig(bus);
+  cfg.cooperativeYield = nullptr;
+  cfg.powerUpDelayMs = 3;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(device.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(0u, bus.yieldCount);
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
+}
+
+void test_begin_with_arduino_style_timing_hooks_succeeds() {
+  ScriptedTransport bus;
+  Config cfg;
+  cfg.i2cWrite = scriptedWrite;
+  cfg.i2cWriteRead = scriptedWriteRead;
+  cfg.i2cUser = &bus;
+  cfg.nowMs = arduinoStyleNowMs;
+  cfg.nowUs = arduinoStyleNowUs;
+  cfg.cooperativeYield = arduinoStyleYield;
+  gMillisStep = 1;
+  gMicrosStep = 1000;
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  const Status st = device.begin(cfg);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(device.isInitialized());
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
+}
+
+void test_time_elapsed_handles_u32_wraparound() {
+  TEST_ASSERT_TRUE(SCD41Device::_timeElapsed(1u, 0xFFFFFFFEu));
+  TEST_ASSERT_FALSE(SCD41Device::_timeElapsed(0xFFFFFFFEu, 1u));
 }
 
 void test_crc_and_conversion_helpers() {
@@ -393,6 +495,83 @@ void test_single_shot_measurement_flow() {
   TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
   TEST_ASSERT_EQUAL_UINT16(500u, sample.co2Ppm);
   TEST_ASSERT_TRUE(sample.co2Valid);
+}
+
+void test_single_shot_deadlines_are_scheduled_from_config_clock() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 1234;
+  bus.nowUs = 1234000;
+  const Status st = device.requestMeasurement();
+  TEST_ASSERT_TRUE(st.inProgress());
+  TEST_ASSERT_EQUAL_UINT32(6234u, device.commandReadyMs());
+  TEST_ASSERT_EQUAL_UINT32(6234u, device.measurementReadyMs());
+}
+
+void test_tick_uses_config_clock_when_tick_argument_diverges() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 500, 20000, 32768);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
+
+  device.tick(5100);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
+
+  bus.nowMs = 5100;
+  bus.nowUs = 5100000;
+  device.tick(0);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_TRUE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT32(3u, bus.readCalls);
+}
+
+void test_single_shot_deadline_wraparound_completes_at_wrapped_due_time() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 500, 20000, 32768);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 0xFFFFFF00u;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  TEST_ASSERT_EQUAL_UINT32(0x00001288u, device.commandReadyMs());
+  TEST_ASSERT_EQUAL_UINT32(0x00001288u, device.measurementReadyMs());
+
+  bus.nowMs = 0x00001287u;
+  bus.nowUs = 200000;
+  device.tick(0);
+  TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
+                    static_cast<uint8_t>(device.pendingCommand()));
+
+  bus.nowMs = 0x00001288u;
+  bus.nowUs = 300000;
+  device.tick(0);
+  TEST_ASSERT_TRUE(device.measurementReady());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
 }
 
 void test_single_shot_rht_only_marks_co2_invalid() {
@@ -1146,6 +1325,11 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_status_helpers);
   RUN_TEST(test_config_defaults);
+  RUN_TEST(test_begin_requires_now_ms_before_i2c);
+  RUN_TEST(test_begin_requires_now_us_before_i2c);
+  RUN_TEST(test_cooperative_yield_is_optional_when_clock_advances);
+  RUN_TEST(test_begin_with_arduino_style_timing_hooks_succeeds);
+  RUN_TEST(test_time_elapsed_handles_u32_wraparound);
   RUN_TEST(test_crc_and_conversion_helpers);
   RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
   RUN_TEST(test_update_health_ignores_in_progress);
@@ -1155,6 +1339,9 @@ int main(int, char**) {
   RUN_TEST(test_begin_rejects_non_scd41_variant);
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
   RUN_TEST(test_single_shot_measurement_flow);
+  RUN_TEST(test_single_shot_deadlines_are_scheduled_from_config_clock);
+  RUN_TEST(test_tick_uses_config_clock_when_tick_argument_diverges);
+  RUN_TEST(test_single_shot_deadline_wraparound_completes_at_wrapped_due_time);
   RUN_TEST(test_single_shot_rht_only_marks_co2_invalid);
   RUN_TEST(test_named_single_shot_helpers_schedule_correct_commands);
   RUN_TEST(test_direct_read_measurement_completes_pending_single_shot);

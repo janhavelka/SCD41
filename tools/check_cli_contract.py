@@ -19,6 +19,7 @@ REQUIRED_COMMON = [
 ]
 
 MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "diag", "demo", "drv", "read", "verbose", "stress"]
+MANDATORY_TIMING_HOOKS = ["gConfig.nowMs", "gConfig.nowUs", "gConfig.cooperativeYield"]
 
 
 def fail(msg: str) -> None:
@@ -60,6 +61,10 @@ def main() -> int:
 
     if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
         fail("either 'cfg' or 'settings' command must be present")
+
+    for hook in MANDATORY_TIMING_HOOKS:
+        if hook not in text:
+            fail(f"timing hook assignment '{hook}' missing in {bringup_main.as_posix()}")
 
     print("CLI contract PASSED")
     return 0
