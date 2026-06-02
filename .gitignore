@@ -36,6 +36,3 @@ wifi_credentials.h
 *.tmp
 *.bak
 *.log
-
-# Auto-generated files
-include/SCD41/Version.h

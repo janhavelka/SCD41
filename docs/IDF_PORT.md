@@ -229,7 +229,17 @@ ESP-IDF examples:
   only. Arduino-ESP32 builds do not prove pure ESP-IDF v6.0.1 compatibility.
 - Compile native tests to preserve framework-neutral behavior.
 - Run repository contract checks, including `python tools/check_idf_example_contract.py`, to keep Arduino and ESP-IDF CLI behavior aligned.
-- Add an ESP-IDF example build for ESP32-S2 and ESP32-S3.
+- Build and inspect the PlatformIO package so generated public headers, including `include/SCD41/Version.h`, are present for clean consumers.
+- Build the ESP-IDF example in CI for ESP32-S2 and ESP32-S3. Local `idf.py`
+  builds still require a configured ESP-IDF v6.0.1 environment:
+
+```bash
+idf.py -C examples/idf/basic -B build-esp32s3 set-target esp32s3
+idf.py -C examples/idf/basic -B build-esp32s3 build
+idf.py -C examples/idf/basic -B build-esp32s2 set-target esp32s2
+idf.py -C examples/idf/basic -B build-esp32s2 build
+```
+
 - Hardware smoke test probe and serial-number read at fixed address `0x62`.
 - Verify CRC failure injection returns the expected status, updates protocol
   telemetry, and does not update measurement state or I2C health counters.
@@ -261,9 +271,8 @@ ESP-IDF examples:
 5. Add `examples/idf/basic` with bus setup, adapter callbacks, timing callbacks, and a native CLI matching the Arduino bring-up CLI. Done.
    Include top-level and `main` CMake files, component path wiring, and
    `extern "C" void app_main(void)`. Done.
-6. Build with ESP-IDF v6.0.1 for ESP32-S2 and ESP32-S3. Pending local ESP-IDF environment.
+6. Build with ESP-IDF v6.0.1 for ESP32-S2 and ESP32-S3. Added to CI; local validation still requires an ESP-IDF environment.
 7. Run Arduino and native builds to confirm existing users are unaffected.
-   Pending local PlatformIO/Arduino toolchain availability in this workspace
-   pass; do not treat static checks as compile validation.
+   Done through PlatformIO validation in this workspace.
 8. Run hardware tests for probe, CRC, periodic measurement, single-shot, wake-up, stop-periodic, maintenance commands, and fault injection. Pending hardware.
 9. Update README and changelog for the implemented port. Done.

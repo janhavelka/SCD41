@@ -2,44 +2,32 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
-  build:
+  guards:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        environment:
-          - esp32s3dev
-          - esp32s2dev
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Cache PlatformIO
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.platformio
-          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install PlatformIO
-        run: |
-          python -m pip install --upgrade pip
-          pip install platformio
+      - name: Check generated version header
+        run: python scripts/generate_version.py check
 
-      - name: Build ${{ matrix.environment }}
-        run: pio run -e ${{ matrix.environment }}
+      - name: Enforce core framework and timing guard
+        run: python tools/check_core_timing_guard.py
+
+      - name: Enforce Arduino CLI contract
+        run: python tools/check_cli_contract.py
+
+      - name: Enforce ESP-IDF example contract
+        run: python tools/check_idf_example_contract.py
 
   native-tests:
     runs-on: ubuntu-latest
@@ -63,19 +51,31 @@ jobs:
       - name: Install PlatformIO
         run: |
           python -m pip install --upgrade pip
-          pip install platformio
-
-      - name: Enforce core timing guard
-        run: python tools/check_core_timing_guard.py
+          python -m pip install platformio
 
       - name: Run native tests
-        run: pio test -e native
+        run: python -m platformio test -e native
 
-  validate-library:
+  platformio-build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - esp32s3dev
+          - esp32s2dev
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio
+          key: ${{ runner.os }}-pio-${{ matrix.environment }}-${{ hashFiles('platformio.ini') }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -83,11 +83,65 @@ jobs:
           python-version: '3.11'
 
       - name: Install PlatformIO
-        run: pip install platformio
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install platformio
 
-      - name: Enforce example CLI contract
-        run: python tools/check_cli_contract.py
+      - name: Build ${{ matrix.environment }}
+        run: python -m platformio run -e ${{ matrix.environment }}
 
-      - name: Validate library package
-        run: pio pkg pack
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio
+          key: ${{ runner.os }}-pio-package-${{ hashFiles('platformio.ini', 'library.json') }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install platformio
+
+      - name: Check generated version header
+        run: python scripts/generate_version.py check
+
+      - name: Build package tarball
+        run: |
+          mkdir -p dist
+          python -m platformio pkg pack . -o dist
+
+      - name: Verify package contents
+        run: python tools/check_package_contents.py dist/*.tar.gz
+
+  esp-idf-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        idf_target:
+          - esp32s3
+          - esp32s2
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build ESP-IDF example for ${{ matrix.idf_target }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.0.1
+          target: ${{ matrix.idf_target }}
+          path: examples/idf/basic
+          command: idf.py -B build-${{ matrix.idf_target }} build

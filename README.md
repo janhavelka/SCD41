@@ -446,13 +446,28 @@ python tools/check_idf_example_contract.py
 python -m platformio test -e native
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
+python -m platformio pkg pack . -o dist
+python tools/check_package_contents.py dist/*.tar.gz
 ```
+
+In an ESP-IDF v6.0.1 environment, also build the native IDF example for both
+supported targets:
+
+```bash
+idf.py -C examples/idf/basic -B build-esp32s3 set-target esp32s3
+idf.py -C examples/idf/basic -B build-esp32s3 build
+idf.py -C examples/idf/basic -B build-esp32s2 set-target esp32s2
+idf.py -C examples/idf/basic -B build-esp32s2 build
+```
+
+Hardware/HIL validation remains a separate opt-in step because it requires real
+boards, an SCD41, and explicit operator control for EEPROM/destructive commands.
 
 ## Repository Notes
 
 - Public headers live in <a href="include/SCD41">include/SCD41</a>
 - Implementation lives in <a href="src">src</a>
-- Version metadata is generated into `include/SCD41/Version.h` from <a href="library.json">library.json</a>
+- Version metadata is generated into `include/SCD41/Version.h` from <a href="library.json">library.json</a>; the generated header is tracked for clean package consumers and must not be edited by hand
 - `examples/common` is example-only glue and is not installed as part of the library
 - The library never configures I2C pins or owns the bus
 - <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> records the remaining SCD41-specific policy assumptions

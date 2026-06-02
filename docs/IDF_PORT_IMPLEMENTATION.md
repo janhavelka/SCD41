@@ -58,15 +58,17 @@ python tools/check_idf_example_contract.py
 python -m platformio test -e native
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
+python -m platformio pkg pack . -o dist
+python tools/check_package_contents.py dist/*.tar.gz
 ```
 
-Run these checks from `examples/idf/basic` in an ESP-IDF v6 environment:
+Run these checks in an ESP-IDF v6.0.1 environment:
 
 ```bash
-idf.py set-target esp32s3
-idf.py build
-idf.py set-target esp32s2
-idf.py build
+idf.py -C examples/idf/basic -B build-esp32s3 set-target esp32s3
+idf.py -C examples/idf/basic -B build-esp32s3 build
+idf.py -C examples/idf/basic -B build-esp32s2 set-target esp32s2
+idf.py -C examples/idf/basic -B build-esp32s2 build
 ```
 
 ## Remaining Hardware Work

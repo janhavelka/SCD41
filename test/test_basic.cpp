@@ -522,9 +522,16 @@ void test_begin_reads_serial_and_variant() {
   TEST_ASSERT_TRUE(st.ok());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
                     static_cast<uint8_t>(device.state()));
+  SensorVariant variant = SensorVariant::UNKNOWN;
+  TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
-                    static_cast<uint8_t>(device._sensorVariant));
-  TEST_ASSERT_TRUE(device._serialNumberValid);
+                    static_cast<uint8_t>(variant));
+
+  Identity identity = {};
+  TEST_ASSERT_TRUE(device.getIdentity(identity).ok());
+  TEST_ASSERT_EQUAL_UINT64(0x100123456789ULL, identity.serialNumber);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
+                    static_cast<uint8_t>(identity.variant));
 }
 
 void test_begin_rejects_non_scd41_variant() {
@@ -1281,8 +1288,8 @@ void test_get_identity_uses_cached_serial_and_variant() {
   Identity identity = {};
   TEST_ASSERT_TRUE(device.getIdentity(identity).ok());
   TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
-  TEST_ASSERT_EQUAL_UINT64(device._serialNumber, identity.serialNumber);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device._sensorVariant),
+  TEST_ASSERT_EQUAL_UINT64(0x100123456789ULL, identity.serialNumber);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
                     static_cast<uint8_t>(identity.variant));
 }
 
@@ -1317,8 +1324,10 @@ void test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c() {
 
   SCD41Device device;
   TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  SensorVariant variant = SensorVariant::UNKNOWN;
+  TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD40),
-                    static_cast<uint8_t>(device._sensorVariant));
+                    static_cast<uint8_t>(variant));
   const size_t writesBefore = bus.writeCalls;
   const size_t readsBefore = bus.readCalls;
 
@@ -1381,8 +1390,10 @@ void test_strict_disabled_blocks_other_known_non_scd41_variants() {
 
     SCD41Device device;
     TEST_ASSERT_TRUE(device.begin(cfg).ok());
+    SensorVariant variant = SensorVariant::UNKNOWN;
+    TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
     TEST_ASSERT_EQUAL(static_cast<uint8_t>(expectedVariants[i]),
-                      static_cast<uint8_t>(device._sensorVariant));
+                      static_cast<uint8_t>(variant));
     const size_t writesBefore = bus.writeCalls;
     const size_t readsBefore = bus.readCalls;
 
@@ -2245,8 +2256,7 @@ void test_example_transport_maps_short_read_to_i2c_error() {
   TEST_ASSERT_EQUAL_UINT32(sizeof(data), Wire._readCallCount());
 }
 
-int main(int, char**) {
-  UNITY_BEGIN();
+void runConfigStatusLifecycleTests() {
   RUN_TEST(test_status_helpers);
   RUN_TEST(test_config_defaults);
   RUN_TEST(test_begin_requires_now_ms_before_i2c);
@@ -2265,6 +2275,9 @@ int main(int, char**) {
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
   RUN_TEST(test_probe_does_not_update_health_or_command_spacing_state);
   RUN_TEST(test_probe_failure_does_not_update_health_or_command_spacing_state);
+}
+
+void runMeasurementAndTimingTests() {
   RUN_TEST(test_single_shot_measurement_flow);
   RUN_TEST(test_tick_no_due_returns_ok_without_i2c);
   RUN_TEST(test_tick_before_begin_returns_ok_noop);
@@ -2288,17 +2301,29 @@ int main(int, char**) {
   RUN_TEST(test_power_cycle_recover_marks_cached_sample_stale_across_epoch);
   RUN_TEST(test_periodic_read_after_epoch_change_produces_fresh_sample);
   RUN_TEST(test_offline_request_measurement_does_not_schedule_or_touch_bus);
+}
+
+void runVariantAndSettingsTests() {
   RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
   RUN_TEST(test_low_power_periodic_start_and_variant_guard);
   RUN_TEST(test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c);
   RUN_TEST(test_strict_disabled_blocks_other_known_non_scd41_variants);
   RUN_TEST(test_read_settings_on_non_scd41_skips_scd41_only_live_fields);
   RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
+}
+
+void runCompensationAndSettingsTests() {
   RUN_TEST(test_temperature_offset_roundtrip);
   RUN_TEST(test_set_temperature_offset_writes_vector_payloads);
   RUN_TEST(test_get_temperature_offset_decodes_datasheet_vectors);
   RUN_TEST(test_temperature_offset_readback_roundtrip_vector_matrix);
   RUN_TEST(test_temperature_offset_rejects_non_finite_values);
+  RUN_TEST(test_read_settings_reads_live_device_configuration);
+  RUN_TEST(test_read_settings_reads_periodic_ambient_pressure_only);
+  RUN_TEST(test_asc_period_validation);
+}
+
+void runRawProtocolHealthTests() {
   RUN_TEST(test_low_level_command_helpers_work);
   RUN_TEST(test_low_level_raw_read_rejects_oversized_buffer_without_i2c);
   RUN_TEST(test_low_level_raw_write_rejects_known_wrong_command_shapes);
@@ -2313,9 +2338,9 @@ int main(int, char**) {
   RUN_TEST(test_offline_set_temperature_offset_returns_busy_without_i2c);
   RUN_TEST(test_failed_recover_from_offline_keeps_latch_after_intermediate_success);
   RUN_TEST(test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands);
-  RUN_TEST(test_read_settings_reads_live_device_configuration);
-  RUN_TEST(test_read_settings_reads_periodic_ambient_pressure_only);
-  RUN_TEST(test_asc_period_validation);
+}
+
+void runMaintenanceTests() {
   RUN_TEST(test_simulated_persist_reinit_factory_reset_schedule);
   RUN_TEST(test_wake_up_accepts_expected_nack);
   RUN_TEST(test_wake_up_accepts_precise_data_nack);
@@ -2327,7 +2352,21 @@ int main(int, char**) {
   RUN_TEST(test_forced_recalibration_raw_accessor_preserves_failure_sentinel);
   RUN_TEST(test_data_ready_read_requires_init);
   RUN_TEST(test_data_ready_positive_and_power_down_schedule);
+}
+
+void runExampleTransportTests() {
   RUN_TEST(test_example_transport_maps_zero_byte_read_to_i2c_error);
   RUN_TEST(test_example_transport_maps_short_read_to_i2c_error);
+}
+
+int main(int, char**) {
+  UNITY_BEGIN();
+  runConfigStatusLifecycleTests();
+  runMeasurementAndTimingTests();
+  runVariantAndSettingsTests();
+  runCompensationAndSettingsTests();
+  runRawProtocolHealthTests();
+  runMaintenanceTests();
+  runExampleTransportTests();
   return UNITY_END();
 }

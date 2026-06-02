@@ -6,6 +6,8 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+BRINGUP_MAIN = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+COMMON_DIR = ROOT / "examples" / "common"
 
 REQUIRED_COMMON = [
     "BoardConfig.h",
@@ -18,12 +20,42 @@ REQUIRED_COMMON = [
     "HealthView.h",
 ]
 
-MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "diag", "demo", "drv", "read", "verbose", "stress"]
-MANDATORY_TIMING_HOOKS = ["gConfig.nowMs", "gConfig.nowUs", "gConfig.cooperativeYield"]
+MANDATORY_COMMANDS = {
+    "help",
+    "scan",
+    "probe",
+    "recover",
+    "diag",
+    "demo",
+    "drv",
+    "read",
+    "verbose",
+    "stress",
+}
+MANDATORY_TIMING_HOOKS = {
+    "gConfig.nowMs": re.compile(r"\bgConfig\s*\.\s*nowMs\s*="),
+    "gConfig.nowUs": re.compile(r"\bgConfig\s*\.\s*nowUs\s*="),
+    "gConfig.cooperativeYield": re.compile(r"\bgConfig\s*\.\s*cooperativeYield\s*="),
+}
 MANDATORY_ASYNC_TICK_TOKENS = [
     "const app_driver::Status tickSt = device.tick",
     "printStatus(tickSt)",
 ]
+
+SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
+ARDUINO_BOUNDARY_INCLUDE_RE = re.compile(
+    r'^\s*#\s*include\s*[<"](?:Arduino\.h|Wire\.h)[>"]',
+    re.MULTILINE,
+)
+ARDUINO_BOUNDARY_TOKENS = {
+    "TwoWire": re.compile(r"\bTwoWire\b"),
+    "Serial": re.compile(r"\bSerial\b"),
+    "String": re.compile(r"\bString\b"),
+}
+
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 DESTRUCTIVE_CONFIRMATION_TOKENS = [
     'printHelpItem("persist confirm"',
     'printHelpItem("factory_reset confirm"',
@@ -47,6 +79,70 @@ def ensure_exists(path: pathlib.Path, label: str) -> None:
 def ensure_missing(path: pathlib.Path, label: str) -> None:
     if path.exists():
         fail(f"forbidden {label} still present: {path.as_posix()}")
+
+
+def strip_non_code(text: str) -> str:
+    text = BLOCK_COMMENT_RE.sub("", text)
+    text = LINE_COMMENT_RE.sub("", text)
+    return STRING_RE.sub('""', text)
+
+
+def help_items(text: str) -> list[str]:
+    return re.findall(r"printHelpItem\(\"([^\"]+)\"", text)
+
+
+def head_commands(text: str) -> set[str]:
+    return set(re.findall(r"\bhead\s*==\s*\"([^\"]+)\"", text))
+
+
+def aliases_from_help(items: list[str]) -> set[str]:
+    aliases: set[str] = set()
+    for item in items:
+        command_part = item.split(" ", 1)[0]
+        for alias in command_part.split("/"):
+            alias = alias.strip()
+            if alias:
+                aliases.add(alias)
+    return aliases
+
+
+def source_files_under(root: pathlib.Path) -> list[pathlib.Path]:
+    if not root.exists():
+        return []
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in SOURCE_SUFFIXES
+    )
+
+
+def ensure_no_arduino_boundary_leak(path: pathlib.Path) -> None:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    code = strip_non_code(text)
+    rel = path.relative_to(ROOT).as_posix()
+    if ARDUINO_BOUNDARY_INCLUDE_RE.search(text):
+        fail(f"Arduino framework include leaked across boundary: {rel}")
+    for label, pattern in ARDUINO_BOUNDARY_TOKENS.items():
+        if pattern.search(code):
+            fail(f"Arduino framework token '{label}' leaked across boundary: {rel}")
+
+
+def check_example_boundaries() -> None:
+    for dirname in ("src", "include"):
+        for path in source_files_under(ROOT / dirname):
+            ensure_no_arduino_boundary_leak(path)
+
+    for path in source_files_under(ROOT / "examples" / "idf"):
+        ensure_no_arduino_boundary_leak(path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if "examples/common" in strip_non_code(text):
+            fail(f"IDF example references examples/common helper boundary: {path.as_posix()}")
+
+    for dirname in ("src", "include"):
+        for path in source_files_under(ROOT / dirname):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "examples/common" in strip_non_code(text):
+                fail(f"library code references examples/common helper boundary: {path.as_posix()}")
 
 
 def command_block(text: str, command: str) -> str:
@@ -92,8 +188,8 @@ def check_destructive_confirmations(text: str, label: str) -> None:
 
 
 def main() -> int:
-    common_dir = ROOT / "examples" / "common"
-    bringup_main = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
+    common_dir = COMMON_DIR
+    bringup_main = BRINGUP_MAIN
 
     ensure_exists(common_dir, "common example directory")
     ensure_exists(bringup_main, "bringup CLI example")
@@ -109,15 +205,17 @@ def main() -> int:
 
     text = bringup_main.read_text(encoding="utf-8", errors="replace")
 
-    for cmd in MANDATORY_COMMANDS:
-        if re.search(rf"\b{re.escape(cmd)}\b", text) is None:
-            fail(f"mandatory command '{cmd}' missing in {bringup_main.as_posix()}")
+    commands = head_commands(text)
+    commands.update(aliases_from_help(help_items(text)))
+    missing = sorted(MANDATORY_COMMANDS - commands)
+    if missing:
+        fail(f"mandatory CLI commands missing: {missing}")
 
-    if re.search(r"\bcfg\b", text) is None and re.search(r"\bsettings\b", text) is None:
+    if "cfg" not in commands and "settings" not in commands:
         fail("either 'cfg' or 'settings' command must be present")
 
-    for hook in MANDATORY_TIMING_HOOKS:
-        if hook not in text:
+    for hook, pattern in MANDATORY_TIMING_HOOKS.items():
+        if pattern.search(text) is None:
             fail(f"timing hook assignment '{hook}' missing in {bringup_main.as_posix()}")
 
     for token in MANDATORY_ASYNC_TICK_TOKENS:
@@ -125,6 +223,7 @@ def main() -> int:
             fail(f"async tick status handling token '{token}' missing in {bringup_main.as_posix()}")
 
     check_destructive_confirmations(text, "Arduino CLI")
+    check_example_boundaries()
 
     print("CLI contract PASSED")
     return 0

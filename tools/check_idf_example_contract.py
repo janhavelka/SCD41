@@ -7,8 +7,10 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ARDUINO_MAIN = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
-IDF_MAIN = ROOT / "examples" / "idf" / "basic" / "main" / "main.cpp"
-IDF_TRANSPORT = ROOT / "examples" / "idf" / "basic" / "main" / "IdfI2cTransport.cpp"
+IDF_ROOT = ROOT / "examples" / "idf" / "basic"
+IDF_MAIN = IDF_ROOT / "main" / "main.cpp"
+IDF_MAIN_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
+IDF_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
 
 MANDATORY_COMMANDS = {
     "?",
@@ -69,6 +71,9 @@ MANDATORY_RAW_SUBCOMMANDS = {"write", "write_data", "read", "read_word", "read_w
 
 REQUIRED_IDF_TOKENS = [
     "driver/i2c_master.h",
+    "esp_timer.h",
+    "freertos/task.h",
+    'extern "C" void app_main(void)',
     "i2c_new_master_bus",
     "i2c_master_bus_add_device",
     "i2c_master_probe",
@@ -82,6 +87,12 @@ REQUIRED_IDF_TOKENS = [
     "const app_driver::Status tickSt = device.tick",
     "printStatus(tickSt)",
 ]
+REQUIRED_IDF_CMAKE_TOKENS = [
+    "SCD41",
+    "esp_driver_i2c",
+    "esp_timer",
+    "freertos",
+]
 DESTRUCTIVE_CONFIRMATION_TOKENS = [
     'printHelpItem("persist confirm"',
     'printHelpItem("factory_reset confirm"',
@@ -91,9 +102,14 @@ DESTRUCTIVE_CONFIRMATION_TOKENS = [
     "use 'frc confirm <reference_ppm>' to update calibration history",
 ]
 
+FORBIDDEN_IDF_INCLUDE_RE = re.compile(
+    r'^\s*#\s*include\s*[<"]'
+    r"(?:Arduino\.h|Wire\.h|string|driver/i2c\.h)"
+    r'[>"]',
+    re.MULTILINE,
+)
+
 FORBIDDEN_IDF_PATTERNS = {
-    "Arduino.h": re.compile(r"#\s*include\s*[<\"]Arduino\.h[>\"]"),
-    "Wire.h": re.compile(r"#\s*include\s*[<\"]Wire\.h[>\"]"),
     "ArduinoCompat": re.compile(r"\bArduinoCompat\b"),
     "IdfArduinoCompat": re.compile(r"\bIdfArduinoCompat\b"),
     "TwoWire": re.compile(r"\bTwoWire\b"),
@@ -113,6 +129,10 @@ FORBIDDEN_IDF_PATTERNS = {
     "loop": re.compile(r"\bloop\s*\(\s*\)\s*;"),
 }
 
+BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+
 
 def fail(msg: str) -> None:
     print(f"IDF example contract FAILED: {msg}")
@@ -123,6 +143,22 @@ def read(path: pathlib.Path) -> str:
     if not path.exists():
         fail(f"missing file: {path.relative_to(ROOT).as_posix()}")
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def strip_non_code(text: str) -> str:
+    text = BLOCK_COMMENT_RE.sub("", text)
+    text = LINE_COMMENT_RE.sub("", text)
+    return STRING_RE.sub('""', text)
+
+
+def idf_sources() -> list[pathlib.Path]:
+    if not IDF_ROOT.exists():
+        fail(f"missing IDF example directory: {IDF_ROOT.relative_to(ROOT).as_posix()}")
+    return sorted(
+        path
+        for path in IDF_ROOT.rglob("*")
+        if path.is_file() and path.suffix.lower() in IDF_SOURCE_SUFFIXES
+    )
 
 
 def help_sections(text: str) -> list[str]:
@@ -195,7 +231,7 @@ def check_destructive_confirmations(text: str, label: str) -> None:
 def main() -> int:
     arduino = read(ARDUINO_MAIN)
     idf = read(IDF_MAIN)
-    transport = read(IDF_TRANSPORT)
+    cmake = read(IDF_MAIN_CMAKE)
 
     arduino_sections = help_sections(arduino)
     idf_sections = help_sections(idf)
@@ -233,17 +269,27 @@ def main() -> int:
     check_destructive_confirmations(arduino, "Arduino CLI")
     check_destructive_confirmations(idf, "IDF CLI")
 
-    combined_idf = idf + "\n" + transport
+    combined_idf = "\n".join(read(path) for path in idf_sources())
+    combined_idf_code = strip_non_code(combined_idf)
+
+    include_matches = FORBIDDEN_IDF_INCLUDE_RE.findall(combined_idf)
+    if include_matches:
+        fail("IDF example uses forbidden active include")
+
     for label, pattern in FORBIDDEN_IDF_PATTERNS.items():
-        if pattern.search(combined_idf):
+        if pattern.search(combined_idf_code):
             fail(f"IDF example uses forbidden Arduino/compat token: {label}")
 
     for token in REQUIRED_IDF_TOKENS:
         if token not in combined_idf:
             fail(f"IDF example missing required token: {token}")
 
-    if "driver/i2c.h" in combined_idf:
-        fail("IDF example must use driver/i2c_master.h, not legacy driver/i2c.h")
+    for token in REQUIRED_IDF_CMAKE_TOKENS:
+        if token not in cmake:
+            fail(f"IDF main CMakeLists.txt missing required dependency token: {token}")
+
+    if re.search(r"\bArduino\b", cmake):
+        fail("IDF main CMakeLists.txt must not depend on Arduino")
 
     print("IDF example contract PASSED")
     return 0
