@@ -20,6 +20,10 @@ REQUIRED_COMMON = [
 
 MANDATORY_COMMANDS = ["help", "scan", "probe", "recover", "diag", "demo", "drv", "read", "verbose", "stress"]
 MANDATORY_TIMING_HOOKS = ["gConfig.nowMs", "gConfig.nowUs", "gConfig.cooperativeYield"]
+MANDATORY_ASYNC_TICK_TOKENS = [
+    "const app_driver::Status tickSt = device.tick",
+    "printStatus(tickSt)",
+]
 
 
 def fail(msg: str) -> None:
@@ -65,6 +69,10 @@ def main() -> int:
     for hook in MANDATORY_TIMING_HOOKS:
         if hook not in text:
             fail(f"timing hook assignment '{hook}' missing in {bringup_main.as_posix()}")
+
+    for token in MANDATORY_ASYNC_TICK_TOKENS:
+        if token not in text:
+            fail(f"async tick status handling token '{token}' missing in {bringup_main.as_posix()}")
 
     print("CLI contract PASSED")
     return 0

@@ -79,6 +79,8 @@ REQUIRED_IDF_TOKENS = [
     "LOG_COLOR_GREEN",
     "LOG_COLOR_YELLOW",
     "LOG_COLOR_RED",
+    "const app_driver::Status tickSt = device.tick",
+    "printStatus(tickSt)",
 ]
 
 FORBIDDEN_IDF_PATTERNS = {

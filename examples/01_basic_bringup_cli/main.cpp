@@ -2099,7 +2099,11 @@ void setup() {
 }
 
 void loop() {
-  device.tick(arduinoNowMs(nullptr));
+  const app_driver::Status tickSt = device.tick(arduinoNowMs(nullptr));
+  if (!tickSt.ok() && tickSt.code != app_driver::Err::MEASUREMENT_NOT_READY) {
+    LOGW("Async tick completed with non-OK status");
+    printStatus(tickSt);
+  }
   handlePendingTransitions();
   handleMeasurementReady();
 

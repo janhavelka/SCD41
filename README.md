@@ -39,7 +39,7 @@ The library covers the practical documented SCD41 runtime surface:
 The driver uses a managed asynchronous model:
 
 - `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
-- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion. The argument is retained for source compatibility; scheduling uses the required `Config::nowMs` hook.
+- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion. Capture its returned `Status` and log non-OK async completion failures.
 - `requestMeasurement()` schedules work using the current operating mode.
 - `measurementPending()` and `measurementReadyMs()` expose the driver's local sample-fetch state directly, so applications do not need to mirror it with their own shadow flags.
 - `readMeasurement()` is the direct helper for the sensor's `read_measurement` command. It completes a due single-shot request or fetches a ready periodic sample while keeping the cached sample state coherent.
@@ -57,10 +57,28 @@ domain and is used for the 1 ms inter-command guard. `cooperativeYield` is
 optional, but Arduino and RTOS examples provide it so bounded waits can yield to
 the scheduler.
 
-`tick(uint32_t nowMs)` is kept as the lifecycle API for existing sketches and
+`Status tick(uint32_t nowMs)` is kept as the lifecycle API for existing sketches and
 applications. The driver samples `Config::nowMs` internally during `tick()`, so
 pass values from the same clock domain to `tick()` and `sampleAgeMs()`. Do not
 mix wall time, RTOS ticks, and Arduino `millis()` values in one driver instance.
+
+## Async Completion Status
+
+`tick()` returns `Status::Ok()` before initialization, when no async completion
+is due, when due work succeeds, or when a measurement is still legitimately not
+ready and has been rescheduled. Transport, CRC, and sensor-reported failures
+from due completions are returned immediately and stored in `lastAsyncStatus()`
+with the associated `lastAsyncOperation()`.
+
+Call `clearLastAsyncStatus()` after recording an async failure if your
+application wants to acknowledge it explicitly. A later successful async
+completion also supersedes the previous async status with OK. No-due ticks do
+not clear a previous failure, so a loop cannot erase an error before the
+application inspects it.
+
+Each `tick()` processes at most one due async completion. Pending commands are
+completed before scheduled periodic fetches, so applications should call
+`tick()` regularly from the main loop or task.
 
 ## Thread, ISR, And Recovery Model
 
@@ -256,7 +274,10 @@ void setup() {
 }
 
 void loop() {
-  sensor.tick(arduinoNowMs(nullptr));
+  SCD41::Status tickSt = sensor.tick(arduinoNowMs(nullptr));
+  if (!tickSt.ok() && tickSt.code != SCD41::Err::MEASUREMENT_NOT_READY) {
+    Serial.printf("tick: %u %s\n", static_cast<unsigned>(tickSt.code), tickSt.msg);
+  }
 
   if (!sensor.measurementPending() && !sensor.measurementReady()) {
     (void)sensor.requestMeasurement();
@@ -309,6 +330,9 @@ chip/runtime view for pending commands, timing, and live `get_data_ready_status`
 Deferred operations such as self-test, forced recalibration, wake-up, stop-periodic, reinit, and
 factory reset now print explicit pending-work and completion summaries so the operator can follow the
 chip state without polling internal flags manually.
+Both CLI examples capture `Status st = tick(...)` on every loop pass and print non-OK async
+completion statuses. `MEASUREMENT_NOT_READY` is intentionally quiet because it only means no new
+sample or command result is available yet.
 
 The raw command CLI is intentionally limited to immediate diagnostic commands. Managed transitions such
 as periodic-mode entry/exit, wake-up, self-test, and forced recalibration should be driven through the

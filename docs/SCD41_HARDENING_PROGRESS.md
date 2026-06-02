@@ -2,34 +2,37 @@
 
 ## Current Chunk
 
-- Prompt: `02_fix_timing_hooks_and_clock_model`
+- Prompt: `03_surface_async_tick_completion_errors`
 - Branch: `hardening/scd41-industry-readiness`
-- Starting commit: `e2f7776`
-- Scope: H-02 default timing hook contract and H-04 coherent clock model.
-- Explicitly out of scope: async `tick()` status, HIL, and CI expansion.
+- Starting commit: `dcff765`
+- Scope: H-01 observable asynchronous `tick()` completion failures.
+- Explicitly out of scope: HIL, CI expansion, and CRC health-policy changes beyond surfacing CRC failures.
 
 ## Baseline State
 
 - `git branch --show-current`: `hardening/scd41-industry-readiness`
 - `git status --short`: no output
-- `git rev-parse --short HEAD`: `e2f7776`
+- `git rev-parse --short HEAD`: `dcff765`
 
 ## Subagent Reviews
 
-- Timing contract: confirmed optional hooks plus inert fallback clocks caused timeout-style failures instead of `INVALID_CONFIG`, and confirmed deadlines were scheduled with `_nowMs()` but completed against `tick(nowMs)`.
-- Arduino example: identified README quick-start and Arduino CLI setup as missing `nowMs`, `nowUs`, and `cooperativeYield` wiring.
-- Native tests: recommended missing-hook, Arduino-style hook, divergent-clock, and wraparound deadline regressions.
-- Compatibility: confirmed `tick(uint32_t)` should remain for source compatibility and that stricter timing hooks are a behavioral migration.
+- Async API design: confirmed `tick()` discarded due pending-command and measurement-completion statuses; recommended a small async result channel and suppressing non-terminal `MEASUREMENT_NOT_READY` retries.
+- Compatibility: confirmed changing `void tick(uint32_t)` to `Status tick(uint32_t)` is source-compatible for normal call sites that ignore the return value, with edge risk for pointer-to-member code or stale forward declarations.
+- Fault injection tests: recommended single-shot timeout/CRC, periodic fetch failure, self-test/FRC failures, settle-only completion success, success superseding old failure, and no-due tick tests.
+- Docs/examples: identified README, Arduino CLI, and ESP-IDF loop updates so users capture and report non-OK async statuses.
+- Integration review: enumerated drop points in `tick()`, examples, and existing tests.
 
 ## Findings Addressed In This Chunk
 
-- H-02: `begin()` now rejects missing `Config::nowMs` or `Config::nowUs` with `INVALID_CONFIG` before any I2C or bounded wait.
-- H-02: Arduino README quick start and the Arduino bringup CLI now install timing hooks from `millis()`, `micros()`, and `yield()` before `begin()`.
-- H-02: `cooperativeYield` remains optional; bounded waits are deterministic when the injected clocks advance.
-- H-04: `tick(uint32_t)` now uses the configured `Config::nowMs` clock internally and keeps its argument only as source-compatible API surface.
-- H-04: single-shot paired deadlines are scheduled from one captured injected-clock sample.
-- Guard coverage: CLI contract checking now requires Arduino CLI timing-hook assignments.
-- Test coverage: native regressions cover missing required hooks before I2C, Arduino-style timing hooks, optional yield with advancing clocks, divergent `tick()` arguments, and uint32 wraparound deadlines.
+- H-01: `tick(uint32_t)` now returns `Status` and no longer discards due `_handlePendingCommand()` or `_completeMeasurement()` failures.
+- H-01: `lastAsyncStatus()`, `lastAsyncOperation()`, and `clearLastAsyncStatus()` expose persistent async completion telemetry.
+- H-01: non-terminal `MEASUREMENT_NOT_READY` completion attempts reschedule and return OK so normal periodic/not-ready retries do not spam errors.
+- H-01: terminal periodic fetch failures now clear the pending request and preserve the cached last sample.
+- H-01: self-test and forced-recalibration completion failures remain coherent with their dedicated result getters and are also visible immediately through `tick()`.
+- H-01: settle-only async completions such as stop-periodic, wake-up, reinit, factory reset, persist settings, power-down, and power-cycle publish successful async operations.
+- Examples: Arduino and ESP-IDF CLI loops capture `tick()` status and print non-OK async completion failures.
+- Docs: README and Doxygen now document returned async status, last async telemetry, no-due behavior, and the source-compatible migration.
+- Health policy: CRC completion failures are visible through async status; whether CRC mismatches should affect transport health remains deferred to the later protocol/health hardening prompt.
 
 ## Files Changed
 
@@ -37,12 +40,13 @@
 - `docs/IDF_PORT.md`
 - `docs/SCD41_HARDENING_PROGRESS.md`
 - `examples/01_basic_bringup_cli/main.cpp`
-- `include/SCD41/Config.h`
+- `examples/idf/basic/main/main.cpp`
 - `include/SCD41/SCD41.h`
-- `src/PlatformTime.h`
 - `src/SCD41.cpp`
 - `test/test_basic.cpp`
 - `tools/check_cli_contract.py`
+- `tools/check_idf_example_contract.py`
+- `AGENTS.md`
 
 ## Checks Run
 
@@ -55,30 +59,32 @@
 - `python tools/check_idf_example_contract.py`
   - Result: passed; `IDF example contract PASSED`.
 - `python -m platformio test -e native`
-  - Result: passed; 52 test cases, 52 succeeded in `00:00:01.734`.
+  - Result: passed; 59 test cases, 59 succeeded in `00:00:00.484`.
 - `python -m platformio run -e esp32s3dev`
-  - Result: passed; `esp32s3dev` success in `00:00:05.265`.
+  - Result: passed; `esp32s3dev` success in `00:00:03.516`.
 - `python -m platformio run -e esp32s2dev`
-  - Result: passed; `esp32s2dev` success in `00:00:04.748`.
+  - Result: passed; `esp32s2dev` success in `00:00:03.504`.
 
 ## Checks Not Run
 
 - Native ESP-IDF `idf.py` builds: not in this prompt's validation list and still require a configured ESP-IDF environment.
 - Hardware/HIL validation: explicitly out of scope for this chunk and no hardware evidence was collected.
 
-## Previously Completed Chunk
+## Previously Completed Chunks
 
+- Prompt: `02_fix_timing_hooks_and_clock_model`
+  - Commit: `dcff765`
+  - Addressed required `nowMs`/`nowUs` hooks, Arduino timing defaults, one-clock scheduling, and divergent-clock tests.
 - Prompt: `01_branch_agents_baseline_and_low_risk_contracts`
-- Branch created from `main` at `392b58e`.
-- Addressed copy/move deletion, public thread/ISR/reentrant callback contracts, and project discipline in `AGENTS.md`.
-- Validation passed for version generation, timing guard, CLI contract, IDF example contract, native tests, and both Arduino PlatformIO environments.
+  - Branch created from `main` at `392b58e`.
+  - Addressed copy/move deletion, public thread/ISR/reentrant callback contracts, and project discipline in `AGENTS.md`.
 
 ## Remaining Findings For Later Prompts
 
-- Observable `tick()` and async completion failures.
 - Raw command, CRC, and transport edge hardening.
+- CRC/validation health policy, including whether CRC mismatches should affect health counters.
 - Variant gating, temperature-offset scale review, destructive CLI confirmations, and opt-in HIL command handling.
 - Latency/state-machine cleanup, stale sample handling, and probe side effects.
-- Tests, CI/package validation, ESP-IDF build automation, and example parity beyond this timing-hook guard.
+- Tests, CI/package validation, ESP-IDF build automation, and example parity beyond this async status guard.
 - Hardware/HIL matrix, final release gate, and evidence-backed validation records.
 - Refresh or supersede resolved findings in `docs/SCD41_INDUSTRY_READINESS_EXPLORATION_REPORT.md` after the full hardening sequence is complete.

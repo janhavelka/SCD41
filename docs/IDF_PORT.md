@@ -19,9 +19,10 @@ Official ESP-IDF references:
 - The driver already uses injected I2C callbacks from `Config`; library code does not call `Wire` directly.
 - The SCD41 address is fixed at `0x62`.
 - The driver supports periodic measurement, low-power periodic measurement, single-shot commands, RHT-only single shot, stop periodic, power down, wake up, serial number, identity, compensation, ASC, persist settings, reinit, factory reset, self test, forced recalibration, raw command helpers, and health tracking.
-- Long-running operations are state-machine based and are advanced by `tick(uint32_t nowMs)`.
+- Long-running operations are state-machine based and are advanced by `Status tick(uint32_t nowMs)`.
   Scheduling uses the required `Config::nowMs` hook; the `tick()` argument is a
-  source-compatible timestamp from the same clock domain.
+  source-compatible timestamp from the same clock domain. Due async completion
+  failures are returned by `tick()` and retained through `lastAsyncStatus()`.
 - The driver validates Sensirion CRC-8 on command words and measurement words.
 - Serial number variant checking currently expects variant bits `[15:12] == 0x1` unless disabled in `Config`.
 
@@ -85,7 +86,8 @@ Still application-owned:
 - ESP-IDF example files under `examples/idf/basic/main/`
   - Own the I2C bus, device handle, optional regulator/reset GPIOs, and task timing.
   - Fill `Config` with IDF adapter callbacks.
-  - Call `tick()` frequently enough for pending long operations.
+  - Call `tick()` frequently enough for pending long operations and report
+    non-OK returned statuses.
   - Provide the native CLI command set, help text, prompts, status/health output,
     diagnostics, maintenance workflows, and raw command access in parity with the
     Arduino example.
@@ -207,7 +209,7 @@ ESP-IDF examples:
   diagnostics, health/error reporting, probe/recover/reset workflows,
   self-test/stress/demo flows, and raw command access.
 - Advance pending single-shot, periodic, and maintenance operations through
-  `tick()` from the example loop.
+  `tick()` from the example loop, and print/log non-OK async completion status.
 - Print results from the example, not from the library.
 
 ## Test and Validation Plan

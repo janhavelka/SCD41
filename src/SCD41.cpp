@@ -78,6 +78,8 @@ Status SCD41::begin(const Config& config) {
   _totalFailures = 0;
   _totalSuccess = 0;
   _allowOfflineI2c = false;
+  _lastAsyncStatus = Status::Ok();
+  _lastAsyncOperation = AsyncOperation::NONE;
   _lastCommandUs = 0;
   _lastCommandValid = false;
   _commandReadyMs = 0;
@@ -172,23 +174,39 @@ Status SCD41::begin(const Config& config) {
   return Status::Ok();
 }
 
-void SCD41::tick(uint32_t nowMs) {
+Status SCD41::tick(uint32_t nowMs) {
   (void)nowMs;
 
   if (!_initialized) {
-    return;
+    return Status::Ok();
   }
 
   const uint32_t driverNowMs = _nowMs();
 
   if (_pendingCommand != PendingCommand::NONE && _timeElapsed(driverNowMs, _commandReadyMs)) {
-    (void)_handlePendingCommand(driverNowMs);
+    const AsyncOperation operation = _asyncOperationForPending(_pendingCommand);
+    const Status st = _handlePendingCommand(driverNowMs);
+    if (st.code == Err::MEASUREMENT_NOT_READY) {
+      return Status::Ok();
+    }
+    _recordAsyncStatus(operation, st);
+    return st.ok() ? Status::Ok() : st;
   }
 
   if (_pendingCommand == PendingCommand::NONE && _measurementRequested &&
       _timeElapsed(driverNowMs, _measurementReadyMs)) {
-    (void)_completeMeasurement();
+    const Status st = _completeMeasurement();
+    if (st.code == Err::MEASUREMENT_NOT_READY) {
+      return Status::Ok();
+    }
+    if (!st.ok()) {
+      _clearMeasurementRequest();
+    }
+    _recordAsyncStatus(AsyncOperation::PERIODIC_FETCH, st);
+    return st.ok() ? Status::Ok() : st;
   }
+
+  return Status::Ok();
 }
 
 void SCD41::end() {
@@ -206,6 +224,12 @@ void SCD41::end() {
   _sampleTimestampMs = 0;
   _missedSamples = 0;
   _lastCommandValid = false;
+  clearLastAsyncStatus();
+}
+
+void SCD41::clearLastAsyncStatus() {
+  _lastAsyncStatus = Status::Ok();
+  _lastAsyncOperation = AsyncOperation::NONE;
 }
 
 Status SCD41::probe() {
@@ -1811,6 +1835,11 @@ void SCD41::_clearPendingCommand() {
   _commandReadyMs = 0;
 }
 
+void SCD41::_recordAsyncStatus(AsyncOperation operation, const Status& status) {
+  _lastAsyncOperation = operation;
+  _lastAsyncStatus = status.ok() ? Status::Ok() : status;
+}
+
 void SCD41::_setBusyError(Status& st) const {
   st = Status::Error(Err::BUSY, "Command in progress",
                      static_cast<int32_t>(static_cast<uint8_t>(_pendingCommand)));
@@ -2006,6 +2035,24 @@ SensorVariant SCD41::_variantFromSerialWord(uint16_t word0) {
     case cmd::SERIAL_VARIANT_SCD43: return SensorVariant::SCD43;
     default: return SensorVariant::UNKNOWN;
   }
+}
+
+AsyncOperation SCD41::_asyncOperationForPending(PendingCommand command) {
+  switch (command) {
+    case PendingCommand::NONE: return AsyncOperation::NONE;
+    case PendingCommand::STOP_PERIODIC: return AsyncOperation::STOP_PERIODIC;
+    case PendingCommand::SINGLE_SHOT: return AsyncOperation::SINGLE_SHOT;
+    case PendingCommand::SINGLE_SHOT_RHT_ONLY: return AsyncOperation::SINGLE_SHOT_RHT_ONLY;
+    case PendingCommand::POWER_DOWN: return AsyncOperation::POWER_DOWN;
+    case PendingCommand::WAKE_UP: return AsyncOperation::WAKE_UP;
+    case PendingCommand::PERSIST_SETTINGS: return AsyncOperation::PERSIST_SETTINGS;
+    case PendingCommand::REINIT: return AsyncOperation::REINIT;
+    case PendingCommand::FACTORY_RESET: return AsyncOperation::FACTORY_RESET;
+    case PendingCommand::SELF_TEST: return AsyncOperation::SELF_TEST;
+    case PendingCommand::FORCED_RECALIBRATION: return AsyncOperation::FORCED_RECALIBRATION;
+    case PendingCommand::POWER_CYCLE: return AsyncOperation::POWER_CYCLE;
+  }
+  return AsyncOperation::NONE;
 }
 
 uint32_t SCD41::_nowMs() const {

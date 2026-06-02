@@ -43,7 +43,7 @@ Rules:
 ## Core Engineering Rules (Mandatory)
 
 - Deterministic: no unbounded loops or waits; all timeouts via deadlines, never `delay()` in library code.
-- Non-blocking lifecycle: `Status begin(const Config&)`, `void tick(uint32_t nowMs)`, `void end()`.
+- Non-blocking lifecycle: `Status begin(const Config&)`, `Status tick(uint32_t nowMs)`, `void end()`.
 - Any command or wait that can exceed about 1-2 ms must be split into bounded phases driven by `tick()`.
 - No heap allocation in steady state (no `String`, `std::vector`, `new` in normal ops).
 - No logging in library code; examples may log.

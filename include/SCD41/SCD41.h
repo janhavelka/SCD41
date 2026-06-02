@@ -53,6 +53,23 @@ enum class PendingCommand : uint8_t {
   POWER_CYCLE          ///< Waiting for externally initiated power-cycle settle time
 };
 
+/// Last asynchronous operation completed or failed by `tick()`.
+enum class AsyncOperation : uint8_t {
+  NONE = 0,             ///< No async completion has been recorded
+  STOP_PERIODIC,        ///< `stop_periodic_measurement` settle completed
+  SINGLE_SHOT,          ///< Full single-shot measurement completion
+  SINGLE_SHOT_RHT_ONLY, ///< RHT-only single-shot measurement completion
+  PERIODIC_FETCH,       ///< Periodic measurement fetch completion
+  POWER_DOWN,           ///< Power-down settle completed
+  WAKE_UP,              ///< Wake-up settle completed
+  PERSIST_SETTINGS,     ///< EEPROM persist settle completed
+  REINIT,               ///< Reinit settle completed
+  FACTORY_RESET,        ///< Factory-reset settle completed
+  SELF_TEST,            ///< Self-test result completion
+  FORCED_RECALIBRATION, ///< Forced recalibration result completion
+  POWER_CYCLE           ///< External power-cycle settle completed
+};
+
 /// Parsed `get_data_ready_status` response.
 struct DataReadyStatus {
   uint16_t raw = 0; ///< Raw 16-bit status word
@@ -150,15 +167,26 @@ public:
   Status begin(const Config& config);
   /// Advance pending command completion using the configured monotonic millisecond clock.
   /// @note May perform I2C when a pending command or measurement becomes due; do not call from ISRs.
+  /// @note Before a successful `begin()`, this is a no-op and returns OK.
+  /// @note Processes at most one due async completion per call, with pending commands before
+  ///       scheduled periodic fetches.
+  /// @return OK when no completion is due, a due completion succeeds, or a measurement is still
+  ///         not ready. Returns and stores non-OK async completion failures.
   /// @note The `nowMs` argument is retained for source compatibility. Scheduling uses
   ///       `Config::nowMs`; pass the same clock domain here and to `sampleAgeMs()`.
   /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
-  void tick(uint32_t nowMs);
+  Status tick(uint32_t nowMs);
   /// Reset the driver to `UNINIT` and clear runtime state.
   void end();
 
   bool isInitialized() const { return _initialized; } ///< True after a successful begin()
   const Config& getConfig() const { return _config; } ///< Return the active configuration copy
+  /// Most recent due async completion status recorded by `tick()`.
+  Status lastAsyncStatus() const { return _lastAsyncStatus; }
+  /// Operation associated with `lastAsyncStatus()`.
+  AsyncOperation lastAsyncOperation() const { return _lastAsyncOperation; }
+  /// Clear the async completion status channel back to OK / NONE.
+  void clearLastAsyncStatus();
 
   // =========================================================================
   // Diagnostics
@@ -440,6 +468,7 @@ private:
   Status _schedulePendingCommand(PendingCommand command, uint32_t delayMs);
   void _clearMeasurementRequest();
   void _clearPendingCommand();
+  void _recordAsyncStatus(AsyncOperation operation, const Status& status);
   void _setBusyError(Status& st) const;
   void _updatePeriodicMissedSamples(uint32_t nowMs);
   void _storeSample(const RawSample& sample, bool co2Valid);
@@ -461,6 +490,7 @@ private:
   static bool _isI2cFailure(Err code);
   static uint8_t _crc8(const uint8_t* data, size_t len);
   static SensorVariant _variantFromSerialWord(uint16_t word0);
+  static AsyncOperation _asyncOperationForPending(PendingCommand command);
 
   uint32_t _nowMs() const;
   uint32_t _nowUs() const;
@@ -490,6 +520,8 @@ private:
   uint32_t _totalFailures = 0;
   uint32_t _totalSuccess = 0;
   bool _allowOfflineI2c = false;
+  Status _lastAsyncStatus = Status::Ok();
+  AsyncOperation _lastAsyncOperation = AsyncOperation::NONE;
 
   uint32_t _lastCommandUs = 0;
   bool _lastCommandValid = false;

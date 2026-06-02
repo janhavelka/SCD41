@@ -2669,7 +2669,11 @@ extern "C" void app_main(void) {
   setupCli();
 
   while (true) {
-    device.tick(idfNowMs());
+    const app_driver::Status tickSt = device.tick(idfNowMs());
+    if (!tickSt.ok() && tickSt.code != app_driver::Err::MEASUREMENT_NOT_READY) {
+      LOGW("Async tick completed with non-OK status");
+      printStatus(tickSt);
+    }
     handlePendingTransitions();
     handleMeasurementReady();
 

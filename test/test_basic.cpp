@@ -57,6 +57,9 @@ struct ScriptedTransport {
   uint32_t nowUsStep = 0;
   uint32_t yieldCount = 0;
   bool advanceOnYield = true;
+
+  Status controlStatus = Status::Ok();
+  uint32_t powerCycleCalls = 0;
 };
 
 uint8_t packWord(uint16_t word, uint8_t* out) {
@@ -98,6 +101,18 @@ void queueReadMeasurement(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
   packWord(co2, &bus.readData[bus.readCount][0]);
   packWord(temp, &bus.readData[bus.readCount][3]);
   packWord(humidity, &bus.readData[bus.readCount][6]);
+  ++bus.readCount;
+}
+
+void queueReadMeasurementWithBadCrc(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
+                                    uint16_t humidity) {
+  TEST_ASSERT_TRUE(bus.readCount < 32);
+  bus.readStatus[bus.readCount] = Status::Ok();
+  bus.readLen[bus.readCount] = 9;
+  packWord(co2, &bus.readData[bus.readCount][0]);
+  packWord(temp, &bus.readData[bus.readCount][3]);
+  packWord(humidity, &bus.readData[bus.readCount][6]);
+  bus.readData[bus.readCount][2] ^= 0xFFU;
   ++bus.readCount;
 }
 
@@ -161,6 +176,12 @@ void scriptedYield(void* user) {
     ++ctx->nowMs;
     ctx->nowUs += 1000;
   }
+}
+
+Status scriptedPowerCycle(void* user) {
+  auto* ctx = static_cast<ScriptedTransport*>(user);
+  ++ctx->powerCycleCalls;
+  return ctx->controlStatus;
 }
 
 uint32_t arduinoStyleNowMs(void*) {
@@ -497,6 +518,169 @@ void test_single_shot_measurement_flow() {
   TEST_ASSERT_TRUE(sample.co2Valid);
 }
 
+void test_tick_no_due_returns_ok_without_i2c() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  const size_t writesBefore = bus.writeCalls;
+  const size_t readsBefore = bus.readCalls;
+
+  const Status st = device.tick(0);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+}
+
+void test_tick_before_begin_returns_ok_noop() {
+  SCD41Device device;
+  const Status st = device.tick(0);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+}
+
+void test_single_shot_async_timeout_is_visible() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
+
+  bus.nowMs = 5200;
+  bus.nowUs = 5200000;
+  const Status st = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_FALSE(device.measurementPending());
+  TEST_ASSERT_FALSE(device.measurementReady());
+  TEST_ASSERT_EQUAL_UINT32(1u, device.totalFailures());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
+                    static_cast<uint8_t>(device.state()));
+}
+
+void test_single_shot_async_crc_mismatch_is_visible() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurementWithBadCrc(bus, 500, 20000, 32768);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+
+  bus.nowMs = 5200;
+  bus.nowUs = 5200000;
+  const Status st = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_FALSE(device.hasSample());
+  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  device.clearLastAsyncStatus();
+  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+}
+
+void test_periodic_async_fetch_failure_preserves_cached_sample() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 700, 18000, 40000);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
+
+  Measurement sample = {};
+  TEST_ASSERT_TRUE(device.readMeasurement(sample).ok());
+  TEST_ASSERT_EQUAL_UINT16(700u, sample.co2Ppm);
+  TEST_ASSERT_FALSE(device.measurementReady());
+
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "periodic timeout"));
+
+  bus.nowMs = 5000;
+  bus.nowUs = 5000000;
+  const Status st = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERIODIC_FETCH),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_FALSE(device.measurementPending());
+  TEST_ASSERT_FALSE(device.measurementReady());
+
+  Measurement last = {};
+  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
+  TEST_ASSERT_EQUAL_UINT16(700u, last.co2Ppm);
+  TEST_ASSERT_TRUE(last.co2Valid);
+}
+
+void test_async_success_supersedes_previous_failure() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurementWithBadCrc(bus, 500, 20000, 32768);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  bus.nowMs = 5200;
+  bus.nowUs = 5200000;
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(device.tick(bus.nowMs).code));
+
+  queueReadWord(bus, 0x0001);
+  queueReadMeasurement(bus, 600, 21000, 33000);
+  bus.nowMs = 5300;
+  bus.nowUs = 5300000;
+  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
+  bus.nowMs = 10300;
+  bus.nowUs = 10300000;
+  const Status st = device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(st.ok());
+  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_TRUE(device.measurementReady());
+}
+
 void test_single_shot_deadlines_are_scheduled_from_config_clock() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
@@ -657,7 +841,9 @@ void test_periodic_start_request_and_stop() {
   TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
   bus.nowMs = 5000;
   bus.nowUs = 5000000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERIODIC_FETCH),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_TRUE(device.measurementReady());
 
   const Status st = device.stopPeriodicMeasurement();
@@ -667,7 +853,9 @@ void test_periodic_start_request_and_stop() {
 
   bus.nowMs = 5600;
   bus.nowUs = 5600000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::STOP_PERIODIC),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
                     static_cast<uint8_t>(device.operatingMode()));
 }
@@ -1150,7 +1338,9 @@ void test_persist_reinit_factory_reset_schedule() {
   TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERSIST_SETTINGS, lastWriteCommand(bus));
   bus.nowMs = 1000;
   bus.nowUs = 1000000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERSIST_SETTINGS),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
                     static_cast<uint8_t>(device.pendingCommand()));
 
@@ -1158,13 +1348,17 @@ void test_persist_reinit_factory_reset_schedule() {
   TEST_ASSERT_EQUAL_HEX16(cmd::CMD_REINIT, lastWriteCommand(bus));
   bus.nowMs = 2000;
   bus.nowUs = 2000000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::REINIT),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 
   TEST_ASSERT_TRUE(device.startFactoryReset().inProgress());
   TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FACTORY_RESET, lastWriteCommand(bus));
   bus.nowMs = 4000;
   bus.nowUs = 4000000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FACTORY_RESET),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 }
 
 void test_wake_up_accepts_expected_nack() {
@@ -1185,9 +1379,38 @@ void test_wake_up_accepts_expected_nack() {
 
   bus.nowMs = cfg.powerUpDelayMs + 10;
   bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::WAKE_UP),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
                     static_cast<uint8_t>(device.operatingMode()));
+}
+
+void test_recover_power_cycle_completion_reports_async_success() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.powerCycle = scriptedPowerCycle;
+  cfg.controlUser = &bus;
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "probe timeout"));
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  const Status recoverSt = device.recover();
+  TEST_ASSERT_TRUE(recoverSt.inProgress());
+  TEST_ASSERT_EQUAL_UINT32(1u, bus.powerCycleCalls);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+
+  bus.nowMs = cfg.powerUpDelayMs + 10;
+  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
 }
 
 void test_self_test_completion_reads_pass_code() {
@@ -1202,7 +1425,9 @@ void test_self_test_completion_reads_pass_code() {
 
   bus.nowMs = 11000;
   bus.nowUs = 11000000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SELF_TEST),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 
   uint16_t raw = 0xFFFF;
   TEST_ASSERT_TRUE(device.getSelfTestResult(raw).ok());
@@ -1221,7 +1446,13 @@ void test_self_test_raw_accessor_preserves_failure_word() {
 
   bus.nowMs = 11000;
   bus.nowUs = 11000000;
-  device.tick(bus.nowMs);
+  const Status tickSt = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                    static_cast<uint8_t>(tickSt.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SELF_TEST),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 
   uint16_t raw = 0;
   TEST_ASSERT_TRUE(device.getSelfTestRawResult(raw).ok());
@@ -1248,7 +1479,9 @@ void test_forced_recalibration_reads_signed_correction() {
 
   bus.nowMs = 600;
   bus.nowUs = 600000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FORCED_RECALIBRATION),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 
   int16_t correction = 0;
   TEST_ASSERT_TRUE(device.getForcedRecalibrationCorrectionPpm(correction).ok());
@@ -1267,7 +1500,13 @@ void test_forced_recalibration_raw_accessor_preserves_failure_sentinel() {
 
   bus.nowMs = 600;
   bus.nowUs = 600000;
-  device.tick(bus.nowMs);
+  const Status tickSt = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                    static_cast<uint8_t>(tickSt.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FORCED_RECALIBRATION),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
 
   uint16_t raw = 0;
   TEST_ASSERT_TRUE(device.getForcedRecalibrationRawResult(raw).ok());
@@ -1303,7 +1542,9 @@ void test_data_ready_positive_and_power_down_schedule() {
   TEST_ASSERT_EQUAL_HEX16(cmd::CMD_POWER_DOWN, lastWriteCommand(bus));
   bus.nowMs = 10;
   bus.nowUs = 10000;
-  device.tick(bus.nowMs);
+  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_DOWN),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::POWER_DOWN),
                     static_cast<uint8_t>(device.operatingMode()));
 }
@@ -1339,6 +1580,12 @@ int main(int, char**) {
   RUN_TEST(test_begin_rejects_non_scd41_variant);
   RUN_TEST(test_probe_works_after_variant_mismatch_begin);
   RUN_TEST(test_single_shot_measurement_flow);
+  RUN_TEST(test_tick_no_due_returns_ok_without_i2c);
+  RUN_TEST(test_tick_before_begin_returns_ok_noop);
+  RUN_TEST(test_single_shot_async_timeout_is_visible);
+  RUN_TEST(test_single_shot_async_crc_mismatch_is_visible);
+  RUN_TEST(test_periodic_async_fetch_failure_preserves_cached_sample);
+  RUN_TEST(test_async_success_supersedes_previous_failure);
   RUN_TEST(test_single_shot_deadlines_are_scheduled_from_config_clock);
   RUN_TEST(test_tick_uses_config_clock_when_tick_argument_diverges);
   RUN_TEST(test_single_shot_deadline_wraparound_completes_at_wrapped_due_time);
@@ -1368,6 +1615,7 @@ int main(int, char**) {
   RUN_TEST(test_asc_period_validation);
   RUN_TEST(test_persist_reinit_factory_reset_schedule);
   RUN_TEST(test_wake_up_accepts_expected_nack);
+  RUN_TEST(test_recover_power_cycle_completion_reports_async_success);
   RUN_TEST(test_self_test_completion_reads_pass_code);
   RUN_TEST(test_self_test_raw_accessor_preserves_failure_word);
   RUN_TEST(test_forced_recalibration_reads_signed_correction);
