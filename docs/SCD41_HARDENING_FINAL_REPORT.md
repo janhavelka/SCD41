@@ -9,8 +9,9 @@ Current branch: `hardening/scd41-industry-readiness`
 Code hardening status: hardening-complete for the findings identified in the
 industry-readiness exploration, except for physical hardware/HIL evidence.
 
-Merge verdict: recommended for merge as a hardened pre-production library once
-CI passes on the pushed branch.
+Current merge verdict: blocked until the pushed branch has a passing CI run.
+The 2026-06-03 merge-gate check observed the latest CI run for `640e4ca` and it
+failed in the ESP-IDF build matrix.
 
 Release verdict: not yet field-grade; code is hardening-complete, hardware
 validation pending. Do not tag a production/industry-grade release until at
@@ -105,12 +106,28 @@ CI configuration now includes:
 - `esp-idf-build`: `examples/idf/basic` for `esp32s3` and `esp32s2` using
   `espressif/esp-idf-ci-action@v1` with ESP-IDF `v6.0.1`.
 
-CI pass status has not been observed inside this local session after the final
-Prompt 08 commit. Treat the pushed GitHub workflow as the source of CI truth.
+CI observation from the 2026-06-03 merge-gate check:
+
+- Latest observed run for `640e4ca`: `CI`, run id `26838627427`.
+- Run status: completed.
+- Run conclusion: failure.
+- Successful jobs: `guards`, `native-tests`, `platformio-build (esp32s3dev)`,
+  `platformio-build (esp32s2dev)`, and `package`.
+- Failed jobs: `esp-idf-build (esp32s3)` and `esp-idf-build (esp32s2)`.
+- Run URL: `https://github.com/janhavelka/SCD41/actions/runs/26838627427`.
+
+Do not claim CI passed until a later workflow run for this branch completes
+successfully.
 
 ## Local Validation
 
 Prompt 08 local validation results:
+
+The table below records the Prompt 08 validation run. A separate merge-gate pass
+on 2026-06-03 reran the same command suite against commit `640e4ca` after this
+final report was committed. This document was then updated as a report-only
+correction to record the observed CI failure; no code, build metadata, examples,
+or tests were changed by that correction.
 
 | Command | Result |
 | --- | --- |

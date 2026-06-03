@@ -49,6 +49,10 @@
 - Release discipline: added `docs/SCD41_HARDENING_FINAL_REPORT.md` mapping each
   exploration finding to disposition, evidence, merge gate, release gate, local
   validation status, CI status, and HIL status.
+- Merge-gate verification on 2026-06-03 observed CI run `26838627427` for
+  `640e4ca` as failed. Guards, native tests, PlatformIO builds, and package
+  proof passed in CI; `esp-idf-build (esp32s3)` and `esp-idf-build (esp32s2)`
+  failed. Merge remains blocked until a later CI run passes.
 - Docs: README now links the hardware validation matrix and final hardening
   report.
 
@@ -87,7 +91,8 @@
 
 - Local native ESP-IDF `idf.py` builds: blocked because `idf.py` is not on PATH
   in this workspace (`CommandNotFoundException`). CI is configured to run the
-  ESP-IDF v6.0.1 matrix, but the CI run was not observed locally.
+  ESP-IDF v6.0.1 matrix. The latest observed branch CI run failed in both
+  ESP-IDF jobs.
 - Hardware/HIL validation: not run because no serial port, board, SCD41, or
   operator-approved hardware context was provided. No HIL transcript exists.
 
