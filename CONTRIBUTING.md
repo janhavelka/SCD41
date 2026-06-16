@@ -6,7 +6,7 @@ Thanks for contributing to this repository.
 
 1. Fork the repository.
 2. Create a focused branch: `git checkout -b feature/my-change`.
-3. Keep device behavior aligned with `docs/SCD41_datasheet.md`.
+3. Keep device behavior aligned with `docs/reference/scd41-protocol.md`.
 4. Run the repository checks that apply to your change:
    - `python tools/check_core_timing_guard.py`
    - `python tools/check_cli_contract.py`
@@ -20,7 +20,7 @@ Thanks for contributing to this repository.
 
 ### Source Of Truth
 
-- Device behavior comes from `docs/SCD41_datasheet.md` first.
+- Device behavior comes from `docs/reference/scd41-protocol.md` first.
 - If the datasheet is ambiguous, follow the strongest existing family pattern and document the assumption in `ASSUMPTIONS.md`.
 - Do not present undocumented SCD41 behavior as certain.
 

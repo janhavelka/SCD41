@@ -14,7 +14,7 @@ This repository follows the same managed I2C library pattern used across the wor
 - CRC-8 validation on every returned 16-bit data word
 - no steady-state heap allocation and no logging inside the library
 
-The device source of truth for this repository is [docs/SCD41_datasheet.md](docs/SCD41_datasheet.md).
+The device source of truth for this repository is [docs/reference/scd41-protocol.md](docs/reference/scd41-protocol.md).
 
 ## Managed Feature Coverage
 
@@ -485,8 +485,8 @@ idf.py -C examples/idf/basic -B build-esp32s2 build
 
 Hardware/HIL validation remains a separate opt-in step because it requires real
 boards, an SCD41, and explicit operator control for EEPROM/destructive commands.
-Use [docs/SCD41_HARDWARE_VALIDATION.md](docs/SCD41_HARDWARE_VALIDATION.md) for
-the manual matrix and optional runner workflow.
+Use [docs/validation/hardware-hil.md](docs/validation/hardware-hil.md) for the
+manual matrix and optional runner workflow.
 
 ## Repository Notes
 
@@ -502,12 +502,11 @@ the manual matrix and optional runner workflow.
 - <a href="CHANGELOG.md">CHANGELOG.md</a> - release history
 - <a href="AGENTS.md">AGENTS.md</a> - repository engineering rules
 - <a href="ASSUMPTIONS.md">ASSUMPTIONS.md</a> - explicit assumptions and scope notes
-- <a href="docs/IDF_PORT.md">docs/IDF_PORT.md</a> - ESP-IDF portability guidance
-- <a href="docs/IDF_PORT_IMPLEMENTATION.md">docs/IDF_PORT_IMPLEMENTATION.md</a> - implemented IDF component/example notes
-- <a href="docs/SCD41_HARDWARE_VALIDATION.md">docs/SCD41_HARDWARE_VALIDATION.md</a> - opt-in hardware/HIL matrix and evidence rules
-- <a href="docs/SCD41_HARDENING_FINAL_REPORT.md">docs/SCD41_HARDENING_FINAL_REPORT.md</a> - final hardening disposition and release gate
-- <a href="docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md">docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md</a> - TunnelMonitor hardening audit
-- <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
+- <a href="docs/README.md">docs/README.md</a> - documentation map and docs policy
+- <a href="docs/reference/scd41-protocol.md">docs/reference/scd41-protocol.md</a> - datasheet-derived implementation reference
+- <a href="docs/porting/esp-idf.md">docs/porting/esp-idf.md</a> - ESP-IDF portability and adapter guidance
+- <a href="docs/integration/external-i2c-owner.md">docs/integration/external-i2c-owner.md</a> - bounded external-I2C-owner integration notes
+- <a href="docs/validation/hardware-hil.md">docs/validation/hardware-hil.md</a> - opt-in hardware/HIL matrix and evidence rules
 
 ## License
 

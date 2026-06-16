@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Instruction-budgeted `poll(nowMs, maxInstructions)`, `lastPollStatus()`,
-  and `pollBusy()` APIs for TunnelMonitor-style I2C ownership.
+  and `pollBusy()` APIs for external-I2C-owner integration.
 - Poll-driven `startReadSettings()` / `settingsReady()` live settings refresh
   path, with cached results available through `getSettings()`.
 - `Err::OFFLINE` for latched driver-offline status instead of overloading
@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tools/check_clean_consumer_compile.py` to compile a clean consumer translation unit against the source tree or packed library tarball.
 - Safe one-sample `demo` workflow in both Arduino and ESP-IDF CLIs.
 - Framework-neutral private timing/yield shim; real timing is supplied by application callbacks.
-- `docs/IDF_PORT.md` and `docs/IDF_PORT_IMPLEMENTATION.md` with the implemented port structure, validation notes, and remaining hardware checks.
-- `docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md` with API classification, long-command behavior, and TunnelMonitor integration risks.
+- `docs/porting/esp-idf.md` with the implemented ESP-IDF component, transport adapter, and validation guidance.
+- `docs/integration/external-i2c-owner.md` with API classification, long-command behavior, and bounded external-I2C-owner integration risks.
 
 ### Changed
 - Core timing guard now rejects Arduino and ESP-IDF framework headers in core/public headers and `src/`.
@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
 - Fixed the bring-up CLI so forced-recalibration failures are always reported and raw diagnostic reads no longer mask read-header NACKs by default.
 - Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
-- Reference documentation now separates compact SCD41 notes from full PDF extraction under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
+- Documentation is simplified into stable reference, porting, integration, and validation guides under `docs/`.
 - Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
 - Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `OFFLINE` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
 - `library.json` now advertises every public `include/SCD41` header, including generated `Version.h`, and uses an explicit package export surface.
@@ -71,6 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.
+- Removed generated datasheet extraction folders and historical audit/progress reports from front-facing docs.
 
 ## [0.1.0] - 2026-04-14
 

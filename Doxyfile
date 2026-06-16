@@ -31,10 +31,10 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md include docs
+INPUT                  = README.md CHANGELOG.md AGENTS.md CONTRIBUTING.md include/SCD41 docs/README.md docs/reference/scd41-protocol.md docs/porting/esp-idf.md docs/integration/external-i2c-owner.md docs/validation/hardware-hil.md
 FILE_PATTERNS          = *.h *.md
-RECURSIVE              = YES
-EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/extracted-md/* */docs/pdf-extracted-md/* */docs/_pdf_extracts/*
+RECURSIVE              = NO
+EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/reference/vendor/*
 EXAMPLE_PATH           = examples/01_basic_bringup_cli
 
 USE_MDFILE_AS_MAINPAGE = README.md
