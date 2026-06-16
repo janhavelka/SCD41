@@ -85,6 +85,8 @@ Status SCD41::begin(const Config& config) {
   _allowOfflineI2c = false;
   _lastAsyncStatus = Status::Ok();
   _lastAsyncOperation = AsyncOperation::NONE;
+  _lastPollStatus = Status::Ok();
+  _pollStep = PollStep::NONE;
   _lastCommandUs = 0;
   _lastCommandValid = false;
   _commandReadyMs = 0;
@@ -114,6 +116,18 @@ Status SCD41::begin(const Config& config) {
   _forcedRecalibrationStatus =
       Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration not started");
   _forcedRecalibrationCompleted = false;
+  _settingsReadActive = false;
+  _settingsReady = false;
+  _settingsLiveConfigValid = false;
+  _settingsAllLiveFieldsRead = false;
+  _settingsField = SettingsReadField::NONE;
+  _settingsTemperatureOffsetC_x1000 = 0;
+  _settingsSensorAltitudeM = 0;
+  _settingsAmbientPressurePa = 0;
+  _settingsAutomaticSelfCalibrationEnabled = false;
+  _settingsAutomaticSelfCalibrationTargetPpm = 0;
+  _settingsAutomaticSelfCalibrationInitialPeriodHours = 0;
+  _settingsAutomaticSelfCalibrationStandardPeriodHours = 0;
   _lastRecoverMs = 0;
   _lastRecoverValid = false;
 
@@ -165,9 +179,6 @@ Status SCD41::begin(const Config& config) {
   uint64_t serial = 0;
   st = readSerialNumber(serial);
   if (!st.ok()) {
-    if (_isI2cFailure(st.code)) {
-      return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
-    }
     return st;
   }
 
@@ -217,11 +228,55 @@ Status SCD41::tick(uint32_t nowMs) {
   return Status::Ok();
 }
 
+Status SCD41::poll(uint32_t nowMs, uint8_t maxInstructions) {
+  if (!_initialized) {
+    return _recordPollStatus(Status::Ok());
+  }
+  if (maxInstructions == 0) {
+    return _recordPollStatus(Status::Error(Err::INVALID_PARAM, "No poll instructions"));
+  }
+
+  uint8_t instructionsRemaining = maxInstructions;
+  Status st = Status::Ok();
+
+  do {
+    const uint8_t before = instructionsRemaining;
+    const uint32_t driverNowMs = nowMs;
+
+    if (_settingsReadActive || _pollStep == PollStep::SETTINGS_COMMAND ||
+        _pollStep == PollStep::SETTINGS_READ) {
+      st = _pollReadSettings(driverNowMs, instructionsRemaining);
+    } else if (_pollStep == PollStep::MEASUREMENT_DATA_READY_COMMAND ||
+               _pollStep == PollStep::MEASUREMENT_DATA_READY_READ ||
+               _pollStep == PollStep::MEASUREMENT_READ_COMMAND ||
+               _pollStep == PollStep::MEASUREMENT_READ_DATA ||
+               (_pendingCommand == PendingCommand::NONE && _measurementRequested &&
+                _timeElapsed(driverNowMs, _measurementReadyMs)) ||
+               ((_pendingCommand == PendingCommand::SINGLE_SHOT ||
+                 _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY) &&
+                _timeElapsed(driverNowMs, _commandReadyMs))) {
+      st = _pollMeasurement(driverNowMs, instructionsRemaining);
+    } else if (_pendingCommand != PendingCommand::NONE &&
+               _timeElapsed(driverNowMs, _commandReadyMs)) {
+      st = _pollPendingCommand(driverNowMs, instructionsRemaining);
+    } else {
+      st = pollBusy() ? Status::Error(Err::IN_PROGRESS, "Poll work pending") : Status::Ok();
+    }
+
+    if (!st.ok() || instructionsRemaining == 0 || instructionsRemaining == before) {
+      return _recordPollStatus(st);
+    }
+  } while (pollBusy());
+
+  return _recordPollStatus(Status::Ok());
+}
+
 void SCD41::end() {
   _initialized = false;
   _driverState = DriverState::UNINIT;
   _operatingMode = OperatingMode::IDLE;
   _pendingCommand = PendingCommand::NONE;
+  _pollStep = PollStep::NONE;
   _commandReadyMs = 0;
   _measurementRequested = false;
   _measurementReady = false;
@@ -242,12 +297,21 @@ void SCD41::end() {
   _consecutiveProtocolFailures = 0;
   _lastProtocolErrorMs = 0;
   _lastProtocolError = Status::Ok();
+  _settingsReadActive = false;
+  _settingsReady = false;
+  _settingsField = SettingsReadField::NONE;
   clearLastAsyncStatus();
+  _lastPollStatus = Status::Ok();
 }
 
 void SCD41::clearLastAsyncStatus() {
   _lastAsyncStatus = Status::Ok();
   _lastAsyncOperation = AsyncOperation::NONE;
+}
+
+bool SCD41::pollBusy() const {
+  return _pollStep != PollStep::NONE || _pendingCommand != PendingCommand::NONE ||
+         _measurementRequested || _settingsReadActive;
 }
 
 Status SCD41::probe() {
@@ -269,9 +333,6 @@ Status SCD41::probe() {
     Status st = _readWord(cmd::CMD_GET_DATA_READY_STATUS, raw, false);
     st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
     if (!st.ok()) {
-      if (_isI2cFailure(st.code)) {
-        return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
-      }
       return st;
     }
     return Status::Ok();
@@ -281,9 +342,6 @@ Status SCD41::probe() {
   Status st = _readWords(cmd::CMD_GET_SERIAL_NUMBER, words, 3, false);
   st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
   if (!st.ok()) {
-    if (_isI2cFailure(st.code)) {
-      return Status::Error(Err::DEVICE_NOT_FOUND, "Device not responding", st.detail);
-    }
     return st;
   }
 
@@ -368,7 +426,7 @@ Status SCD41::requestMeasurement() {
     return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
   }
   if (_driverState == DriverState::OFFLINE) {
-    return Status::Error(Err::BUSY, "Driver is offline; call recover()");
+    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
   }
   if (_pendingCommand != PendingCommand::NONE) {
     return Status::Error(Err::BUSY, "Command in progress");
@@ -1245,15 +1303,47 @@ Status SCD41::getSettings(SettingsSnapshot& out) const {
   out.sensorVariant = _sensorVariant;
   out.serialNumberValid = _serialNumberValid;
   out.serialNumber = _serialNumber;
-  out.liveConfigValid = false;
-  out.temperatureOffsetC_x1000 = 0;
-  out.sensorAltitudeM = 0;
-  out.ambientPressurePa = 0;
-  out.automaticSelfCalibrationEnabled = false;
-  out.automaticSelfCalibrationTargetPpm = 0;
-  out.automaticSelfCalibrationInitialPeriodHours = 0;
-  out.automaticSelfCalibrationStandardPeriodHours = 0;
+  out.liveConfigValid = _settingsLiveConfigValid;
+  out.temperatureOffsetC_x1000 = _settingsTemperatureOffsetC_x1000;
+  out.sensorAltitudeM = _settingsSensorAltitudeM;
+  out.ambientPressurePa = _settingsAmbientPressurePa;
+  out.automaticSelfCalibrationEnabled = _settingsAutomaticSelfCalibrationEnabled;
+  out.automaticSelfCalibrationTargetPpm = _settingsAutomaticSelfCalibrationTargetPpm;
+  out.automaticSelfCalibrationInitialPeriodHours =
+      _settingsAutomaticSelfCalibrationInitialPeriodHours;
+  out.automaticSelfCalibrationStandardPeriodHours =
+      _settingsAutomaticSelfCalibrationStandardPeriodHours;
   return Status::Ok();
+}
+
+Status SCD41::startReadSettings() {
+  if (!_initialized) {
+    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+  }
+  if (_settingsReadActive || _pollStep == PollStep::SETTINGS_COMMAND ||
+      _pollStep == PollStep::SETTINGS_READ) {
+    return Status::Error(Err::BUSY, "Settings read in progress");
+  }
+  if (_pendingCommand != PendingCommand::NONE || _measurementRequested ||
+      _operatingMode == OperatingMode::POWER_DOWN) {
+    return Status::Error(Err::BUSY, "Operation in progress");
+  }
+
+  _settingsReady = false;
+  _settingsAllLiveFieldsRead = !isPeriodicActive();
+  _settingsLiveConfigValid = false;
+  _settingsTemperatureOffsetC_x1000 = 0;
+  _settingsSensorAltitudeM = 0;
+  _settingsAmbientPressurePa = 0;
+  _settingsAutomaticSelfCalibrationEnabled = false;
+  _settingsAutomaticSelfCalibrationTargetPpm = 0;
+  _settingsAutomaticSelfCalibrationInitialPeriodHours = 0;
+  _settingsAutomaticSelfCalibrationStandardPeriodHours = 0;
+  _settingsField = isPeriodicActive() ? SettingsReadField::AMBIENT_PRESSURE
+                                      : SettingsReadField::TEMPERATURE_OFFSET;
+  _settingsReadActive = true;
+  _pollStep = PollStep::SETTINGS_COMMAND;
+  return Status{Err::IN_PROGRESS, 0, "Settings read scheduled"};
 }
 
 Status SCD41::readSettings(SettingsSnapshot& out) {
@@ -1278,6 +1368,8 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
       return st;
     }
     out.ambientPressurePa = ambientPressurePa;
+    _settingsAmbientPressurePa = ambientPressurePa;
+    _settingsLiveConfigValid = false;
     return Status::Ok();
   }
 
@@ -1348,6 +1440,16 @@ Status SCD41::readSettings(SettingsSnapshot& out) {
   out.automaticSelfCalibrationInitialPeriodHours = automaticSelfCalibrationInitialPeriodHours;
   out.automaticSelfCalibrationStandardPeriodHours = automaticSelfCalibrationStandardPeriodHours;
   out.liveConfigValid = allLiveFieldsRead;
+  _settingsTemperatureOffsetC_x1000 = temperatureOffsetC_x1000;
+  _settingsSensorAltitudeM = sensorAltitudeM;
+  _settingsAmbientPressurePa = ambientPressurePa;
+  _settingsAutomaticSelfCalibrationEnabled = automaticSelfCalibrationEnabled;
+  _settingsAutomaticSelfCalibrationTargetPpm = automaticSelfCalibrationTargetPpm;
+  _settingsAutomaticSelfCalibrationInitialPeriodHours =
+      automaticSelfCalibrationInitialPeriodHours;
+  _settingsAutomaticSelfCalibrationStandardPeriodHours =
+      automaticSelfCalibrationStandardPeriodHours;
+  _settingsLiveConfigValid = allLiveFieldsRead;
   return Status::Ok();
 }
 
@@ -1837,6 +1939,101 @@ Status SCD41::_readWordsOnly(uint16_t* values, size_t count, bool tracked, bool 
   return _recordProtocolStatus(Status::Ok(), tracked);
 }
 
+Status SCD41::_writeCommandPoll(uint16_t cmd, bool tracked, bool allowExpectedNack) {
+  if (!_commandDelayReady()) {
+    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
+  }
+
+  const uint8_t buf[2] = {
+      static_cast<uint8_t>((cmd >> 8) & 0xFF),
+      static_cast<uint8_t>(cmd & 0xFF),
+  };
+
+  Status st = Status::Ok();
+  if (tracked) {
+    st = allowExpectedNack ? _i2cWriteTrackedAllowExpectedNack(buf, sizeof(buf))
+                           : _i2cWriteTracked(buf, sizeof(buf));
+  } else {
+    st = _i2cWriteRaw(buf, sizeof(buf));
+  }
+  if (!st.ok()) {
+    return st;
+  }
+
+  _lastCommandUs = _nowUs();
+  _lastCommandValid = true;
+  return Status::Ok();
+}
+
+Status SCD41::_writeCommandWithDataPoll(uint16_t cmd, uint16_t data, bool tracked) {
+  if (!_commandDelayReady()) {
+    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
+  }
+
+  uint8_t buf[MAX_WRITE_LEN] = {
+      static_cast<uint8_t>((cmd >> 8) & 0xFF),
+      static_cast<uint8_t>(cmd & 0xFF),
+      static_cast<uint8_t>((data >> 8) & 0xFF),
+      static_cast<uint8_t>(data & 0xFF),
+      0,
+  };
+  buf[4] = _crc8(&buf[2], 2);
+
+  Status st = tracked ? _i2cWriteTracked(buf, sizeof(buf)) : _i2cWriteRaw(buf, sizeof(buf));
+  if (!st.ok()) {
+    return st;
+  }
+
+  _lastCommandUs = _nowUs();
+  _lastCommandValid = true;
+  return Status::Ok();
+}
+
+Status SCD41::_readWordsOnlyPoll(uint16_t* values, size_t count, bool tracked,
+                                 bool allowNoData) {
+  if (values == nullptr || count == 0) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
+  }
+  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
+    return Status::Error(Err::INVALID_PARAM, "Read length too large");
+  }
+  if (!_commandDelayReady()) {
+    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
+  }
+
+  const size_t len = count * cmd::DATA_WORD_WITH_CRC;
+  uint8_t buf[cmd::MEASUREMENT_RESPONSE_LEN] = {};
+  if (len > sizeof(buf)) {
+    return Status::Error(Err::INVALID_PARAM, "Read length too large");
+  }
+
+  Status st = Status::Ok();
+  if (tracked) {
+    st = _i2cWriteReadTrackedAllowNoData(nullptr, 0, buf, len, allowNoData);
+  } else {
+    st = _i2cWriteReadRaw(nullptr, 0, buf, len);
+  }
+  if (st.ok() || st.code == Err::MEASUREMENT_NOT_READY) {
+    _lastCommandUs = _nowUs();
+    _lastCommandValid = true;
+  }
+  if (!st.ok()) {
+    return st;
+  }
+
+  for (size_t i = 0; i < count; ++i) {
+    const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
+    const uint8_t expected = _crc8(&buf[offset], 2);
+    if (buf[offset + 2] != expected) {
+      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
+    }
+    values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
+                                      static_cast<uint16_t>(buf[offset + 1]));
+  }
+
+  return _recordProtocolStatus(Status::Ok(), tracked);
+}
+
 Status SCD41::_recordProtocolStatus(const Status& st, bool tracked) {
   if (!tracked || !_initialized || st.inProgress()) {
     return st;
@@ -1950,7 +2147,7 @@ void SCD41::_reassertOfflineLatch() {
 
 Status SCD41::_ensureNormalI2cAllowed() const {
   if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
-    return Status::Error(Err::BUSY, "Driver is offline; call recover()");
+    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
   }
   return Status::Ok();
 }
@@ -2069,16 +2266,30 @@ Status SCD41::_schedulePendingCommand(PendingCommand command, uint32_t delayMs) 
 void SCD41::_clearMeasurementRequest() {
   _measurementRequested = false;
   _measurementReadyMs = 0;
+  if (_pollStep == PollStep::MEASUREMENT_DATA_READY_COMMAND ||
+      _pollStep == PollStep::MEASUREMENT_DATA_READY_READ ||
+      _pollStep == PollStep::MEASUREMENT_READ_COMMAND ||
+      _pollStep == PollStep::MEASUREMENT_READ_DATA) {
+    _pollStep = PollStep::NONE;
+  }
 }
 
 void SCD41::_clearPendingCommand() {
   _pendingCommand = PendingCommand::NONE;
   _commandReadyMs = 0;
+  if (_pollStep == PollStep::PENDING_RESULT_READ) {
+    _pollStep = PollStep::NONE;
+  }
 }
 
 void SCD41::_recordAsyncStatus(AsyncOperation operation, const Status& status) {
   _lastAsyncOperation = operation;
   _lastAsyncStatus = status.ok() ? Status::Ok() : status;
+}
+
+Status SCD41::_recordPollStatus(const Status& status) {
+  _lastPollStatus = status;
+  return status;
 }
 
 void SCD41::_setBusyError(Status& st) const {
@@ -2189,6 +2400,7 @@ Status SCD41::_handlePendingCommand(uint32_t nowMs) {
       _clearPendingCommand();
       return st;
     }
+
   }
 
   return Status::Error(Err::COMMAND_FAILED, "Unknown pending command");
@@ -2257,8 +2469,393 @@ Status SCD41::_completeMeasurement() {
   return Status::Ok();
 }
 
+Status SCD41::_pollPendingCommand(uint32_t nowMs, uint8_t& instructionsRemaining) {
+  if (_pendingCommand == PendingCommand::NONE) {
+    return Status::Ok();
+  }
+
+  const AsyncOperation operation = _asyncOperationForPending(_pendingCommand);
+
+  switch (_pendingCommand) {
+    case PendingCommand::STOP_PERIODIC:
+      _operatingMode = OperatingMode::IDLE;
+      _clearMeasurementRequest();
+      _measurementReady = false;
+      _clearPendingCommand();
+      _recordAsyncStatus(operation, Status::Ok());
+      return Status::Ok();
+
+    case PendingCommand::POWER_DOWN:
+      _operatingMode = OperatingMode::POWER_DOWN;
+      _clearMeasurementRequest();
+      _measurementReady = false;
+      _clearPendingCommand();
+      _recordAsyncStatus(operation, Status::Ok());
+      return Status::Ok();
+
+    case PendingCommand::WAKE_UP:
+    case PendingCommand::REINIT:
+    case PendingCommand::PERSIST_SETTINGS:
+    case PendingCommand::FACTORY_RESET:
+    case PendingCommand::POWER_CYCLE:
+      _operatingMode = OperatingMode::IDLE;
+      _clearPendingCommand();
+      _recordAsyncStatus(operation, Status::Ok());
+      return Status::Ok();
+
+    case PendingCommand::SINGLE_SHOT:
+    case PendingCommand::SINGLE_SHOT_RHT_ONLY:
+      return _pollMeasurement(nowMs, instructionsRemaining);
+
+    case PendingCommand::SELF_TEST:
+    case PendingCommand::FORCED_RECALIBRATION:
+      if (_pollStep == PollStep::NONE) {
+        _pollStep = PollStep::PENDING_RESULT_READ;
+      }
+      break;
+
+    case PendingCommand::NONE:
+      return Status::Ok();
+  }
+
+  if (_pollStep != PollStep::PENDING_RESULT_READ) {
+    return Status::Error(Err::COMMAND_FAILED, "Invalid poll state");
+  }
+  if (instructionsRemaining == 0) {
+    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
+  }
+
+  uint16_t value = 0;
+  Status st = _readWordsOnlyPoll(&value, 1, true, false);
+  if (st.inProgress()) {
+    return st;
+  }
+  --instructionsRemaining;
+
+  if (_pendingCommand == PendingCommand::SELF_TEST) {
+    _selfTestCompleted = true;
+    if (st.ok()) {
+      _selfTestRaw = value;
+      _selfTestRawValid = true;
+      _selfTestStatus = (value == cmd::SELF_TEST_PASS)
+                            ? Status::Ok()
+                            : Status::Error(Err::COMMAND_FAILED, "Self-test failed", value);
+      st = _selfTestStatus.ok() ? Status::Ok() : _selfTestStatus;
+    } else {
+      _selfTestStatus = st;
+    }
+  } else {
+    _forcedRecalibrationCompleted = true;
+    if (st.ok()) {
+      _forcedRecalibrationRaw = value;
+      _forcedRecalibrationRawValid = true;
+      if (value == cmd::FRC_FAILED) {
+        _forcedRecalibrationStatus =
+            Status::Error(Err::COMMAND_FAILED, "Forced recalibration failed");
+        st = _forcedRecalibrationStatus;
+      } else {
+        _forcedRecalibrationCorrectionPpm =
+            static_cast<int16_t>(static_cast<int32_t>(value) - cmd::FRC_OFFSET_BIAS);
+        _forcedRecalibrationStatus = Status::Ok();
+      }
+    } else {
+      _forcedRecalibrationStatus = st;
+    }
+  }
+
+  _pollStep = PollStep::NONE;
+  _clearPendingCommand();
+  _recordAsyncStatus(operation, st);
+  return st.ok() ? Status::Ok() : st;
+}
+
+Status SCD41::_pollMeasurement(uint32_t nowMs, uint8_t& instructionsRemaining) {
+  const bool singleShotPending = _pendingCommand == PendingCommand::SINGLE_SHOT ||
+                                 _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY;
+  const AsyncOperation operation =
+      singleShotPending ? _asyncOperationForPending(_pendingCommand)
+                        : AsyncOperation::PERIODIC_FETCH;
+
+  if (_pollStep == PollStep::NONE) {
+    if (singleShotPending) {
+      if (!_timeElapsed(nowMs, _commandReadyMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Measurement conversion pending");
+      }
+    } else if (!_measurementRequested || !_timeElapsed(nowMs, _measurementReadyMs)) {
+      return Status::Error(Err::IN_PROGRESS, "Measurement pending");
+    }
+    _pollStep = PollStep::MEASUREMENT_DATA_READY_COMMAND;
+  }
+
+  if (instructionsRemaining == 0) {
+    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
+  }
+
+  switch (_pollStep) {
+    case PollStep::MEASUREMENT_DATA_READY_COMMAND: {
+      Status st = _writeCommandPoll(cmd::CMD_GET_DATA_READY_STATUS, true);
+      if (st.inProgress()) {
+        return st;
+      }
+      --instructionsRemaining;
+      if (!st.ok()) {
+        _pollStep = PollStep::NONE;
+        _clearMeasurementRequest();
+        if (singleShotPending) {
+          _clearPendingCommand();
+        }
+        _recordAsyncStatus(operation, st);
+        return st;
+      }
+      _pollStep = PollStep::MEASUREMENT_DATA_READY_READ;
+      return Status::Ok();
+    }
+
+    case PollStep::MEASUREMENT_DATA_READY_READ: {
+      uint16_t readyWord = 0;
+      Status st = _readWordsOnlyPoll(&readyWord, 1, true, false);
+      if (st.inProgress()) {
+        return st;
+      }
+      --instructionsRemaining;
+      if (!st.ok()) {
+        _pollStep = PollStep::NONE;
+        _clearMeasurementRequest();
+        if (singleShotPending) {
+          _clearPendingCommand();
+        }
+        _recordAsyncStatus(operation, st);
+        return st;
+      }
+      if (!isDataReady(readyWord)) {
+        _pollStep = PollStep::NONE;
+        _measurementReadyMs = nowMs + _config.dataReadyRetryMs;
+        if (singleShotPending) {
+          _commandReadyMs = _measurementReadyMs;
+        }
+        return Status::Error(Err::IN_PROGRESS, "Measurement not ready");
+      }
+      _pollStep = PollStep::MEASUREMENT_READ_COMMAND;
+      return Status::Ok();
+    }
+
+    case PollStep::MEASUREMENT_READ_COMMAND: {
+      Status st = _writeCommandPoll(cmd::CMD_READ_MEASUREMENT, true);
+      if (st.inProgress()) {
+        return st;
+      }
+      --instructionsRemaining;
+      if (!st.ok()) {
+        _pollStep = PollStep::NONE;
+        _clearMeasurementRequest();
+        if (singleShotPending) {
+          _clearPendingCommand();
+        }
+        _recordAsyncStatus(operation, st);
+        return st;
+      }
+      _pollStep = PollStep::MEASUREMENT_READ_DATA;
+      return Status::Ok();
+    }
+
+    case PollStep::MEASUREMENT_READ_DATA: {
+      uint16_t words[3] = {};
+      Status st = _readWordsOnlyPoll(words, 3, true, true);
+      if (st.inProgress()) {
+        return st;
+      }
+      --instructionsRemaining;
+      if (!st.ok()) {
+        _pollStep = PollStep::NONE;
+        if (st.code == Err::MEASUREMENT_NOT_READY) {
+          _measurementReadyMs = nowMs + _config.dataReadyRetryMs;
+          if (singleShotPending) {
+            _commandReadyMs = _measurementReadyMs;
+          }
+          return Status::Error(Err::IN_PROGRESS, "Measurement not ready");
+        }
+        _clearMeasurementRequest();
+        if (singleShotPending) {
+          _clearPendingCommand();
+        }
+        _recordAsyncStatus(operation, st);
+        return st;
+      }
+
+      RawSample sample = {};
+      sample.rawCo2 = words[0];
+      sample.rawTemperature = words[1];
+      sample.rawHumidity = words[2];
+      _storeSample(sample, _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY);
+      if (singleShotPending) {
+        _clearPendingCommand();
+      }
+      _pollStep = PollStep::NONE;
+      _recordAsyncStatus(operation, Status::Ok());
+      return Status::Ok();
+    }
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid measurement poll state");
+  }
+}
+
+Status SCD41::_pollReadSettings(uint32_t nowMs, uint8_t& instructionsRemaining) {
+  (void)nowMs;
+
+  if (!_settingsReadActive) {
+    return Status::Ok();
+  }
+
+  for (;;) {
+    if (_settingsField == SettingsReadField::DONE) {
+      _settingsReadActive = false;
+      _settingsReady = true;
+      _settingsLiveConfigValid = _settingsAllLiveFieldsRead;
+      _settingsField = SettingsReadField::NONE;
+      _pollStep = PollStep::NONE;
+      return Status::Ok();
+    }
+
+    if (_sensorVariant != SensorVariant::SCD41 &&
+        (_settingsField == SettingsReadField::ASC_TARGET ||
+         _settingsField == SettingsReadField::ASC_INITIAL_PERIOD ||
+         _settingsField == SettingsReadField::ASC_STANDARD_PERIOD)) {
+      _settingsAllLiveFieldsRead = false;
+      if (_settingsField == SettingsReadField::ASC_TARGET) {
+        _settingsField = SettingsReadField::ASC_INITIAL_PERIOD;
+      } else if (_settingsField == SettingsReadField::ASC_INITIAL_PERIOD) {
+        _settingsField = SettingsReadField::ASC_STANDARD_PERIOD;
+      } else {
+        _settingsField = SettingsReadField::DONE;
+      }
+      continue;
+    }
+    break;
+  }
+
+  uint16_t command = 0;
+  switch (_settingsField) {
+    case SettingsReadField::TEMPERATURE_OFFSET:
+      command = cmd::CMD_GET_TEMPERATURE_OFFSET;
+      break;
+    case SettingsReadField::SENSOR_ALTITUDE:
+      command = cmd::CMD_GET_SENSOR_ALTITUDE;
+      break;
+    case SettingsReadField::AMBIENT_PRESSURE:
+      command = cmd::CMD_GET_AMBIENT_PRESSURE;
+      break;
+    case SettingsReadField::ASC_ENABLED:
+      command = cmd::CMD_GET_ASC_ENABLED;
+      break;
+    case SettingsReadField::ASC_TARGET:
+      command = cmd::CMD_GET_ASC_TARGET;
+      break;
+    case SettingsReadField::ASC_INITIAL_PERIOD:
+      command = cmd::CMD_GET_ASC_INITIAL_PERIOD;
+      break;
+    case SettingsReadField::ASC_STANDARD_PERIOD:
+      command = cmd::CMD_GET_ASC_STANDARD_PERIOD;
+      break;
+    case SettingsReadField::NONE:
+    case SettingsReadField::DONE:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid settings poll field");
+  }
+
+  if (instructionsRemaining == 0) {
+    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
+  }
+
+  if (_pollStep == PollStep::SETTINGS_COMMAND) {
+    Status st = _writeCommandPoll(command, true);
+    if (st.inProgress()) {
+      return st;
+    }
+    --instructionsRemaining;
+    if (!st.ok()) {
+      _settingsReadActive = false;
+      _pollStep = PollStep::NONE;
+      _recordAsyncStatus(AsyncOperation::READ_SETTINGS, st);
+      return st;
+    }
+    _pollStep = PollStep::SETTINGS_READ;
+    return Status::Ok();
+  }
+
+  if (_pollStep != PollStep::SETTINGS_READ) {
+    _pollStep = PollStep::SETTINGS_COMMAND;
+    return Status::Error(Err::IN_PROGRESS, "Poll work pending");
+  }
+
+  uint16_t value = 0;
+  Status st = _readWordsOnlyPoll(&value, 1, true, false);
+  if (st.inProgress()) {
+    return st;
+  }
+  --instructionsRemaining;
+  if (!st.ok()) {
+    _settingsReadActive = false;
+    _pollStep = PollStep::NONE;
+    _recordAsyncStatus(AsyncOperation::READ_SETTINGS, st);
+    return st;
+  }
+
+  switch (_settingsField) {
+    case SettingsReadField::TEMPERATURE_OFFSET:
+      _settingsTemperatureOffsetC_x1000 = decodeTemperatureOffsetC_x1000(value);
+      _settingsField = SettingsReadField::SENSOR_ALTITUDE;
+      break;
+    case SettingsReadField::SENSOR_ALTITUDE:
+      _settingsSensorAltitudeM = value;
+      _settingsField = SettingsReadField::AMBIENT_PRESSURE;
+      break;
+    case SettingsReadField::AMBIENT_PRESSURE:
+      _settingsAmbientPressurePa = decodeAmbientPressurePa(value);
+      _settingsField = isPeriodicActive() ? SettingsReadField::DONE
+                                          : SettingsReadField::ASC_ENABLED;
+      break;
+    case SettingsReadField::ASC_ENABLED:
+      _settingsAutomaticSelfCalibrationEnabled = value != 0;
+      _settingsField = SettingsReadField::ASC_TARGET;
+      break;
+    case SettingsReadField::ASC_TARGET:
+      _settingsAutomaticSelfCalibrationTargetPpm = value;
+      _settingsField = SettingsReadField::ASC_INITIAL_PERIOD;
+      break;
+    case SettingsReadField::ASC_INITIAL_PERIOD:
+      _settingsAutomaticSelfCalibrationInitialPeriodHours = value;
+      _settingsField = SettingsReadField::ASC_STANDARD_PERIOD;
+      break;
+    case SettingsReadField::ASC_STANDARD_PERIOD:
+      _settingsAutomaticSelfCalibrationStandardPeriodHours = value;
+      _settingsField = SettingsReadField::DONE;
+      break;
+    case SettingsReadField::NONE:
+    case SettingsReadField::DONE:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid settings poll field");
+  }
+
+  _pollStep = (_settingsField == SettingsReadField::DONE) ? PollStep::NONE
+                                                          : PollStep::SETTINGS_COMMAND;
+  if (_settingsField == SettingsReadField::DONE) {
+    _settingsReadActive = false;
+    _settingsReady = true;
+    _settingsLiveConfigValid = _settingsAllLiveFieldsRead;
+    _settingsField = SettingsReadField::NONE;
+  }
+  return Status::Ok();
+}
+
 bool SCD41::_timeElapsed(uint32_t now, uint32_t target) {
   return static_cast<int32_t>(now - target) >= 0;
+}
+
+bool SCD41::_commandDelayReady() const {
+  if (!_lastCommandValid) {
+    return true;
+  }
+  const uint32_t minDelayUs = static_cast<uint32_t>(_config.commandDelayMs) * 1000U;
+  return (_nowUs() - _lastCommandUs) >= minDelayUs;
 }
 
 bool SCD41::_isI2cFailure(Err code) {

@@ -8,12 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Instruction-budgeted `poll(nowMs, maxInstructions)`, `lastPollStatus()`,
+  and `pollBusy()` APIs for TunnelMonitor-style I2C ownership.
+- Poll-driven `startReadSettings()` / `settingsReady()` live settings refresh
+  path, with cached results available through `getSettings()`.
+- `Err::OFFLINE` for latched driver-offline status instead of overloading
+  ordinary busy/error statuses.
 - ESP-IDF component metadata for building the framework-neutral core with `idf_component_register`.
 - ESP-IDF native bring-up CLI example with an application-owned `i2c_master` bus/device, SCD41 transport callbacks, and command parity with the Arduino CLI.
 - `tools/check_idf_example_contract.py` to guard Arduino/ESP-IDF CLI help, command, raw access, and IDF transport contract parity.
+- `tools/check_clean_consumer_compile.py` to compile a clean consumer translation unit against the source tree or packed library tarball.
 - Safe one-sample `demo` workflow in both Arduino and ESP-IDF CLIs.
 - Framework-neutral private timing/yield shim; real timing is supplied by application callbacks.
 - `docs/IDF_PORT.md` and `docs/IDF_PORT_IMPLEMENTATION.md` with the implemented port structure, validation notes, and remaining hardware checks.
+- `docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md` with API classification, long-command behavior, and TunnelMonitor integration risks.
 
 ### Changed
 - Core timing guard now rejects Arduino and ESP-IDF framework headers in core/public headers and `src/`.
@@ -25,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
 - Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
 - Cached raw/fixed-point/converted sample access now uses an explicit `hasSample` flag rather than inferring cache validity from timestamps or readiness state.
-- `requestMeasurement()` now returns the latched-offline `BUSY` status without scheduling work while the driver is `OFFLINE`.
+- `requestMeasurement()` now returns the latched-offline `OFFLINE` status without scheduling work while the driver is `OFFLINE`.
 - Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
 - Refined the bring-up CLI again to match the mature family behavior more closely: versioned help header, startup/log flow parity, `state` compact-health alias, toggle-style verbose output, more detailed health/error reporting, less noisy unknown-command handling, and a smarter `read` path that prints a ready sample before scheduling another fetch.
 - Extended the bring-up CLI with chip-oriented `status` and cached `sample` / `last` views, plus explicit pending-work and completion summaries for deferred commands such as self-test, FRC, wake-up, stop-periodic, reinit, and factory reset.
@@ -36,7 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
 - Reference documentation now separates compact SCD41 notes from full PDF extraction under `docs/extracted-md/` and `docs/pdf-extracted-md/`.
 - Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
-- Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
+- Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `OFFLINE` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
+- `library.json` now advertises every public `include/SCD41` header, including generated `Version.h`, and uses an explicit package export surface.
 - SCD41-only public APIs and known raw command words now return `UNSUPPORTED`
   on non-SCD41 variants when `strictVariantCheck=false` is used for diagnostics.
 - Arduino and ESP-IDF CLI examples now require confirmation tokens for EEPROM
@@ -58,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `setTemperatureOffsetC(float)` now rejects NaN/infinite input before converting to the fixed-point command word.
+- `begin()` and `probe()` now preserve detailed I2C failure statuses instead of collapsing timeout, bus, and NACK failures to `DEVICE_NOT_FOUND`.
 
 ### Removed
 - Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.

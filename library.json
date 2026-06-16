@@ -48,10 +48,27 @@
     "espressif32"
   ],
   "headers": [
-    "SCD41/SCD41.h"
+    "SCD41/SCD41.h",
+    "SCD41/CommandTable.h",
+    "SCD41/Config.h",
+    "SCD41/Status.h",
+    "SCD41/Version.h"
   ],
   "build": {
     "includeDir": "include",
     "srcDir": "src"
+  },
+  "export": {
+    "include": [
+      "library.json",
+      "README.md",
+      "LICENSE",
+      "CHANGELOG.md",
+      "CMakeLists.txt",
+      "idf_component.yml",
+      "include",
+      "src",
+      "examples"
+    ]
   }
 }

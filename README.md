@@ -31,7 +31,7 @@ The library covers the practical documented SCD41 runtime surface:
 - temperature offset, sensor altitude, and ambient pressure compensation
 - automatic self-calibration enable, target, and period controls
 - forced recalibration, persist settings, reinit, self-test, factory reset, power-down, and wake-up
-- live settings readback via `readSettings()`
+- live settings readback via poll-driven `startReadSettings()` / `getSettings()` or diagnostic `readSettings()`
 - public diagnostic command helpers via `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, and `readWordsCommand()`
 
 ## Driver Model
@@ -39,7 +39,8 @@ The library covers the practical documented SCD41 runtime surface:
 The driver uses a managed asynchronous model:
 
 - `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
-- `tick(nowMs)` advances bounded long-running work such as single-shot completion, periodic-stop settle timing, self-test completion, and forced recalibration completion. Capture its returned `Status` and log non-OK async completion failures.
+- `poll(nowMs, maxInstructions)` advances pending work with an explicit I2C instruction budget. One command write or one read-only response frame consumes one instruction; delay gates consume none and return `IN_PROGRESS`.
+- `tick(nowMs)` is retained for existing applications. It advances legacy async completions, but it is not the instruction-budgeted I2C-owner surface.
 - `requestMeasurement()` schedules work using the current operating mode.
 - `measurementPending()` and `measurementReadyMs()` expose the driver's local sample-fetch state directly, so applications do not need to mirror it with their own shadow flags.
 - `readMeasurement()` is the direct helper for the sensor's `read_measurement` command. It completes a due single-shot request or fetches a ready periodic sample while keeping the cached sample state coherent.
@@ -57,18 +58,27 @@ domain and is used for the 1 ms inter-command guard. `cooperativeYield` is
 optional, but Arduino and RTOS examples provide it so bounded waits can yield to
 the scheduler.
 
-`Status tick(uint32_t nowMs)` is kept as the lifecycle API for existing sketches and
-applications. The driver samples `Config::nowMs` internally during `tick()`, so
-pass values from the same clock domain to `tick()` and `sampleAgeMs()`. Do not
-mix wall time, RTOS ticks, and Arduino `millis()` values in one driver instance.
+`Status poll(uint32_t nowMs, uint8_t maxInstructions = 1)` uses the supplied
+millisecond timestamp for scheduling gates and the configured `nowUs` callback
+for the 1 ms inter-command guard. `Status tick(uint32_t nowMs)` is kept as the
+lifecycle API for existing sketches and applications; it samples
+`Config::nowMs` internally during `tick()`. Keep all timestamps in the same
+clock domain and do not mix wall time, RTOS ticks, and Arduino `millis()` values
+in one driver instance.
 
 ## Async Completion Status
+
+`poll()` returns `IN_PROGRESS` while a delay gate or further I2C instruction is
+pending, and stores the most recent result in `lastPollStatus()`. Transport, CRC,
+and sensor-reported failures from poll-driven completions are returned
+immediately and stored in `lastAsyncStatus()` with the associated
+`lastAsyncOperation()`.
 
 `tick()` returns `Status::Ok()` before initialization, when no async completion
 is due, when due work succeeds, or when a measurement is still legitimately not
 ready and has been rescheduled. Transport, CRC, and sensor-reported failures
-from due completions are returned immediately and stored in `lastAsyncStatus()`
-with the associated `lastAsyncOperation()`.
+from due completions are returned immediately and stored in the same async
+status channel.
 
 Call `clearLastAsyncStatus()` after recording an async failure if your
 application wants to acknowledge it explicitly. A later successful async
@@ -76,9 +86,10 @@ completion also supersedes the previous async status with OK. No-due ticks do
 not clear a previous failure, so a loop cannot erase an error before the
 application inspects it.
 
-Each `tick()` processes at most one due async completion. Pending commands are
-completed before scheduled periodic fetches, so applications should call
-`tick()` regularly from the main loop or task.
+Each `poll()` call consumes at most the supplied I2C instruction budget. Pending
+commands are completed before scheduled periodic fetches, so applications should
+call `poll()` regularly from the main loop or owning I2C task. Legacy `tick()`
+users should still call it regularly from the main loop or task.
 
 ## Thread, ISR, And Recovery Model
 
@@ -86,7 +97,7 @@ completed before scheduled periodic fetches, so applications should call
 - Do not call public driver APIs from ISRs. Use an interrupt only to set an application flag, then call the driver from normal task context.
 - The driver does not perform internal locking. Transport callbacks must not recursively call into the same driver instance, and callback user contexts must outlive driver use.
 - Public APIs may perform I2C and/or bounded command-spacing waits unless explicitly documented as cache-only helpers.
-- `OFFLINE` is latched. Normal public I2C operations return `BUSY` with `Driver is offline; call recover()` and do not touch the bus.
+- `OFFLINE` is latched. Normal public I2C operations return `OFFLINE` with `Driver is offline; call recover()` and do not touch the bus.
 - `probe()` remains a raw diagnostic check and does not update health counters. `recover()` and explicit reset commands such as `startReinit()` and `startFactoryReset()` may access I2C while offline.
 
 ## Important Device Rules
@@ -120,9 +131,9 @@ shared.
 
 The public driver follows the same family conventions as the mature workspace libraries:
 
-- lifecycle: `begin()`, `tick()`, `end()`, `probe()`, `recover()`
+- lifecycle: `begin()`, `tick()`, `poll()`, `end()`, `probe()`, `recover()`
 - measurement flow: `requestMeasurement()`, `measurementPending()`, `measurementReadyMs()`, `readMeasurement()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, `hasSample()`, `hasFreshSample()`, `sampleStale()`, `sensorEpoch()`, `sampleEpoch()`
-- state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`, `totalProtocolFailures()`, `totalCrcFailures()`, `consecutiveProtocolFailures()`, `lastProtocolErrorMs()`, `lastProtocolError()`
+- state and health: `state()`, `driverState()`, `isOnline()`, `isBusy()`, `pollBusy()`, `isPeriodicActive()`, `operatingMode()`, `pendingCommand()`, `commandReadyMs()`, `lastOkMs()`, `lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, `totalSuccess()`, `totalProtocolFailures()`, `totalCrcFailures()`, `consecutiveProtocolFailures()`, `lastProtocolErrorMs()`, `lastProtocolError()`
 - measurement readiness and status: `lastSampleCo2Valid()`, `sampleTimestampMs()`, `sampleAgeMs()`, `missedSamplesEstimate()`, `readDataReadyStatus()`
 - mode control: `setSingleShotMode()`, `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()`, `stopPeriodicMeasurement()`, `powerDown()`, `wakeUp()`
 - mode/query helpers: `getSingleShotMode()`, `getIdentity()`, `readSerialNumber()`, `readSensorVariant()`
@@ -130,7 +141,7 @@ The public driver follows the same family conventions as the mature workspace li
 - compensation/config: `setTemperatureOffsetC()` (finite values only), `setSensorAltitudeM()`, `setAmbientPressurePa()`, ASC getters/setters
 - maintenance: `startPersistSettings()`, `startReinit()`, `startFactoryReset()`, `startSelfTest()`, `getSelfTestResult()`, `getSelfTestRawResult()`, `startForcedRecalibration()`, `getForcedRecalibrationCorrectionPpm()`, `getForcedRecalibrationRawResult()`
 - raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()`
-- snapshots: `getSettings()` for local driver state, including sample freshness/epoch fields, and `readSettings()` for a best-effort state plus live-configuration snapshot
+- snapshots: `getSettings()` for local driver state, including sample freshness/epoch fields, `startReadSettings()` / `settingsReady()` for a poll-driven live refresh, and `readSettings()` for a best-effort diagnostic state plus live-configuration snapshot
 
 `readSettings()` is mode-dependent by design:
 
@@ -175,6 +186,9 @@ Notation:
 | Inline getters, health counters, conversion helpers, `sampleAgeMs()` | cache-only | 0 | none | CPU only |
 | `getSettings()`, `getMeasurement()`, `getLastMeasurement()`, `getRawSample()`, `getCompensatedSample()`, result accessors | local/cache | 0 | none | CPU only |
 | `begin()` | blocking startup | `1W + 1R` | waits `P`, then CRC-checked serial read | `P + Gprev + 2T + RD` |
+| `poll()` before begin or no pending work | poll executor | 0 | none | CPU only |
+| `poll()` pending delay gate | poll executor | 0 | command, conversion, or long-command deadline has not elapsed | returns `IN_PROGRESS`, consumes no I2C instruction |
+| `poll()` due command/write or delayed read frame | poll executor | `1W` or `1R` | consumes one instruction from `maxInstructions`; command-spacing gates return before I2C | `Gprev + T` |
 | `tick()` before begin or no due work | scheduler | 0 | none | CPU only |
 | `tick()` due state-only command (`STOP_PERIODIC`, `POWER_DOWN`, `WAKE_UP`, `PERSIST_SETTINGS`, `REINIT`, `FACTORY_RESET`, `POWER_CYCLE`) | tick-driven completion | 0 | deadline already elapsed | CPU only |
 | `tick()` due self-test or FRC | tick-driven completion | `1R` | reads the result word after the 10 s / 400 ms deadline | `Gprev + T` |
@@ -182,26 +196,34 @@ Notation:
 | `tick()` due measurement, ready | tick-driven completion | `2W + 2R` | data-ready read plus `read_measurement` | `Gprev + 4T + 2RD + D` |
 | `probe()` | diagnostic-only | `1W + 1R` | serial read, or data-ready read in periodic mode; drains post-probe `D` then restores driver spacing state | `Gprev + 2T + RD + D` |
 | `recover()` | manual recovery | 0 to `2W + 2R`, plus optional callbacks | recover backoff; optional app `busReset`; optional app `powerCycle` schedules `P` | up to `Gprev + 4T + 2RD + D + busReset + powerCycle` before scheduled settle |
-| `requestMeasurement()` in idle, `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()` | tick-driven start | `1W` | schedules 5 s or 50 ms execution | start call `Gprev + T`; completion through `tick()` |
-| `requestMeasurement()` in periodic mode | local schedule | 0 | schedules the next fetch deadline | CPU only now; completion through `tick()` |
+| `requestMeasurement()` in idle, `startSingleShotMeasurement()`, `startSingleShotRhtOnlyMeasurement()` | scheduled start | `1W` | schedules 5 s or 50 ms execution | start call `Gprev + T`; completion through `poll()` or legacy `tick()` |
+| `requestMeasurement()` in periodic mode | local schedule | 0 | schedules the next fetch deadline | CPU only now; completion through `poll()` or legacy `tick()` |
 | `readMeasurement()` | mixed | 0, `1W + 1R`, or `2W + 2R` | consumes fresh cache, completes a due single-shot, or probes/fetches periodic data | same as due measurement path |
 | `readDataReadyStatus()`, `readSerialNumber()`, identity/variant cache miss, typed live getters | short read | `1W + 1R` | 1 ms short-command wait plus command spacing | `Gprev + 2T + RD` |
 | offset/altitude/pressure/ASC setters | short write | `1W` | payload write plus 1 ms short-command settle | `Gprev + T + 1 ms` |
 | `startPeriodicMeasurement()`, `startLowPowerPeriodicMeasurement()` | mode start | `1W` | no long settle; periodic sample cadence is 5 s or 30 s | `Gprev + T` |
-| `stopPeriodicMeasurement()` | tick-driven start | `1W` | schedules 500 ms settle before idle-only commands | start call `Gprev + T`; completion through `tick()` |
-| `powerDown()` / `wakeUp()` | tick-driven start | `1W` | power-down schedules 1 ms; wake schedules `P` and accepts precise wake NACK | start call `Gprev + T`; completion through `tick()` |
-| `startPersistSettings()` | EEPROM, tick-driven | `1W` | schedules 800 ms EEPROM settle | start call `Gprev + T`; explicit opt-in only |
-| `startReinit()` | reset epoch, tick-driven | `1W` | schedules 30 ms settle and marks cached samples stale immediately | start call `Gprev + T`; completion through `tick()` |
-| `startFactoryReset()` | destructive reset epoch, tick-driven | `1W` | schedules 1200 ms settle and marks cached samples stale immediately | start call `Gprev + T`; explicit opt-in only |
-| `startSelfTest()` | tick-driven | `1W` | schedules 10 s result read | start call `Gprev + T`; due tick `Gprev + T` |
-| `startForcedRecalibration()` | calibration, tick-driven | `1W` | schedules 400 ms result read | start call `Gprev + T`; due tick `Gprev + T` |
+| `stopPeriodicMeasurement()` | scheduled start | `1W` | schedules 500 ms settle before idle-only commands | start call `Gprev + T`; completion through `poll()` or legacy `tick()` |
+| `powerDown()` / `wakeUp()` | scheduled start | `1W` | power-down schedules 1 ms; wake schedules `P` and accepts precise wake NACK | start call `Gprev + T`; completion through `poll()` or legacy `tick()` |
+| `startPersistSettings()` | EEPROM, scheduled | `1W` | schedules 800 ms EEPROM settle | start call `Gprev + T`; explicit opt-in only |
+| `startReinit()` | reset epoch, scheduled | `1W` | schedules 30 ms settle and marks cached samples stale immediately | start call `Gprev + T`; completion through `poll()` or legacy `tick()` |
+| `startFactoryReset()` | destructive reset epoch, scheduled | `1W` | schedules 1200 ms settle and marks cached samples stale immediately | start call `Gprev + T`; explicit opt-in only |
+| `startSelfTest()` | scheduled | `1W` | schedules 10 s result read | start call `Gprev + T`; due `poll()` read consumes one instruction |
+| `startForcedRecalibration()` | calibration, scheduled | `1W` | schedules 400 ms result read | start call `Gprev + T`; due `poll()` read consumes one instruction |
+| `startReadSettings()` | poll-driven live refresh | 0 | schedules live settings command/read phases | each `poll()` command or read consumes one instruction |
 | `readSettings()` | blocking diagnostic live refresh | periodic: `N=1`; idle common fields: `N=4`; idle SCD41 fields: `N=7` | chained live reads; busy/power-down returns local cache only | `Gprev + 2N*T + N*RD + (N-1)*D` |
 | raw `writeCommand()`, `writeCommandWithData()` | diagnostic write | `1W` | managed/long/stateful commands rejected | `Gprev + T` |
 | raw `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()` | diagnostic read | `1W + 1R` | 1 ms short-command wait plus command spacing; CRC checked for word helpers | `Gprev + 2T + RD` |
 
-Long operations are modeled as bounded start/poll/read flows driven by `tick()` rather than blocking the public call for hundreds of milliseconds or seconds. Short synchronous wait guards also have a finite stalled-timebase escape path, so a broken injected clock/yield hook returns `TIMEOUT` instead of spinning indefinitely.
+Long operations are modeled as bounded start/poll/read flows driven by
+`poll()` for instruction-budgeted owners. `tick()` remains available for legacy
+sketches. Short synchronous wait guards also have a finite stalled-timebase
+escape path, so a broken injected clock/yield hook returns `TIMEOUT` instead of
+spinning indefinitely.
 
-`begin()` remains an explicitly blocking compatibility startup API. `readSettings()` remains an explicitly blocking diagnostic live refresh. Neither is hidden inside the steady-state loop; latency-sensitive applications should call them during controlled startup or diagnostics windows.
+`begin()` remains an explicitly blocking compatibility startup API.
+`readSettings()` remains an explicitly blocking diagnostic live refresh.
+Neither is hidden inside the steady-state loop; latency-sensitive applications
+should call them during controlled startup or diagnostics windows.
 
 ## Conversion Rules
 
@@ -448,6 +470,7 @@ python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
 python -m platformio pkg pack . -o dist
 python tools/check_package_contents.py dist/*.tar.gz
+python tools/check_clean_consumer_compile.py dist/*.tar.gz
 ```
 
 In an ESP-IDF v6.0.1 environment, also build the native IDF example for both
@@ -483,6 +506,7 @@ the manual matrix and optional runner workflow.
 - <a href="docs/IDF_PORT_IMPLEMENTATION.md">docs/IDF_PORT_IMPLEMENTATION.md</a> - implemented IDF component/example notes
 - <a href="docs/SCD41_HARDWARE_VALIDATION.md">docs/SCD41_HARDWARE_VALIDATION.md</a> - opt-in hardware/HIL matrix and evidence rules
 - <a href="docs/SCD41_HARDENING_FINAL_REPORT.md">docs/SCD41_HARDENING_FINAL_REPORT.md</a> - final hardening disposition and release gate
+- <a href="docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md">docs/SCD41_TUNNELMONITOR_AUDIT_REPORT.md</a> - TunnelMonitor hardening audit
 - <a href="docs/SCD41_datasheet.md">docs/SCD41_datasheet.md</a> - datasheet-derived implementation reference
 
 ## License

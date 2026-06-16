@@ -53,7 +53,7 @@ enum class PendingCommand : uint8_t {
   POWER_CYCLE          ///< Waiting for externally initiated power-cycle settle time
 };
 
-/// Last asynchronous operation completed or failed by `tick()`.
+/// Last asynchronous operation completed or failed by `poll()` or `tick()`.
 enum class AsyncOperation : uint8_t {
   NONE = 0,             ///< No async completion has been recorded
   STOP_PERIODIC,        ///< `stop_periodic_measurement` settle completed
@@ -67,7 +67,8 @@ enum class AsyncOperation : uint8_t {
   FACTORY_RESET,        ///< Factory-reset settle completed
   SELF_TEST,            ///< Self-test result completion
   FORCED_RECALIBRATION, ///< Forced recalibration result completion
-  POWER_CYCLE           ///< External power-cycle settle completed
+  POWER_CYCLE,          ///< External power-cycle settle completed
+  READ_SETTINGS         ///< Poll-driven live-settings refresh completion
 };
 
 /// Parsed `get_data_ready_status` response.
@@ -187,6 +188,14 @@ public:
   ///       `Config::nowMs`; pass the same clock domain here and to `sampleAgeMs()`.
   /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
   Status tick(uint32_t nowMs);
+  /// Advance pending poll-driven work using an explicit I2C instruction budget.
+  /// @note One command write or one read-only response frame consumes one instruction.
+  ///       Delay gates and CPU-only state transitions consume zero instructions.
+  /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
+  /// @param maxInstructions Maximum I2C instructions to execute in this call; default is one
+  /// @return OK when no work is pending or work completed, IN_PROGRESS when work remains,
+  ///         otherwise the failing status from the attempted instruction.
+  Status poll(uint32_t nowMs, uint8_t maxInstructions = 1);
   /// Reset the driver to `UNINIT` and clear runtime state.
   void end();
 
@@ -198,6 +207,10 @@ public:
   AsyncOperation lastAsyncOperation() const { return _lastAsyncOperation; }
   /// Clear the async completion status channel back to OK / NONE.
   void clearLastAsyncStatus();
+  /// Most recent status returned by `poll()`.
+  Status lastPollStatus() const { return _lastPollStatus; }
+  /// True while `poll()` has deferred command, measurement, or settings work to advance.
+  bool pollBusy() const;
 
   // =========================================================================
   // Diagnostics
@@ -422,6 +435,12 @@ public:
 
   /// Return a snapshot of local driver state without issuing live I2C reads.
   Status getSettings(SettingsSnapshot& out) const;
+  /// Start a poll-driven live settings refresh.
+  /// @note Idle mode refreshes all supported live fields one command/read phase at a time.
+  ///       Periodic mode refreshes ambient pressure only.
+  Status startReadSettings();
+  /// True when the last poll-driven settings refresh has completed.
+  bool settingsReady() const { return _settingsReady; }
   /// Return a best-effort state and live-configuration snapshot.
   /// @note Blocking diagnostic live refresh. Idle mode issues multiple CRC-checked live reads;
   ///       periodic mode refreshes ambient pressure only; busy/power-down modes return cache only.
@@ -521,6 +540,10 @@ private:
   Status _restoreProbeCommandSpacing(uint32_t savedLastCommandUs, bool savedLastCommandValid,
                                      const Status& probeStatus);
   Status _recordProtocolStatus(const Status& st, bool tracked);
+  Status _writeCommandPoll(uint16_t cmd, bool tracked, bool allowExpectedNack = false);
+  Status _writeCommandWithDataPoll(uint16_t cmd, uint16_t data, bool tracked);
+  Status _readWordsOnlyPoll(uint16_t* values, size_t count, bool tracked,
+                            bool allowNoData = false);
 
   // =========================================================================
   // Command scheduling / health
@@ -537,6 +560,7 @@ private:
   void _clearMeasurementRequest();
   void _clearPendingCommand();
   void _recordAsyncStatus(AsyncOperation operation, const Status& status);
+  Status _recordPollStatus(const Status& status);
   void _setBusyError(Status& st) const;
   void _updatePeriodicMissedSamples(uint32_t nowMs);
   void _advanceSensorEpoch();
@@ -551,6 +575,9 @@ private:
   Status _completeSelfTest();
   Status _completeForcedRecalibration();
   Status _completeMeasurement();
+  Status _pollPendingCommand(uint32_t nowMs, uint8_t& instructionsRemaining);
+  Status _pollMeasurement(uint32_t nowMs, uint8_t& instructionsRemaining);
+  Status _pollReadSettings(uint32_t nowMs, uint8_t& instructionsRemaining);
 
   // =========================================================================
   // Utility helpers
@@ -564,6 +591,7 @@ private:
   static bool _isWordReturningCommand(uint16_t command);
   static bool _isWordPayloadCommand(uint16_t command);
   static bool _isSCD41OnlyCommand(uint16_t command);
+  bool _commandDelayReady() const;
 
   uint32_t _nowMs() const;
   uint32_t _nowUs() const;
@@ -575,6 +603,29 @@ private:
   Status _validateRawCommand(uint16_t command) const;
   static bool _isPeriodicAllowedCommand(uint16_t command);
   static bool _isManagedOnlyRawCommand(uint16_t command);
+
+  enum class PollStep : uint8_t {
+    NONE,
+    MEASUREMENT_DATA_READY_COMMAND,
+    MEASUREMENT_DATA_READY_READ,
+    MEASUREMENT_READ_COMMAND,
+    MEASUREMENT_READ_DATA,
+    PENDING_RESULT_READ,
+    SETTINGS_COMMAND,
+    SETTINGS_READ
+  };
+
+  enum class SettingsReadField : uint8_t {
+    NONE,
+    TEMPERATURE_OFFSET,
+    SENSOR_ALTITUDE,
+    AMBIENT_PRESSURE,
+    ASC_ENABLED,
+    ASC_TARGET,
+    ASC_INITIAL_PERIOD,
+    ASC_STANDARD_PERIOD,
+    DONE
+  };
 
   // =========================================================================
   // State
@@ -601,6 +652,8 @@ private:
   bool _allowOfflineI2c = false;
   Status _lastAsyncStatus = Status::Ok();
   AsyncOperation _lastAsyncOperation = AsyncOperation::NONE;
+  Status _lastPollStatus = Status::Ok();
+  PollStep _pollStep = PollStep::NONE;
 
   uint32_t _lastCommandUs = 0;
   bool _lastCommandValid = false;
@@ -636,6 +689,19 @@ private:
   Status _forcedRecalibrationStatus =
       Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration not started");
   bool _forcedRecalibrationCompleted = false;
+
+  bool _settingsReadActive = false;
+  bool _settingsReady = false;
+  bool _settingsLiveConfigValid = false;
+  bool _settingsAllLiveFieldsRead = false;
+  SettingsReadField _settingsField = SettingsReadField::NONE;
+  int32_t _settingsTemperatureOffsetC_x1000 = 0;
+  uint16_t _settingsSensorAltitudeM = 0;
+  uint32_t _settingsAmbientPressurePa = 0;
+  bool _settingsAutomaticSelfCalibrationEnabled = false;
+  uint16_t _settingsAutomaticSelfCalibrationTargetPpm = 0;
+  uint16_t _settingsAutomaticSelfCalibrationInitialPeriodHours = 0;
+  uint16_t _settingsAutomaticSelfCalibrationStandardPeriodHours = 0;
 
   uint32_t _lastRecoverMs = 0;
   bool _lastRecoverValid = false;

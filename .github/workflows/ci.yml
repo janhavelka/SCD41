@@ -125,6 +125,9 @@ jobs:
       - name: Verify package contents
         run: python tools/check_package_contents.py dist/*.tar.gz
 
+      - name: Compile clean package consumer
+        run: python tools/check_clean_consumer_compile.py dist/*.tar.gz
+
   esp-idf-build:
     runs-on: ubuntu-latest
     strategy:

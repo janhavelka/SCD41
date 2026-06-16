@@ -26,7 +26,8 @@ enum class Err : uint8_t {
   I2C_NACK_DATA,          ///< I2C NACK on data
   I2C_NACK_READ,          ///< I2C NACK on read header / no data
   I2C_TIMEOUT,            ///< I2C transaction timeout
-  I2C_BUS                 ///< I2C bus error (SDA stuck, arbitration, etc.)
+  I2C_BUS,                ///< I2C bus error (SDA stuck, arbitration, etc.)
+  OFFLINE                 ///< Driver is latched offline until recovery succeeds
 };
 
 /// Status structure returned by all fallible operations.
