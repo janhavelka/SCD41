@@ -19,14 +19,98 @@ is not a replacement for the vendor datasheet.
 | Operating range | -10 C to 60 C, 0 %RH to 95 %RH non-condensing |
 | CO2 output range | 0 ppm to 40000 ppm |
 | Variant ID | Serial-number word 0 bits `[15:12]`; SCD41 is `0x1` |
+| Package | LGA SMD, 10.1 mm x 10.1 mm x 6.5 mm, about 0.6 g |
+
+Variant encodings observed through the serial-number word:
+
+| Variant | ID bits `[15:12]` | Notes |
+| --- | --- | --- |
+| SCD40 | `0x0` | Periodic CO2/T/RH, no SCD41-only low-power or single-shot commands |
+| SCD41 | `0x1` | Target device for this library |
+| SCD42 | `0x2` | Not targeted by this library |
+| SCD43 | `0x5` | Not targeted by this library |
 
 Recommended board design:
 
 - Place 100 nF near VDD/GND.
 - Add bulk capacitance on the sensor rail; the measurement pulse can exceed
   175 mA.
+- Keep the unloaded supply ripple below 30 mV peak-to-peak.
 - Keep pullups, pin choice, clock speed, rail switching, and reset circuitry
   owned by the application or board layer.
+
+## Performance Summary
+
+Default conditions are 25 C, 50 %RH, 1013 mbar, periodic measurement, and
+3.3 V supply unless stated otherwise.
+
+| Signal | Range / Condition | Typical Specification |
+| --- | --- | --- |
+| CO2 output | representable output | 0 ppm to 40000 ppm |
+| SCD41 CO2 accuracy | 400 ppm to 1000 ppm | +/-(50 ppm + 2.5% of reading) |
+| SCD41 CO2 accuracy | 1001 ppm to 2000 ppm | +/-(50 ppm + 3% of reading) |
+| SCD41 CO2 accuracy | 2001 ppm to 5000 ppm | +/-(40 ppm + 5% of reading) |
+| CO2 repeatability | typical | +/-10 ppm |
+| CO2 response time | tau63, typical | 60 s |
+| Humidity | full range | 0 %RH to 100 %RH |
+| Humidity accuracy | 15 C to 35 C, 20 %RH to 65 %RH | +/-6 %RH |
+| Humidity accuracy | -10 C to 60 C, 0 %RH to 100 %RH | +/-9 %RH |
+| Humidity repeatability / drift | typical | +/-0.4 %RH, <0.25 %RH/year |
+| Temperature | full range | -10 C to 60 C |
+| Temperature accuracy | 15 C to 35 C | +/-0.8 C |
+| Temperature accuracy | -10 C to 60 C | +/-1.5 C |
+| Temperature repeatability / drift | typical | +/-0.1 C, <0.03 C/year |
+
+CO2 exposure below 400 ppm can affect accuracy when ASC is enabled. Rough
+handling, shipping, and assembly can temporarily affect accuracy; FRC or ASC can
+restore accuracy after the post-assembly stabilization period.
+
+## Interface, Electrical, And Handling Notes
+
+| LGA signal | Meaning |
+| --- | --- |
+| `VDD` | Sensor supply voltage |
+| `VDDH` | IR source supply; connect to `VDD` close to the sensor |
+| `GND` | Ground |
+| `SDA` | I2C serial data, bidirectional |
+| `SCL` | I2C serial clock |
+| `DNC` | Do not connect; solder to floating pads only |
+
+There is no dedicated interrupt/data-ready pin. Data readiness is checked
+through `get_data_ready_status`.
+
+| Electrical item | Value |
+| --- | --- |
+| Supply voltage | 2.4 V to 5.5 V |
+| Peak current at 3.3 V | 175 mA typical, 205 mA max |
+| Peak current at 5.0 V | 115 mA typical, 137 mA max |
+| Average current, periodic 5 s, 3.3 V | 15 mA typical, 18 mA max |
+| Average current, low-power 30 s, 3.3 V | 3.2 mA typical, 3.5 mA max |
+| Average current, single-shot 5 min, 3.3 V | 0.45 mA typical, 0.5 mA max |
+| Input high | at least `0.65 * VDD` |
+| Input low | at most `0.3 * VDD` |
+| Output low | at most 0.66 V at 3 mA sink |
+| SCL clock | 0 kHz to 400 kHz |
+
+Absolute and handling limits to preserve in board/application docs:
+
+- VDD absolute maximum: -0.3 V to 6.0 V.
+- SDA/SCL/GND voltage: -0.3 V to `VDD + 0.3 V`.
+- SDA/SCL/GND input current: -280 mA to 100 mA.
+- Short-term storage: -40 C to 70 C; recommended storage: 10 C to 50 C.
+- ESD: 2 kV HBM, 500 V CDM.
+- MSL level: 3. Treat open bags according to MSL3 floor-life and baking rules.
+- Expected lifetime is greater than 10 years under typical indoor conditions.
+- Device is REACH/RoHS compliant.
+
+Mechanical and assembly notes:
+
+- The notched protection-membrane corner marks pin 1.
+- Do not remove, wet, or tamper with the white protection membrane.
+- The device is not compatible with vapor phase reflow.
+- Do not add extra flux, reflow more than once, or run board wash after reflow.
+- Reflow peak must not exceed 245 C anywhere in the sensor; temporary CO2
+  accuracy deviation after reflow can recover after up to five days.
 
 ## I2C Framing
 
@@ -55,6 +139,10 @@ Many reads are split by design: write the command, wait the command execution
 time, then perform a read with no repeated command bytes. Do not collapse those
 into a combined transaction unless the driver explicitly asks for one.
 
+Commands must not be sent while a preceding command is still being processed.
+For read or send-command-and-fetch-result sequences, wait the documented
+execution time before issuing the read header.
+
 ## CRC
 
 Every returned 16-bit word must be CRC-checked. Every written 16-bit payload
@@ -69,6 +157,9 @@ word must carry the matching CRC byte.
 | Final XOR | `0x00` |
 
 CRC is computed over the two data bytes of each word.
+
+Command words are not followed by CRC. The vendor CRC example gives
+`CRC(0xBEEF) == 0x92`; keep this vector in tests when CRC helpers change.
 
 ## Timing Rules
 
@@ -115,6 +206,15 @@ first stopping measurement:
 `stop_periodic_measurement` requires the full 500 ms settle window before
 idle-only commands are issued.
 
+`read_measurement` can read out each sample only once per signal update
+interval; the sensor empties the buffer on readout. If no data is available,
+the sensor can NACK the read. Poll `get_data_ready_status` first when the
+application wants to avoid no-data NACKs.
+
+For power-cycled single-shot operation, discard the first single-shot CO2 value
+after startup to maximize accuracy. Averaging several single-shot measurements
+can reduce noise. ASC is not available for power-cycled single-shot operation.
+
 ## Data-Ready And Conversion
 
 `get_data_ready_status` returns one CRC-protected word. Data is ready when:
@@ -144,6 +244,18 @@ Temperature offset command encoding uses the datasheet scale:
 raw_offset = offset_C * 65535 / 175
 offset_C   = raw_offset * 175 / 65535
 ```
+
+Compensation ranges and effects:
+
+| Setting | Range / Default | Notes |
+| --- | --- | --- |
+| Temperature offset | recommended 0 C to 20 C, default 4 C | Improves RH/T output; does not affect CO2 accuracy |
+| Sensor altitude | 0 m to 3000 m, default 0 m | Idle-only setting; persist if it must survive power cycle |
+| Ambient pressure | 70000 Pa to 120000 Pa, default 101300 Pa | May be set/read during periodic measurement; overrides altitude compensation |
+
+Pressure or altitude compensation improves CO2 accuracy across pressure
+changes. Determine temperature offset in the final device under typical thermal
+conditions and airflow.
 
 ## Command Summary
 
@@ -183,10 +295,26 @@ offset_C   = raw_offset * 175 / 65535
 - Automatic self-calibration (ASC) is enabled by default and assumes regular
   exposure to fresh-air CO2 near the configured target.
 - Forced recalibration requires a stable known reference concentration.
+- FRC should be performed in the operation mode later used by the application
+  after at least 3 minutes in a homogeneous, stable CO2 concentration and at the
+  intended application voltage. Stop periodic measurement and wait 500 ms before
+  issuing the FRC command.
+- FRC returns `word[0] - 0x8000` as the correction in ppm, or `0xFFFF` when FRC
+  failed.
+- Self-test returns `0x0000` when no malfunction is detected; any nonzero word
+  indicates a malfunction.
+- ASC initial period defaults to 44 h. ASC standard period defaults to 156 h.
+  Both are integer multiples of 4 h; an initial period of 0 h requests immediate
+  correction. The period guidance assumes about a 5 minute average single-shot
+  interval and should be scaled for other intervals.
 - `persist_settings` writes EEPROM. It must never run implicitly from examples,
   diagnostics, or normal telemetry loops.
+- EEPROM-backed configuration storage is rated for at least 2000 write cycles.
+  FRC/ASC history is stored separately for the specified sensor lifetime.
 - `factory_reset` changes persisted calibration/settings state and must require
   explicit operator confirmation.
+- `reinit` reloads user settings from EEPROM. If it does not trigger the desired
+  reinitialization, apply an application-controlled power cycle.
 - Destructive or EEPROM-backed commands belong in opt-in workflows with
   transcripts, not safe smoke tests.
 
