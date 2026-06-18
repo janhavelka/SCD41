@@ -372,22 +372,30 @@ public:
   Status getAmbientPressurePa(uint32_t& out);
 
   /// Enable or disable automatic self calibration.
+  /// @warning Calibration-maintenance setting. Keep changes explicit and
+  ///          application-policy controlled, not part of normal diagnostics.
   Status setAutomaticSelfCalibrationEnabled(bool enabled);
   /// Read the automatic-self-calibration enable state.
   Status getAutomaticSelfCalibrationEnabled(bool& enabled);
   /// Set the automatic-self-calibration target concentration in ppm.
+  /// @warning Calibration-maintenance setting. Keep changes explicit and
+  ///          application-policy controlled, not part of normal diagnostics.
   /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationTargetPpm(uint16_t ppm);
   /// Read the automatic-self-calibration target concentration in ppm.
   /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status getAutomaticSelfCalibrationTargetPpm(uint16_t& out);
   /// Set the ASC initial period in hours.
+  /// @warning Calibration-maintenance setting. Keep changes explicit and
+  ///          application-policy controlled, not part of normal diagnostics.
   /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationInitialPeriodHours(uint16_t hours);
   /// Read the ASC initial period in hours.
   /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status getAutomaticSelfCalibrationInitialPeriodHours(uint16_t& out);
   /// Set the ASC standard period in hours.
+  /// @warning Calibration-maintenance setting. Keep changes explicit and
+  ///          application-policy controlled, not part of normal diagnostics.
   /// @return UNSUPPORTED when the observed variant is not SCD41.
   Status setAutomaticSelfCalibrationStandardPeriodHours(uint16_t hours);
   /// Read the ASC standard period in hours.
@@ -422,6 +430,8 @@ public:
 
   /// Start forced recalibration with a reference concentration in ppm.
   /// @note Tick-driven command: `tick()` reads the result when due.
+  /// @warning Calibration-maintenance command. Keep application and diagnostic entry
+  ///          points explicit and operator-confirmed.
   Status startForcedRecalibration(uint16_t referencePpm);
   bool forcedRecalibrationReady() const { return _forcedRecalibrationCompleted; } ///< True after FRC completion has been processed
   /// Return the interpreted forced-recalibration correction in ppm.
@@ -535,6 +545,7 @@ private:
   Status _readWord(uint16_t cmd, uint16_t& value, bool tracked);
   Status _readWords(uint16_t cmd, uint16_t* values, size_t count, bool tracked);
   Status _readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData = false);
+  Status _readSerialNumberUnchecked(uint64_t& serial, bool tracked);
   Status _readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData);
   Status _readCommandRawBytes(uint16_t command, uint8_t* out, size_t len, bool unsafeRawBytes);
   Status _restoreProbeCommandSpacing(uint32_t savedLastCommandUs, bool savedLastCommandValid,
@@ -572,6 +583,7 @@ private:
   // =========================================================================
 
   Status _handlePendingCommand(uint32_t nowMs);
+  Status _verifySensorAfterRecovery();
   Status _completeSelfTest();
   Status _completeForcedRecalibration();
   Status _completeMeasurement();

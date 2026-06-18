@@ -35,6 +35,10 @@ The runner requires `pyserial`. It runs safe commands by default and writes raw
 transcript plus JSON/Markdown summaries. A passing runner result is evidence
 only for that connected hardware and environment.
 
+This repository keeps the concrete entry point named
+`tools/scd41_hil_runner.py` because the sequence is SCD41-specific, including
+SCD41 timing, maintenance, and destructive-command safeguards.
+
 ## Safe Smoke Sequence
 
 Safe smoke tests must not write EEPROM, factory-reset calibration, or run forced

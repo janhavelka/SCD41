@@ -29,6 +29,9 @@ jobs:
       - name: Enforce ESP-IDF example contract
         run: python tools/check_idf_example_contract.py
 
+      - name: Test HIL runner parser helpers
+        run: python tools/test_scd41_hil_runner.py
+
   native-tests:
     runs-on: ubuntu-latest
     steps:

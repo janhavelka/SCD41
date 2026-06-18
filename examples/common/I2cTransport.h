@@ -18,7 +18,9 @@ using app_driver::Err;
 using app_driver::Status;
 
 inline bool initWire(int sda, int scl, uint32_t freqHz, uint32_t timeoutMs) {
-  Wire.begin(sda, scl);
+  if (!Wire.begin(sda, scl)) {
+    return false;
+  }
   Wire.setClock(freqHz);
   Wire.setTimeOut(timeoutMs);
   return true;
@@ -26,11 +28,12 @@ inline bool initWire(int sda, int scl, uint32_t freqHz, uint32_t timeoutMs) {
 
 inline Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
                         uint32_t timeoutMs, void* user) {
-  (void)timeoutMs;
-
   TwoWire* wire = static_cast<TwoWire*>(user);
   if (wire == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "Wire instance is null");
+  }
+  if (timeoutMs > 0U) {
+    wire->setTimeOut(timeoutMs);
   }
 
   wire->beginTransmission(addr);
@@ -58,11 +61,12 @@ inline Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
 inline Status wireWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
                             uint8_t* rxData, size_t rxLen,
                             uint32_t timeoutMs, void* user) {
-  (void)timeoutMs;
-
   TwoWire* wire = static_cast<TwoWire*>(user);
   if (wire == nullptr) {
     return Status::Error(Err::INVALID_CONFIG, "Wire instance is null");
+  }
+  if (timeoutMs > 0U) {
+    wire->setTimeOut(timeoutMs);
   }
 
   if (txLen > 0U) {

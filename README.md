@@ -143,6 +143,10 @@ The public driver follows the same family conventions as the mature workspace li
 - raw command access: `writeCommand()`, `writeCommandWithData()`, `readCommand()`, `readCommandUnsafe()`, `readWordCommand()`, `readWordsCommand()`
 - snapshots: `getSettings()` for local driver state, including sample freshness/epoch fields, `startReadSettings()` / `settingsReady()` for a poll-driven live refresh, and `readSettings()` for a best-effort diagnostic state plus live-configuration snapshot
 
+Factory reset, forced recalibration, ASC changes, and EEPROM-backed persistence
+are maintenance/calibration actions. They are not normal telemetry or diagnostic
+paths; keep them explicit and operator- or application-policy controlled.
+
 `readSettings()` is mode-dependent by design:
 
 - in idle mode it reads the live device configuration fields
@@ -465,6 +469,7 @@ python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
+python tools/test_scd41_hil_runner.py
 python -m platformio test -e native
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev

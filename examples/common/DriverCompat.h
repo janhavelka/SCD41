@@ -57,6 +57,7 @@ inline const char* errToString(Err err) {
     case Err::I2C_NACK_READ: return "I2C_NACK_READ";
     case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case Err::I2C_BUS: return "I2C_BUS";
+    case Err::OFFLINE: return "OFFLINE";
     default: return "UNKNOWN";
   }
 }

@@ -9,9 +9,28 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 
 DESTRUCTIVE_CONFIRMATION = "I understand EEPROM and calibration risk"
+MINIMUM_SAFE_COMMANDS = ("version", "scan", "probe", "settings")
+HEALTH_COMMAND_ALIASES = ("health", "drv", "state")
+
+SERIAL_NUMBER_RE = re.compile(
+    r"\bserial(?:_number)?\s*[:=]\s*(?:0x)?([0-9A-Fa-f]{12})\b",
+    re.IGNORECASE,
+)
+FAILURE_TOKEN_RE = re.compile(
+    r"\b("
+    r"NOT_INITIALIZED|INVALID_CONFIG|INVALID_PARAM|CRC_MISMATCH|"
+    r"DEVICE_NOT_FOUND|OFFLINE|I2C_ERROR|I2C_NACK_ADDR|I2C_NACK_DATA|"
+    r"I2C_NACK_READ|I2C_TIMEOUT|I2C_BUS|COMMAND_FAILED|UNSUPPORTED|"
+    r"TIMEOUT|FAILED|FAILURE"
+    r")\b",
+    re.IGNORECASE,
+)
+DIAGNOSTIC_FAILURE_RE = re.compile(r"\bfail\s*=\s*([1-9][0-9]*)\b", re.IGNORECASE)
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
 @dataclass(frozen=True)
@@ -26,12 +45,15 @@ class Step:
 
 SAFE_STEPS: tuple[Step, ...] = (
     Step("help surface", "help", r"SCD41 CLI Help|Common"),
-    Step("i2c scan", "scan", r"0x62|SCD41|found|FOUND|device", timeout_s=12.0),
+    Step("version", "version", r"SCD41|[Vv]ersion"),
+    Step("i2c scan", "scan", r"Found device at 0x62", timeout_s=12.0),
     Step("begin", "begin", r"OK|initialized|Device initialized", timeout_s=12.0),
+    Step("probe diagnostic", "probe", r"OK|Status|SCD41|found", timeout_s=12.0),
     Step("serial", "serial", r"serial=0x[0-9A-Fa-f]{12}"),
     Step("variant", "variant", r"variant=SCD41"),
+    Step("settings", "settings", r"Settings|snapshot|ASC|offset|altitude", timeout_s=12.0),
     Step("dataready idle", "dataready", r"data_ready=(yes|no)|Status:"),
-    Step("diagnostics", "diag", r"Diagnostics:.*fail=.*0|Diagnostics:", timeout_s=15.0),
+    Step("diagnostics", "diag", r"Diagnostics:.*fail=\D*0\D", timeout_s=15.0),
     Step("periodic start", "periodic on", r"IN_PROGRESS|OK|Status:"),
     Step("periodic first sample", "read", r"Sample:|CO2=|MEASUREMENT_NOT_READY|pending", timeout_s=15.0, settle_s=6.0),
     Step("periodic cached sample", "sample", r"Sample:|CO2=|has_sample"),
@@ -48,7 +70,7 @@ SAFE_STEPS: tuple[Step, ...] = (
     Step("wake", "wake", r"IN_PROGRESS|OK|pending", timeout_s=8.0, settle_s=1.0),
     Step("serial after wake", "serial", r"serial=0x[0-9A-Fa-f]{12}", timeout_s=12.0),
     Step("recover", "recover", r"OK|IN_PROGRESS|Status:", timeout_s=12.0),
-    Step("final driver health", "drv", r"State:|Driver|READY|DEGRADED|OFFLINE", timeout_s=12.0),
+    Step("final driver health", "drv", r"READY", timeout_s=12.0),
 )
 
 
@@ -65,7 +87,7 @@ class RunnerError(RuntimeError):
     pass
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Optional SCD41 serial HIL runner. Does not fake hardware results."
     )
@@ -81,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--skip-safe", action="store_true", help="Run only destructive steps")
     parser.add_argument("--settle-before", type=float, default=2.0, help="Initial serial settle time")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def load_serial_module():
@@ -94,6 +116,70 @@ def load_serial_module():
 
 def timestamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def strip_ansi(text: str) -> str:
+    return ANSI_ESCAPE_RE.sub("", text)
+
+
+def parse_serial_number(text: str) -> Optional[str]:
+    match = SERIAL_NUMBER_RE.search(text)
+    if match is None:
+        return None
+    return match.group(1).upper()
+
+
+def classify_failure_tokens(text: str) -> tuple[str, ...]:
+    clean = strip_ansi(text)
+    tokens: list[str] = []
+    for match in FAILURE_TOKEN_RE.finditer(clean):
+        token = match.group(1).upper()
+        if token not in tokens:
+            tokens.append(token)
+    if DIAGNOSTIC_FAILURE_RE.search(clean) and "FAIL_COUNT" not in tokens:
+        tokens.append("FAIL_COUNT")
+    return tuple(tokens)
+
+
+def destructive_confirmation_valid(include_destructive: bool, confirmation: str) -> bool:
+    return (not include_destructive) or confirmation == DESTRUCTIVE_CONFIRMATION
+
+
+def step_output_matches(step: Step, output: str) -> bool:
+    return re.search(step.expect, output, re.IGNORECASE | re.DOTALL) is not None
+
+
+def step_passed(matched: bool, output: str) -> bool:
+    return matched and not classify_failure_tokens(output)
+
+
+def _command_from_step(step: Step) -> str:
+    return step.command.strip().split()[0]
+
+
+def missing_minimum_safe_steps(steps: tuple[Step, ...]) -> tuple[str, ...]:
+    commands = {_command_from_step(step) for step in steps}
+    missing = [command for command in MINIMUM_SAFE_COMMANDS if command not in commands]
+    if not any(command in commands for command in HEALTH_COMMAND_ALIASES):
+        missing.append("health|drv|state")
+    return tuple(missing)
+
+
+def help_mentions_command(help_text: str, command: str) -> bool:
+    clean = strip_ansi(help_text)
+    pattern = rf"(^|\n)\s*{re.escape(command)}(?:\s|/|$)"
+    return re.search(pattern, clean, re.IGNORECASE) is not None
+
+
+def missing_minimum_help_commands(help_text: str) -> tuple[str, ...]:
+    missing = [
+        command
+        for command in MINIMUM_SAFE_COMMANDS
+        if not help_mentions_command(help_text, command)
+    ]
+    if not any(help_mentions_command(help_text, command) for command in HEALTH_COMMAND_ALIASES):
+        missing.append("health|drv|state")
+    return tuple(missing)
 
 
 def read_until_match(ser, pattern: re.Pattern[str], timeout_s: float, transcript: list[str]) -> tuple[bool, str]:
@@ -123,14 +209,16 @@ def run_step(ser, step: Step, transcript: list[str]) -> dict[str, object]:
     started = time.monotonic()
     matched, output = read_until_match(ser, re.compile(step.expect, re.DOTALL), step.timeout_s, transcript)
     elapsed_s = time.monotonic() - started
+    passed = step_passed(matched, output)
     return {
         "name": step.name,
         "command": step.command,
         "destructive": step.destructive,
         "expect": step.expect,
         "matched": matched,
+        "failure_tokens": list(classify_failure_tokens(output)),
         "elapsed_s": round(elapsed_s, 3),
-        "status": "pass" if matched else "fail",
+        "status": "pass" if passed else "fail",
         "last_output": output[-1200:],
     }
 
@@ -165,9 +253,15 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
 
 def main() -> int:
     args = parse_args()
-    if args.include_destructive and args.confirm_destructive != DESTRUCTIVE_CONFIRMATION:
+    if not destructive_confirmation_valid(args.include_destructive, args.confirm_destructive):
         print("Destructive HIL steps refused: confirmation phrase does not match.")
         print(f"Required: {DESTRUCTIVE_CONFIRMATION}")
+        return 2
+
+    missing_safe_steps = missing_minimum_safe_steps(SAFE_STEPS)
+    if missing_safe_steps:
+        print("SCD41 HIL runner safe-step contract is incomplete:")
+        print(", ".join(missing_safe_steps))
         return 2
 
     try:

@@ -9,6 +9,8 @@ import tarfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 REQUIRED_PACKAGE_PATHS = (
+    "CMakeLists.txt",
+    "idf_component.yml",
     "library.json",
     "README.md",
     "LICENSE",
@@ -26,6 +28,16 @@ REQUIRED_PACKAGE_PATHS = (
     "include/SCD41/CommandTable.h",
     "src/SCD41.cpp",
     "src/PlatformTime.h",
+    "examples/01_basic_bringup_cli/main.cpp",
+    "examples/common/BoardConfig.h",
+    "examples/common/CommandHandler.h",
+    "examples/common/I2cTransport.h",
+    "examples/common/TransportAdapter.h",
+    "examples/idf/basic/CMakeLists.txt",
+    "examples/idf/basic/main/CMakeLists.txt",
+    "examples/idf/basic/main/IdfI2cTransport.cpp",
+    "examples/idf/basic/main/IdfI2cTransport.h",
+    "examples/idf/basic/main/main.cpp",
 )
 
 FORBIDDEN_PACKAGE_PATHS = (
