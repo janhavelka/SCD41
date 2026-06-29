@@ -32,6 +32,11 @@ jobs:
       - name: Test HIL runner parser helpers
         run: python tools/test_scd41_hil_runner.py
 
+      - name: Exercise HIL runner no-hardware entry points
+        run: |
+          python tools/scd41_hil_runner.py --parser-self-test
+          python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
+
   native-tests:
     runs-on: ubuntu-latest
     steps:
@@ -123,7 +128,7 @@ jobs:
       - name: Build package tarball
         run: |
           mkdir -p dist
-          python -m platformio pkg pack . -o dist
+          python -m platformio pkg pack . -o dist/SCD41-package.tar.gz
 
       - name: Verify package contents
         run: python tools/check_package_contents.py dist/*.tar.gz

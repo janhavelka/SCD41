@@ -191,6 +191,8 @@ public:
   /// Advance pending poll-driven work using an explicit I2C instruction budget.
   /// @note One command write or one read-only response frame consumes one instruction.
   ///       Delay gates and CPU-only state transitions consume zero instructions.
+  /// @note The `nowMs` argument is retained for source compatibility. Scheduling uses
+  ///       `Config::nowMs`; pass the same clock domain here and to `sampleAgeMs()`.
   /// @param nowMs Current monotonic timestamp in milliseconds from the configured clock domain
   /// @param maxInstructions Maximum I2C instructions to execute in this call; default is one
   /// @return OK when no work is pending or work completed, IN_PROGRESS when work remains,

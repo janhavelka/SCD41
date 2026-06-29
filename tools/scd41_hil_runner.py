@@ -8,13 +8,15 @@ import pathlib
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 
 DESTRUCTIVE_CONFIRMATION = "I understand EEPROM and calibration risk"
 MINIMUM_SAFE_COMMANDS = ("version", "scan", "probe", "settings")
 HEALTH_COMMAND_ALIASES = ("health", "drv", "state")
+MAX_STRESS_COUNT = 100000
+DEFAULT_IDLE_TIMEOUT_S = 2.0
 
 SERIAL_NUMBER_RE = re.compile(
     r"\bserial(?:_number)?\s*[:=]\s*(?:0x)?([0-9A-Fa-f]{12})\b",
@@ -29,8 +31,9 @@ FAILURE_TOKEN_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-DIAGNOSTIC_FAILURE_RE = re.compile(r"\bfail\s*=\s*([1-9][0-9]*)\b", re.IGNORECASE)
 ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
+DIAGNOSTIC_FAILURE_RE = re.compile(r"\bfail\s*=\s*([1-9][0-9]*)\b", re.IGNORECASE)
+STRESS_ERROR_RE = re.compile(r"\b(?:Errors:|errors=)\s*([1-9][0-9]*)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -91,10 +94,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Optional SCD41 serial HIL runner. Does not fake hardware results."
     )
-    parser.add_argument("--port", required=True, help="Serial port, for example COM7 or /dev/ttyUSB0")
+    parser.add_argument("--port", default="", help="Serial port, for example COM8 or /dev/ttyUSB0")
     parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate")
     parser.add_argument("--output-dir", default="hil-results", help="Directory for transcript and summaries")
+    parser.add_argument("--board", default="NOT_RECORDED", help="Board type/revision for the run metadata")
+    parser.add_argument("--fixture", default="NOT_RECORDED", help="Sensor fixture, wiring, supply, and pullup notes")
+    parser.add_argument("--operator", default="NOT_RECORDED", help="Operator name or initials for the run metadata")
     parser.add_argument("--read-timeout", type=float, default=0.1, help="Per-read serial timeout in seconds")
+    parser.add_argument("--timeout-s", type=float, default=None, help="Override every step timeout in seconds")
+    parser.add_argument(
+        "--idle-timeout-s",
+        type=float,
+        default=DEFAULT_IDLE_TIMEOUT_S,
+        help="Fail a step after this many seconds without serial data",
+    )
     parser.add_argument("--include-destructive", action="store_true", help="Enable EEPROM/calibration destructive steps")
     parser.add_argument(
         "--confirm-destructive",
@@ -102,8 +115,41 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=f"Required exact phrase for destructive steps: {DESTRUCTIVE_CONFIRMATION!r}",
     )
     parser.add_argument("--skip-safe", action="store_true", help="Run only destructive steps")
-    parser.add_argument("--settle-before", type=float, default=2.0, help="Initial serial settle time")
+    parser.add_argument(
+        "--boot-settle-s",
+        "--settle-before",
+        dest="settle_before",
+        type=float,
+        default=2.0,
+        help="Initial serial boot/reset settle time",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Print matched output excerpts and failure tokens")
+    parser.add_argument("--dry-run", action="store_true", help="Write a NOT RUN plan without opening serial")
+    parser.add_argument("--parser-self-test", action="store_true", help="Run parser checks and exit without serial")
+    parser.add_argument(
+        "--stress-count",
+        type=int,
+        default=0,
+        help=f"Append bounded CLI stress command with count 1..{MAX_STRESS_COUNT}",
+    )
     return parser.parse_args(argv)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise RunnerError(message)
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    if args.timeout_s is not None:
+        require(args.timeout_s > 0.0, "--timeout-s must be > 0")
+    require(args.read_timeout > 0.0, "--read-timeout must be > 0")
+    require(args.idle_timeout_s > 0.0, "--idle-timeout-s must be > 0")
+    require(args.settle_before >= 0.0, "--boot-settle-s must be >= 0")
+    require(0 <= args.stress_count <= MAX_STRESS_COUNT, f"--stress-count must be 0..{MAX_STRESS_COUNT}")
+    if args.parser_self_test or args.dry_run:
+        return
+    require(bool(args.port), "--port is required unless --dry-run or --parser-self-test is used")
 
 
 def load_serial_module():
@@ -138,6 +184,8 @@ def classify_failure_tokens(text: str) -> tuple[str, ...]:
             tokens.append(token)
     if DIAGNOSTIC_FAILURE_RE.search(clean) and "FAIL_COUNT" not in tokens:
         tokens.append("FAIL_COUNT")
+    if STRESS_ERROR_RE.search(clean) and "ERROR_COUNT" not in tokens:
+        tokens.append("ERROR_COUNT")
     return tuple(tokens)
 
 
@@ -182,8 +230,52 @@ def missing_minimum_help_commands(help_text: str) -> tuple[str, ...]:
     return tuple(missing)
 
 
-def read_until_match(ser, pattern: re.Pattern[str], timeout_s: float, transcript: list[str]) -> tuple[bool, str]:
+def build_steps(args: argparse.Namespace) -> list[Step]:
+    steps: list[Step] = []
+    if not args.skip_safe:
+        steps.extend(SAFE_STEPS)
+    if args.stress_count > 0:
+        stress_timeout = max(30.0, float(args.stress_count) * 6.5)
+        steps.append(
+            Step(
+                "bounded stress",
+                f"stress {args.stress_count}",
+                r"=== Stress Summary ===",
+                timeout_s=stress_timeout,
+            )
+        )
+    if args.include_destructive:
+        steps.extend(DESTRUCTIVE_STEPS)
+    if args.timeout_s is not None:
+        steps = [replace(step, timeout_s=args.timeout_s) for step in steps]
+    return steps
+
+
+def run_parser_self_test() -> None:
+    require(parse_serial_number("serial=0x100123456789") == "100123456789", "serial parser rejected hex form")
+    require(parse_serial_number("serial_number: 100ABCDEF012") == "100ABCDEF012", "serial parser rejected plain form")
+    require(parse_serial_number("serial=0x1234") is None, "serial parser accepted short serial")
+    require(missing_minimum_safe_steps(SAFE_STEPS) == (), "safe HIL step contract is incomplete")
+    help_text = "version\nscan\nprobe\nsettings\ndrv\n"
+    require(missing_minimum_help_commands(help_text) == (), "help command contract parser failed")
+    require(
+        classify_failure_tokens("Status: I2C_TIMEOUT; fail=1; errors=2")
+        == ("I2C_TIMEOUT", "FAIL_COUNT", "ERROR_COUNT"),
+        "failure-token classifier failed",
+    )
+    require(step_passed(True, "Status: OK\nState: READY"), "OK step classification failed")
+    require(not step_passed(True, "Status: I2C_TIMEOUT"), "failure step classification failed")
+
+
+def read_until_match(
+    ser,
+    pattern: re.Pattern[str],
+    timeout_s: float,
+    idle_timeout_s: float,
+    transcript: list[str],
+) -> tuple[bool, str]:
     deadline = time.monotonic() + timeout_s
+    idle_deadline = time.monotonic() + idle_timeout_s
     buffer = ""
     while time.monotonic() < deadline:
         chunk = ser.read(512)
@@ -191,14 +283,17 @@ def read_until_match(ser, pattern: re.Pattern[str], timeout_s: float, transcript
             text = chunk.decode("utf-8", errors="replace")
             transcript.append(text)
             buffer += text
+            idle_deadline = time.monotonic() + idle_timeout_s
             if pattern.search(buffer):
                 return True, buffer
         else:
+            if time.monotonic() >= idle_deadline:
+                return False, buffer
             time.sleep(0.02)
     return False, buffer
 
 
-def run_step(ser, step: Step, transcript: list[str]) -> dict[str, object]:
+def run_step(ser, step: Step, idle_timeout_s: float, transcript: list[str]) -> dict[str, object]:
     if step.settle_s > 0:
         time.sleep(step.settle_s)
     command_line = f"{step.command}\n"
@@ -207,7 +302,13 @@ def run_step(ser, step: Step, transcript: list[str]) -> dict[str, object]:
     ser.flush()
 
     started = time.monotonic()
-    matched, output = read_until_match(ser, re.compile(step.expect, re.DOTALL), step.timeout_s, transcript)
+    matched, output = read_until_match(
+        ser,
+        re.compile(step.expect, re.DOTALL),
+        step.timeout_s,
+        idle_timeout_s,
+        transcript,
+    )
     elapsed_s = time.monotonic() - started
     passed = step_passed(matched, output)
     return {
@@ -223,22 +324,54 @@ def run_step(ser, step: Step, transcript: list[str]) -> dict[str, object]:
     }
 
 
+def not_run_result(step: Step, reason: str) -> dict[str, object]:
+    return {
+        "name": step.name,
+        "command": step.command,
+        "destructive": step.destructive,
+        "expect": step.expect,
+        "matched": False,
+        "failure_tokens": [],
+        "elapsed_s": 0,
+        "status": "not-run",
+        "last_output": reason,
+    }
+
+
+def result_counts(results: list[dict[str, object]]) -> dict[str, int]:
+    counts = {"pass": 0, "fail": 0, "unknown": 0, "not-run": 0}
+    for result in results:
+        status = str(result.get("status", "unknown"))
+        counts[status if status in counts else "unknown"] += 1
+    return counts
+
+
 def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
+    counts = summary["counts"]  # type: ignore[index]
     lines = [
         "# SCD41 HIL Run Summary",
         "",
         f"- Timestamp UTC: `{summary['timestamp_utc']}`",
         f"- Port: `{summary['port']}`",
         f"- Baud: `{summary['baud']}`",
+        f"- Board: `{summary['board']}`",
+        f"- Fixture: `{summary['fixture']}`",
+        f"- Operator: `{summary['operator']}`",
         f"- Include destructive: `{summary['include_destructive']}`",
         f"- Overall status: `{summary['status']}`",
+        f"- Result counts: pass `{counts['pass']}`, fail `{counts['fail']}`, unknown `{counts['unknown']}`, not-run `{counts['not-run']}`",
         "",
-        "| Step | Command | Destructive | Status | Elapsed s |",
-        "| --- | --- | --- | --- | ---: |",
+        "| Step | Command | Expected | Destructive | Status | Elapsed s | Failure tokens |",
+        "| --- | --- | --- | --- | --- | ---: | --- |",
     ]
     for result in summary["results"]:  # type: ignore[index]
         lines.append(
-            "| {name} | `{command}` | {destructive} | {status} | {elapsed_s} |".format(**result)
+            "| {name} | `{command}` | `{expect}` | {destructive} | {status} | {elapsed_s} | {failure_tokens} |".format(
+                **{
+                    **result,
+                    "failure_tokens": ", ".join(result.get("failure_tokens", [])) or "-",
+                }
+            )
         )
     lines.extend(
         [
@@ -251,39 +384,88 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def main() -> int:
-    args = parse_args()
-    if not destructive_confirmation_valid(args.include_destructive, args.confirm_destructive):
-        print("Destructive HIL steps refused: confirmation phrase does not match.")
-        print(f"Required: {DESTRUCTIVE_CONFIRMATION}")
-        return 2
+def write_summary_files(
+    args: argparse.Namespace,
+    run_id: str,
+    output_dir: pathlib.Path,
+    transcript: list[str],
+    results: list[dict[str, object]],
+    status: str,
+) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = output_dir / f"scd41_hil_{run_id}.log"
+    json_path = output_dir / f"scd41_hil_{run_id}.json"
+    md_path = output_dir / f"scd41_hil_{run_id}.md"
 
-    missing_safe_steps = missing_minimum_safe_steps(SAFE_STEPS)
-    if missing_safe_steps:
-        print("SCD41 HIL runner safe-step contract is incomplete:")
-        print(", ".join(missing_safe_steps))
-        return 2
+    transcript_path.write_text("".join(transcript), encoding="utf-8")
+    summary: dict[str, object] = {
+        "timestamp_utc": run_id,
+        "port": args.port or "NOT_SET",
+        "baud": args.baud,
+        "board": args.board,
+        "fixture": args.fixture,
+        "operator": args.operator,
+        "include_destructive": args.include_destructive,
+        "status": status,
+        "counts": result_counts(results),
+        "transcript_path": str(transcript_path),
+        "results": results,
+    }
+    json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    write_markdown(md_path, summary)
+    return transcript_path, json_path, md_path
 
+
+def main(argv: Optional[list[str]] = None) -> int:
+    args = parse_args(argv)
     try:
-        serial = load_serial_module()
+        validate_args(args)
+        if not destructive_confirmation_valid(args.include_destructive, args.confirm_destructive):
+            raise RunnerError(
+                "destructive HIL steps refused: confirmation phrase does not match; "
+                f"required {DESTRUCTIVE_CONFIRMATION!r}"
+            )
+
+        missing_safe_steps = missing_minimum_safe_steps(SAFE_STEPS)
+        if missing_safe_steps:
+            raise RunnerError(
+                "SCD41 HIL runner safe-step contract is incomplete: "
+                + ", ".join(missing_safe_steps)
+            )
+        if args.parser_self_test:
+            run_parser_self_test()
+            print("SCD41 HIL runner parser self-test PASSED")
+            return 0
     except RunnerError as exc:
         print(f"SCD41 HIL runner FAILED: {exc}")
         return 2
 
     output_dir = pathlib.Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
     run_id = timestamp()
-    transcript_path = output_dir / f"scd41_hil_{run_id}.log"
-    json_path = output_dir / f"scd41_hil_{run_id}.json"
-    md_path = output_dir / f"scd41_hil_{run_id}.md"
 
-    steps: list[Step] = []
-    if not args.skip_safe:
-        steps.extend(SAFE_STEPS)
-    if args.include_destructive:
-        steps.extend(DESTRUCTIVE_STEPS)
+    steps = build_steps(args)
     if not steps:
         print("No steps selected.")
+        return 2
+
+    if args.dry_run:
+        transcript = [
+            f"# SCD41 HIL dry-run plan {run_id}\n",
+            "# No serial port was opened and no hardware evidence was produced.\n",
+        ]
+        results = [not_run_result(step, "dry-run: no serial command executed") for step in steps]
+        transcript_path, json_path, md_path = write_summary_files(
+            args, run_id, output_dir, transcript, results, "not-run"
+        )
+        print(f"Dry-run plan: {json_path}")
+        print(f"Report: {md_path}")
+        print(f"Transcript: {transcript_path}")
+        return 0
+
+    try:
+        serial = load_serial_module()
+    except RunnerError as exc:
+        print(f"SCD41 HIL runner FAILED: {exc}")
         return 2
 
     transcript: list[str] = []
@@ -295,13 +477,21 @@ def main() -> int:
             time.sleep(args.settle_before)
             transcript.append(f"# SCD41 HIL transcript {run_id}\n")
             transcript.append(f"# port={args.port} baud={args.baud}\n")
+            transcript.append(f"# board={args.board}\n")
+            transcript.append(f"# fixture={args.fixture}\n")
+            transcript.append(f"# operator={args.operator}\n")
             while ser.in_waiting:
                 transcript.append(ser.read(ser.in_waiting).decode("utf-8", errors="replace"))
 
             for step in steps:
-                result = run_step(ser, step, transcript)
+                result = run_step(ser, step, args.idle_timeout_s, transcript)
                 results.append(result)
                 print(f"{result['status']}: {step.name} [{step.command}]")
+                if args.verbose:
+                    print(f"  elapsed_s={result['elapsed_s']} failure_tokens={result['failure_tokens']}")
+                    excerpt = strip_ansi(str(result["last_output"]))[-300:].strip()
+                    if excerpt:
+                        print(f"  output: {excerpt}")
                 if result["status"] != "pass":
                     status = "fail"
                     break
@@ -318,18 +508,9 @@ def main() -> int:
             "last_output": str(exc),
         })
 
-    transcript_path.write_text("".join(transcript), encoding="utf-8")
-    summary: dict[str, object] = {
-        "timestamp_utc": run_id,
-        "port": args.port,
-        "baud": args.baud,
-        "include_destructive": args.include_destructive,
-        "status": status,
-        "transcript_path": str(transcript_path),
-        "results": results,
-    }
-    json_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    write_markdown(md_path, summary)
+    transcript_path, json_path, md_path = write_summary_files(
+        args, run_id, output_dir, transcript, results, status
+    )
 
     print(f"Summary: {json_path}")
     print(f"Report: {md_path}")

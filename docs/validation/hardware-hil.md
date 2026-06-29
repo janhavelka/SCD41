@@ -28,12 +28,16 @@ Record these fields for every run:
 Optional runner:
 
 ```bash
-python tools/scd41_hil_runner.py --port COM7 --output-dir hil-results
+python tools/scd41_hil_runner.py --parser-self-test
+python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
+python tools/scd41_hil_runner.py --port COM8 --baud 115200 --output-dir hil-results --board "ESP32-S3 DevKitC-1" --fixture "SCD41 on 3V3, SDA/SCL pullups recorded"
 ```
 
-The runner requires `pyserial`. It runs safe commands by default and writes raw
-transcript plus JSON/Markdown summaries. A passing runner result is evidence
-only for that connected hardware and environment.
+The parser self-test and dry run do not open serial and do not produce hardware
+evidence. A live runner invocation requires a source checkout, `pyserial`, a
+connected board, and a wired SCD41. It runs safe commands by default and writes
+raw transcript plus JSON/Markdown summaries. A passing runner result is
+evidence only for that connected hardware and environment.
 
 This repository keeps the concrete entry point named
 `tools/scd41_hil_runner.py` because the sequence is SCD41-specific, including

@@ -21,6 +21,7 @@ REQUIRED_PACKAGE_PATHS = (
     "docs/porting/esp-idf.md",
     "docs/integration/external-i2c-owner.md",
     "docs/validation/hardware-hil.md",
+    "docs/reports/hil-validation-COM8-20260629.md",
     "include/SCD41/SCD41.h",
     "include/SCD41/Version.h",
     "include/SCD41/Config.h",

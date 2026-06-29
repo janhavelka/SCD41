@@ -13,11 +13,14 @@ too detailed for the README.
 | `porting/esp-idf.md` | ESP-IDF component, transport adapter, and build guidance. |
 | `integration/external-i2c-owner.md` | Guidance for applications where an external I2C task owns bounded driver progress. |
 | `validation/hardware-hil.md` | Optional hardware/HIL evidence rules and smoke-test matrix. |
+| `reports/` | Dated validation reports. Reports must distinguish real hardware evidence from `NOT RUN` entries. |
 
 ## Documentation Policy
 
 - Keep generated extracts, audit prompts, progress logs, branch reports, and
   one-off investigation notes out of `docs/`. Use git history for that material.
+- Keep only evidence-bearing validation reports, or explicit `NOT RUN` reports
+  requested for release gates, under `docs/reports/`.
 - Keep board-specific setup in examples or validation transcripts, not in the
   core reference docs.
 - Do not claim ESP-IDF, HIL, or hardware validation without command output or

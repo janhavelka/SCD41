@@ -39,7 +39,7 @@ The library covers the practical documented SCD41 runtime surface:
 The driver uses a managed asynchronous model:
 
 - `begin()` validates the transport, waits the configured power-up settle time, reads the serial number, and records the observed sensor variant.
-- `poll(nowMs, maxInstructions)` advances pending work with an explicit I2C instruction budget. One command write or one read-only response frame consumes one instruction; delay gates consume none and return `IN_PROGRESS`.
+- `poll(nowMs, maxInstructions)` advances pending work with an explicit I2C instruction budget. Scheduling uses `Config::nowMs`; the `nowMs` argument is retained for source compatibility. One command write or one read-only response frame consumes one instruction; delay gates consume none and return `IN_PROGRESS`.
 - `tick(nowMs)` is retained for existing applications. It advances legacy async completions, but it is not the instruction-budgeted I2C-owner surface.
 - `requestMeasurement()` schedules work using the current operating mode.
 - `measurementPending()` and `measurementReadyMs()` expose the driver's local sample-fetch state directly, so applications do not need to mirror it with their own shadow flags.
@@ -58,13 +58,13 @@ domain and is used for the 1 ms inter-command guard. `cooperativeYield` is
 optional, but Arduino and RTOS examples provide it so bounded waits can yield to
 the scheduler.
 
-`Status poll(uint32_t nowMs, uint8_t maxInstructions = 1)` uses the supplied
-millisecond timestamp for scheduling gates and the configured `nowUs` callback
-for the 1 ms inter-command guard. `Status tick(uint32_t nowMs)` is kept as the
-lifecycle API for existing sketches and applications; it samples
-`Config::nowMs` internally during `tick()`. Keep all timestamps in the same
-clock domain and do not mix wall time, RTOS ticks, and Arduino `millis()` values
-in one driver instance.
+`Status poll(uint32_t nowMs, uint8_t maxInstructions = 1)` keeps its timestamp
+argument for source compatibility, but scheduling gates use `Config::nowMs` and
+the 1 ms inter-command guard uses `Config::nowUs`. `Status tick(uint32_t nowMs)`
+is kept as the lifecycle API for existing sketches and applications and follows
+the same configured-clock model. Keep all timestamps in the same clock domain
+and do not mix wall time, RTOS ticks, and Arduino `millis()` values in one driver
+instance.
 
 ## Async Completion Status
 
@@ -464,16 +464,21 @@ command read_word 0xE4B8
 
 ## Build And Validation
 
+These validation commands are source-checkout-only because they use repository
+tools and scripts that are not part of the installed library package.
+
 ```bash
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
 python tools/test_scd41_hil_runner.py
+python tools/scd41_hil_runner.py --parser-self-test
+python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
 python -m platformio test -e native
 python -m platformio run -e esp32s3dev
 python -m platformio run -e esp32s2dev
-python -m platformio pkg pack . -o dist
+python -m platformio pkg pack . -o dist/SCD41-package.tar.gz
 python tools/check_package_contents.py dist/*.tar.gz
 python tools/check_clean_consumer_compile.py dist/*.tar.gz
 ```
@@ -488,8 +493,9 @@ idf.py -C examples/idf/basic -B build-esp32s2 set-target esp32s2
 idf.py -C examples/idf/basic -B build-esp32s2 build
 ```
 
-Hardware/HIL validation remains a separate opt-in step because it requires real
-boards, an SCD41, and explicit operator control for EEPROM/destructive commands.
+Hardware/HIL validation remains a separate opt-in source-checkout step because
+it requires real boards, an SCD41, and explicit operator control for
+EEPROM/destructive commands.
 Use [docs/validation/hardware-hil.md](docs/validation/hardware-hil.md) for the
 manual matrix and optional runner workflow.
 
@@ -512,6 +518,7 @@ manual matrix and optional runner workflow.
 - <a href="docs/porting/esp-idf.md">docs/porting/esp-idf.md</a> - ESP-IDF portability and adapter guidance
 - <a href="docs/integration/external-i2c-owner.md">docs/integration/external-i2c-owner.md</a> - bounded external-I2C-owner integration notes
 - <a href="docs/validation/hardware-hil.md">docs/validation/hardware-hil.md</a> - opt-in hardware/HIL matrix and evidence rules
+- <a href="docs/reports">docs/reports</a> - dated validation reports, including explicit NOT-RUN reports when hardware is unavailable
 
 ## License
 

@@ -298,6 +298,8 @@ void setUp() {
   Wire._clearClockSetCount();
   Wire._clearBeginCallCount();
   Wire._setBeginResult(true);
+  Wire._clearWriteResult();
+  Wire._clearEndTransmissionResult();
 }
 
 void tearDown() {}
@@ -838,7 +840,7 @@ void test_poll_command_delay_gate_handles_u32_wraparound_without_i2c() {
   TEST_ASSERT_EQUAL_UINT32(readsBeforeGate + 1u, bus.readCalls);
 }
 
-void test_poll_uses_call_argument_for_millisecond_gates() {
+void test_poll_uses_config_clock_for_millisecond_gates() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
   queueBeginSuccess(bus);
@@ -857,6 +859,13 @@ void test_poll_uses_call_argument_for_millisecond_gates() {
   const Status st = device.poll(5100, 1);
   TEST_ASSERT_TRUE(st.inProgress());
   TEST_ASSERT_TRUE(device.lastPollStatus().inProgress());
+  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
+  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+  TEST_ASSERT_TRUE(device.pollBusy());
+
+  bus.nowMs = 5100;
+  const Status due = device.poll(0, 1);
+  TEST_ASSERT_TRUE(due.inProgress());
   TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
   TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
   TEST_ASSERT_TRUE(device.pollBusy());
@@ -2458,6 +2467,7 @@ void test_wake_up_accepts_expected_nack() {
   ScriptedTransport bus;
   Config cfg = makeConfig(bus);
   queueBeginSuccess(bus);
+  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
 
   SCD41Device device;
   TEST_ASSERT_TRUE(device.begin(cfg).ok());
@@ -2496,6 +2506,35 @@ void test_wake_up_accepts_precise_data_nack() {
                     static_cast<uint8_t>(device.pendingCommand()));
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
   TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+}
+
+void test_wake_up_post_settle_verification_failure_is_async_failure() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "post-wake timeout"));
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  device._operatingMode = OperatingMode::POWER_DOWN;
+  bus.writeStatus[0] = Status::Error(Err::I2C_NACK_ADDR, "expected wake nack");
+  bus.writeCount = 1;
+
+  TEST_ASSERT_TRUE(device.wakeUp().inProgress());
+
+  bus.nowMs = cfg.powerUpDelayMs + 10;
+  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
+  const Status tickSt = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                    static_cast<uint8_t>(tickSt.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::WAKE_UP),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                    static_cast<uint8_t>(device.lastAsyncStatus().code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::POWER_DOWN),
+                    static_cast<uint8_t>(device.operatingMode()));
 }
 
 void test_wake_up_generic_timeout_bus_and_read_nack_errors_fail_and_track_health() {
@@ -2625,6 +2664,56 @@ void test_recover_power_cycle_validation_failure_is_async_failure() {
                     static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
                     static_cast<uint8_t>(device.pendingCommand()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+}
+
+void test_recover_rejects_non_scd41_serial_and_keeps_offline() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.offlineThreshold = 1;
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "offline timeout"));
+  queueReadSerial(bus, 0x0001, 0x2345, 0x6789);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  uint16_t word = 0;
+  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+
+  const Status st = device.recover();
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_TRUE(device.consecutiveFailures() >= cfg.offlineThreshold);
+}
+
+void test_recover_power_cycle_rejects_non_scd41_after_settle() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.powerCycle = scriptedPowerCycle;
+  cfg.controlUser = &bus;
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
+  queueReadSerial(bus, 0x0001, 0x2345, 0x6789);
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+
+  TEST_ASSERT_TRUE(device.recover().inProgress());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
+                    static_cast<uint8_t>(device.pendingCommand()));
+
+  bus.nowMs = cfg.powerUpDelayMs + 10;
+  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
+  const Status tickSt = device.tick(bus.nowMs);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                    static_cast<uint8_t>(tickSt.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
+                    static_cast<uint8_t>(device.lastAsyncOperation()));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
                     static_cast<uint8_t>(device.state()));
 }
@@ -2792,6 +2881,28 @@ void test_data_ready_positive_and_power_down_schedule() {
                     static_cast<uint8_t>(device.operatingMode()));
 }
 
+void test_direct_no_data_read_updates_command_spacing() {
+  ScriptedTransport bus;
+  Config cfg = makeConfig(bus);
+  cfg.transportCapabilities = TransportCapability::READ_HEADER_NACK;
+  queueBeginSuccess(bus);
+  queueReadStatus(bus, Status::Error(Err::I2C_NACK_READ, "no data"));
+
+  SCD41Device device;
+  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  device._lastCommandValid = false;
+  device._operatingMode = OperatingMode::PERIODIC;
+  bus.nowMs = 100;
+  bus.nowUs = 100000;
+
+  RawSample raw = {};
+  const Status st = device._readMeasurementRaw(raw, true, true);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+                    static_cast<uint8_t>(st.code));
+  TEST_ASSERT_TRUE(device._lastCommandValid);
+  TEST_ASSERT_EQUAL_UINT32(101000u, device._lastCommandUs);
+}
+
 void test_example_transport_maps_zero_byte_read_to_i2c_error() {
   uint8_t rx[3] = {};
   TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
@@ -2843,6 +2954,39 @@ void test_example_transport_applies_per_transaction_timeout() {
   TEST_ASSERT_EQUAL_UINT32(88u, Wire.getTimeOut());
 }
 
+void test_example_transport_maps_write_failures() {
+  const uint8_t tx[2] = {0x12, 0x34};
+  struct Case {
+    uint8_t result;
+    Err expected;
+  };
+  const Case cases[] = {
+      {2, Err::I2C_NACK_ADDR},
+      {3, Err::I2C_NACK_DATA},
+      {4, Err::I2C_BUS},
+      {5, Err::I2C_TIMEOUT},
+  };
+
+  for (const Case& item : cases) {
+    TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
+    Wire._setEndTransmissionResult(item.result);
+    const Status st = transport::wireWrite(cmd::I2C_ADDRESS, tx, sizeof(tx), 50, &Wire);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.expected), static_cast<uint8_t>(st.code));
+    TEST_ASSERT_EQUAL_INT32(item.result, st.detail);
+    Wire._clearEndTransmissionResult();
+  }
+}
+
+void test_example_transport_maps_short_write_to_i2c_error() {
+  const uint8_t tx[2] = {0x12, 0x34};
+  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
+
+  Wire._setWriteResult(1);
+  const Status st = transport::wireWrite(cmd::I2C_ADDRESS, tx, sizeof(tx), 50, &Wire);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
+  TEST_ASSERT_EQUAL_INT32(1, st.detail);
+}
+
 void runConfigStatusLifecycleTests() {
   RUN_TEST(test_status_helpers);
   RUN_TEST(test_config_defaults);
@@ -2873,7 +3017,7 @@ void runMeasurementAndTimingTests() {
   RUN_TEST(test_tick_before_begin_returns_ok_noop);
   RUN_TEST(test_poll_command_delay_gate_returns_in_progress_without_i2c);
   RUN_TEST(test_poll_command_delay_gate_handles_u32_wraparound_without_i2c);
-  RUN_TEST(test_poll_uses_call_argument_for_millisecond_gates);
+  RUN_TEST(test_poll_uses_config_clock_for_millisecond_gates);
   RUN_TEST(test_poll_measurement_budget_one_splits_ready_and_measurement_phases);
   RUN_TEST(test_poll_measurement_budget_two_respects_command_delay_gates);
   RUN_TEST(test_poll_read_settings_periodic_refresh_is_chunked);
@@ -2946,15 +3090,19 @@ void runMaintenanceTests() {
   RUN_TEST(test_simulated_persist_reinit_factory_reset_schedule);
   RUN_TEST(test_wake_up_accepts_expected_nack);
   RUN_TEST(test_wake_up_accepts_precise_data_nack);
+  RUN_TEST(test_wake_up_post_settle_verification_failure_is_async_failure);
   RUN_TEST(test_wake_up_generic_timeout_bus_and_read_nack_errors_fail_and_track_health);
   RUN_TEST(test_offline_wake_recovery_verifies_sensor_before_ready);
   RUN_TEST(test_recover_power_cycle_completion_reports_async_success);
   RUN_TEST(test_recover_power_cycle_validation_failure_is_async_failure);
+  RUN_TEST(test_recover_rejects_non_scd41_serial_and_keeps_offline);
+  RUN_TEST(test_recover_power_cycle_rejects_non_scd41_after_settle);
   RUN_TEST(test_self_test_completion_reads_pass_code);
   RUN_TEST(test_self_test_raw_accessor_preserves_failure_word);
   RUN_TEST(test_forced_recalibration_reads_signed_correction);
   RUN_TEST(test_forced_recalibration_raw_accessor_preserves_failure_sentinel);
   RUN_TEST(test_end_clears_maintenance_readiness_flags);
+  RUN_TEST(test_direct_no_data_read_updates_command_spacing);
   RUN_TEST(test_data_ready_read_requires_init);
   RUN_TEST(test_data_ready_positive_and_power_down_schedule);
 }
@@ -2964,6 +3112,8 @@ void runExampleTransportTests() {
   RUN_TEST(test_example_transport_maps_zero_byte_read_to_i2c_error);
   RUN_TEST(test_example_transport_maps_short_read_to_i2c_error);
   RUN_TEST(test_example_transport_applies_per_transaction_timeout);
+  RUN_TEST(test_example_transport_maps_write_failures);
+  RUN_TEST(test_example_transport_maps_short_write_to_i2c_error);
 }
 
 int main(int, char**) {

@@ -22,16 +22,28 @@ public:
   uint32_t _beginCallCount() const { return _beginCalls; }
   void _clearBeginCallCount() { _beginCalls = 0; }
   void _setBeginResult(bool result) { _beginResult = result; }
+  void _setWriteResult(size_t result) {
+    _useWriteResultOverride = true;
+    _writeResult = result;
+  }
+  void _clearWriteResult() {
+    _useWriteResultOverride = false;
+    _writeResult = 0;
+  }
+  void _setEndTransmissionResult(uint8_t result) { _endTransmissionResult = result; }
+  void _clearEndTransmissionResult() { _endTransmissionResult = 0; }
   
   void beginTransmission(uint8_t addr) { _addr = addr; _txLen = 0; }
   size_t write(uint8_t data) { _txBuf[_txLen++] = data; return 1; }
   size_t write(const uint8_t* data, size_t len) { 
-    for (size_t i = 0; i < len && _txLen < sizeof(_txBuf); i++) {
+    const size_t result = _useWriteResultOverride ? _writeResult : len;
+    const size_t bytesToStore = result < len ? result : len;
+    for (size_t i = 0; i < bytesToStore && _txLen < sizeof(_txBuf); i++) {
       _txBuf[_txLen++] = data[i];
     }
-    return len;
+    return result;
   }
-  uint8_t endTransmission(bool stop = true) { _lastStop = stop; return 0; }
+  uint8_t endTransmission(bool stop = true) { _lastStop = stop; return _endTransmissionResult; }
   
   size_t requestFrom(uint8_t addr, size_t len) { 
     (void)addr;
@@ -83,6 +95,9 @@ private:
   uint32_t _clockSetCalls = 0;
   uint32_t _beginCalls = 0;
   bool _beginResult = true;
+  bool _useWriteResultOverride = false;
+  size_t _writeResult = 0;
+  uint8_t _endTransmissionResult = 0;
   bool _lastStop = true;
   uint32_t _readCalls = 0;
   bool _useRequestFromOverride = false;

@@ -6,6 +6,7 @@ import contextlib
 import io
 import pathlib
 import sys
+import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -55,16 +56,14 @@ def test_missing_serial_import_is_runner_error() -> None:
         builtins.__import__ = original_import
 
 
-def test_missing_serial_port_is_argparse_error() -> None:
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-        try:
-            hil.parse_args([])
-        except SystemExit as exc:
-            assert_equal(exc.code, 2, "missing port exits with argparse error")
-        else:
-            raise AssertionError("parse_args([]) unexpectedly succeeded")
-    assert_true("--port" in stderr.getvalue(), "missing port mentions --port")
+def test_missing_serial_port_is_validation_error() -> None:
+    args = hil.parse_args([])
+    try:
+        hil.validate_args(args)
+    except hil.RunnerError as exc:
+        assert_true("--port is required" in str(exc), "missing port mentions --port")
+    else:
+        raise AssertionError("validate_args() unexpectedly accepted missing port")
 
 
 def test_destructive_confirmation() -> None:
@@ -113,6 +112,11 @@ def test_failure_token_classification() -> None:
         ("FAIL_COUNT",),
         "nonzero diagnostic failure count is a failure",
     )
+    assert_equal(
+        hil.classify_failure_tokens("=== Stress Summary ===\n  Errors:   2\n"),
+        ("ERROR_COUNT",),
+        "nonzero stress error count is a failure",
+    )
 
 
 def test_step_pattern_matching() -> None:
@@ -143,17 +147,48 @@ def test_step_pass_rejects_failure_tokens() -> None:
     )
 
 
+def test_build_steps_timeout_override_and_stress() -> None:
+    args = hil.parse_args(["--dry-run", "--timeout-s", "3", "--stress-count", "2"])
+    hil.validate_args(args)
+    steps = hil.build_steps(args)
+    assert_true(any(step.command == "stress 2" for step in steps), "stress step appended")
+    assert_true(all(step.timeout_s == 3 for step in steps), "timeout override applies to all steps")
+
+
+def test_parser_self_test_mode() -> None:
+    hil.run_parser_self_test()
+
+
+def test_dry_run_writes_not_run_summary_without_pyserial() -> None:
+    with tempfile.TemporaryDirectory(prefix="scd41-hil-dry-run-") as tmp:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            result = hil.main(["--dry-run", "--port", "COM8", "--output-dir", tmp, "--stress-count", "1"])
+        assert_equal(result, 0, "dry-run exits successfully")
+        reports = sorted(pathlib.Path(tmp).glob("*.md"))
+        summaries = sorted(pathlib.Path(tmp).glob("*.json"))
+        transcripts = sorted(pathlib.Path(tmp).glob("*.log"))
+        assert_equal(len(reports), 1, "dry-run writes markdown report")
+        assert_equal(len(summaries), 1, "dry-run writes json summary")
+        assert_equal(len(transcripts), 1, "dry-run writes transcript")
+        report_text = reports[0].read_text(encoding="utf-8")
+        assert_true("not-run" in report_text, "dry-run report marks steps not-run")
+
+
 def main() -> int:
     tests = [
         test_serial_number_parsing,
         test_missing_serial_import_is_runner_error,
-        test_missing_serial_port_is_argparse_error,
+        test_missing_serial_port_is_validation_error,
         test_destructive_confirmation,
         test_safe_step_contract,
         test_help_contract_detection,
         test_failure_token_classification,
         test_step_pattern_matching,
         test_step_pass_rejects_failure_tokens,
+        test_build_steps_timeout_override_and_stress,
+        test_parser_self_test_mode,
+        test_dry_run_writes_not_run_summary_without_pyserial,
     ]
     for test in tests:
         test()

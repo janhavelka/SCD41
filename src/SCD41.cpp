@@ -229,6 +229,8 @@ Status SCD41::tick(uint32_t nowMs) {
 }
 
 Status SCD41::poll(uint32_t nowMs, uint8_t maxInstructions) {
+  (void)nowMs;
+
   if (!_initialized) {
     return _recordPollStatus(Status::Ok());
   }
@@ -238,10 +240,10 @@ Status SCD41::poll(uint32_t nowMs, uint8_t maxInstructions) {
 
   uint8_t instructionsRemaining = maxInstructions;
   Status st = Status::Ok();
+  const uint32_t driverNowMs = _nowMs();
 
   do {
     const uint8_t before = instructionsRemaining;
-    const uint32_t driverNowMs = nowMs;
 
     if (_settingsReadActive || _pollStep == PollStep::SETTINGS_COMMAND ||
         _pollStep == PollStep::SETTINGS_READ) {
@@ -393,8 +395,7 @@ Status SCD41::recover() {
       }
       lastFailure = st;
     } else {
-      uint64_t serial = 0;
-      Status st = readSerialNumber(serial);
+      Status st = _verifySensorAfterRecovery();
       if (st.ok()) {
         return Status::Ok();
       }
@@ -411,8 +412,7 @@ Status SCD41::recover() {
         bool ready = false;
         st = readDataReadyStatus(ready);
       } else {
-        uint64_t serial = 0;
-        st = readSerialNumber(serial);
+        st = _verifySensorAfterRecovery();
       }
       if (st.ok()) {
         return Status::Ok();
@@ -1896,12 +1896,13 @@ Status SCD41::_readOnly(uint8_t* out, size_t len, bool tracked, bool allowNoData
   } else {
     st = _i2cWriteReadRaw(nullptr, 0, out, len);
   }
+  if (st.ok() || st.code == Err::MEASUREMENT_NOT_READY) {
+    _lastCommandUs = _nowUs();
+    _lastCommandValid = true;
+  }
   if (!st.ok()) {
     return st;
   }
-
-  _lastCommandUs = _nowUs();
-  _lastCommandValid = true;
   return Status::Ok();
 }
 
@@ -2422,12 +2423,12 @@ Status SCD41::_handlePendingCommand(uint32_t nowMs) {
       return Status::Ok();
 
     case PendingCommand::WAKE_UP: {
-      _operatingMode = OperatingMode::IDLE;
       _clearPendingCommand();
-      if (_driverState == DriverState::OFFLINE) {
-        return _verifySensorAfterRecovery();
+      const Status st = _verifySensorAfterRecovery();
+      if (st.ok()) {
+        _operatingMode = OperatingMode::IDLE;
       }
-      return Status::Ok();
+      return st;
     }
 
     case PendingCommand::POWER_CYCLE:
@@ -2460,6 +2461,7 @@ Status SCD41::_verifySensorAfterRecovery() {
     return st;
   }
   if (_config.strictVariantCheck && _sensorVariant != SensorVariant::SCD41) {
+    _reassertOfflineLatch();
     return Status::Error(Err::UNSUPPORTED, "Sensor is not SCD41",
                          static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
   }
@@ -2562,10 +2564,11 @@ Status SCD41::_pollPendingCommand(uint32_t nowMs, uint8_t& instructionsRemaining
       return Status::Ok();
 
     case PendingCommand::WAKE_UP: {
-      _operatingMode = OperatingMode::IDLE;
       _clearPendingCommand();
-      Status st = (_driverState == DriverState::OFFLINE) ? _verifySensorAfterRecovery()
-                                                         : Status::Ok();
+      Status st = _verifySensorAfterRecovery();
+      if (st.ok()) {
+        _operatingMode = OperatingMode::IDLE;
+      }
       _recordAsyncStatus(operation, st);
       return st.ok() ? Status::Ok() : st;
     }
