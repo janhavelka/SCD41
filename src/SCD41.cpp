@@ -122,6 +122,19 @@ OperationKind readKindAt(uint8_t index) {
                                                     : OperationKind::NONE;
 }
 
+EffectState effectFromWakeAttempt(TransferDisposition disposition) {
+  switch (disposition) {
+    case TransferDisposition::COMPLETE:
+      return EffectState::ACKNOWLEDGED;
+    case TransferDisposition::INDETERMINATE:
+      return EffectState::UNKNOWN;
+    case TransferDisposition::NO_EFFECT:
+    case TransferDisposition::NOT_STARTED:
+      return EffectState::ATTEMPTED;
+  }
+  return EffectState::UNKNOWN;
+}
+
 }  // namespace
 
 Status SCD41::begin(const Config& config) {
@@ -140,8 +153,6 @@ Status SCD41::begin(const Config& config) {
   _operatingMode = OperatingMode::UNKNOWN;
   _modeEvidence = ModeEvidence::UNKNOWN;
   _reconciliationRequired = true;
-  _nextSafeCommandMs = 0;
-  _sensorEpoch = 0;
   _sampleSequence = 0;
   _active = {};
   _terminal = {};
@@ -152,13 +163,8 @@ Status SCD41::begin(const Config& config) {
   _latestSampleValid = false;
   _health = {};
   _health.state = DriverState::READY;
-  _lastAttemptCompletedMs = 0;
-  _lastAttemptValid = false;
   _lastTransferDisposition = TransferDisposition::NOT_STARTED;
-  _lastTransferCode = TransferCode::FAILED;
   _lastTransferWasEffectful = false;
-  _lastOwnerNowMs = 0U;
-  _lastOwnerNowValid = false;
   return Status::Ok();
 }
 
@@ -192,6 +198,10 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
   uint8_t callbacksRemaining = maxCallbacks;
   const uint8_t callbacksBefore = callbacksRemaining;
   uint32_t driverNowMs = nowMs;
+  if (_nextSafeCommandValid &&
+      _timeReached(driverNowMs, _nextSafeCommandMs)) {
+    _nextSafeCommandValid = false;
+  }
 
   if (_timeReached(driverNowMs, _active.deadlineMs)) {
     EffectState effect = _active.effect;
@@ -201,19 +211,28 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
     if (_active.effectfulWriteAttempted) {
       _markReconciliationRequired();
     }
-    if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+    if ((_active.request.kind == OperationKind::PERSIST_SETTINGS ||
+         _active.request.kind == OperationKind::FACTORY_RESET) &&
         _active.effectfulWriteAttempted) {
       _configuration.persistenceIndeterminate = true;
     }
-    _finish(OperationOutcome::TIMED_OUT, effect,
-            Status::Error(Err::TIMEOUT, "Operation deadline expired"),
+    const bool partialConfiguration =
+        _active.request.kind == OperationKind::READ_CONFIGURATION &&
+        _active.completedFieldMask != 0U;
+    if (partialConfiguration) {
+      _workingValue.configuration = _configuration;
+    }
+    _finish(partialConfiguration ? OperationOutcome::PARTIAL
+                                 : OperationOutcome::TIMED_OUT,
+            effect, Status::Error(Err::TIMEOUT, "Operation deadline expired"),
             driverNowMs);
   }
 
   uint8_t cpuTransitions = 0;
   while (_activeValid && cpuTransitions < 32U) {
     ++cpuTransitions;
-    if (!_timeReached(driverNowMs, _nextSafeCommandMs) &&
+    if (_nextSafeCommandValid &&
+        !_timeReached(driverNowMs, _nextSafeCommandMs) &&
         !_timeReached(driverNowMs, _active.nextDueMs)) {
       break;
     }
@@ -314,13 +333,15 @@ Status SCD41::cancel(const OperationId& id, uint32_t nowMs) {
   } else {
     if (!_timeReached(nowMs, _active.nextDueMs)) {
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
     }
     _markReconciliationRequired();
     if (_active.effectfulWriteAttempted && effect == EffectState::NOT_ATTEMPTED) {
       effect = EffectState::UNKNOWN;
     }
   }
-  if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+  if ((_active.request.kind == OperationKind::PERSIST_SETTINGS ||
+       _active.request.kind == OperationKind::FACTORY_RESET) &&
       _active.effectfulWriteAttempted) {
     _configuration.persistenceIndeterminate = true;
   }
@@ -345,11 +366,12 @@ Status SCD41::takeResult(const OperationId& expectedId, OperationResult& out) {
 void SCD41::end() {
   if (_activeValid && !_terminalValid) {
     const uint32_t completedMs =
-        _lastOwnerNowValid ? _lastOwnerNowMs : _active.options.nowMs;
+        _lastOwnerNowValid ? _lastOwnerNowMs : _active.startedMs;
     if (_active.callbacksUsed > 0U) {
       _markReconciliationRequired();
     }
-    if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+    if ((_active.request.kind == OperationKind::PERSIST_SETTINGS ||
+         _active.request.kind == OperationKind::FACTORY_RESET) &&
         _active.effectfulWriteAttempted) {
       _configuration.persistenceIndeterminate = true;
     }
@@ -393,7 +415,8 @@ RuntimeSnapshot SCD41::runtimeSnapshot() const {
     snapshot.operationId = _terminal.id;
     snapshot.operationKind = _terminal.kind;
   }
-  snapshot.nextSafeCommandMs = _nextSafeCommandMs;
+  snapshot.nextSafeCommandMs = _nextSafeCommandValid ? _nextSafeCommandMs : 0U;
+  snapshot.nextSafeCommandValid = _nextSafeCommandValid;
   snapshot.sensorEpoch = _sensorEpoch;
   snapshot.reconciliationRequired = _reconciliationRequired;
   snapshot.sampleAvailable = _latestSampleValid;
@@ -602,6 +625,10 @@ Status SCD41::_validateStart(const OperationRequest& request,
       !_timeReached(options.nowMs, _lastOwnerNowMs)) {
     return Status::Error(Err::INVALID_PARAM, "Owner clock moved backwards");
   }
+  if (_nextSafeCommandValid &&
+      !_timeReached(options.nowMs, _nextSafeCommandMs)) {
+    return Status::Error(Err::BUSY, "Sensor safety window active");
+  }
   Status status = _validateRequestValue(request);
   if (!status.ok()) {
     return status;
@@ -754,7 +781,6 @@ Status SCD41::_beginOperation(const OperationRequest& request,
   _active = {};
   _workingValue = {};
   _active.request = request;
-  _active.options = options;
   _active.id = id;
   _active.startedMs = options.nowMs;
   _active.deadlineMs = options.deadlineMs;
@@ -809,7 +835,7 @@ Status SCD41::_step(uint32_t& nowMs, uint8_t& callbacksRemaining) {
   if (_timeReached(nowMs, _active.deadlineMs)) {
     return Status::Error(Err::TIMEOUT, "Operation deadline expired");
   }
-  if (!_timeReached(nowMs, _nextSafeCommandMs)) {
+  if (_nextSafeCommandValid && !_timeReached(nowMs, _nextSafeCommandMs)) {
     _active.nextDueMs = _nextSafeCommandMs;
     return Status::Error(Err::IN_PROGRESS, "Sensor busy window active");
   }
@@ -852,10 +878,15 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                              nowMs, callbacksRemaining, true);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
-      _active.effect = EffectState::ACKNOWLEDGED;
+      _active.effect = effectFromWakeAttempt(_lastTransferDisposition);
+      // A wake command can have taken effect even though its expected NACK is
+      // the only bus evidence. Do not retain pre-wake managed state while the
+      // remaining reconciliation phases are fallible.
+      _markReconciliationRequired();
       _active.phase = OperationPhase::WAIT_WAKE;
       _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_POWER_UP_MS;
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
       return Status::Error(Err::IN_PROGRESS, "Waiting after wake");
 
     case OperationPhase::WAIT_WAKE:
@@ -874,6 +905,7 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       _active.phase = OperationPhase::WAIT_STOP;
       _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_STOP_PERIODIC_MS;
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
       return Status::Error(Err::IN_PROGRESS, "Waiting after stop");
 
     case OperationPhase::WAIT_STOP:
@@ -1042,9 +1074,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         const uint16_t fieldMask = fieldAt(_active.fieldIndex);
         _active.completedFieldMask |= fieldMask;
         _configuration.verifiedMask |= fieldMask;
-        if (_operatingMode == OperatingMode::PERIODIC ||
-            _operatingMode == OperatingMode::LOW_POWER_PERIODIC ||
-            _active.fieldIndex >= 6U) {
+        if (_active.fieldIndex >= 6U) {
           _workingValue.configuration = _configuration;
           _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
                   nowMs);
@@ -1083,8 +1113,6 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           return Status::Error(Err::IN_PROGRESS, "Waiting for current setting");
         }
         if (_active.fieldIndex == 1U) {
-          status = _checkCommandSpacing(nowMs);
-          if (!status.ok()) return status;
           status = _writeCommandWithWord(_writeCommandFor(kind),
                                          _active.desiredRaw, nowMs,
                                          callbacksRemaining, true);
@@ -1095,7 +1123,9 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
               _lastTransferDisposition == TransferDisposition::INDETERMINATE) {
             _configuration.verifiedMask &=
                 static_cast<uint16_t>(~fieldMask);
-            _configuration.dirtyMask |= fieldMask;
+            _configuration.dirtyMask |=
+                static_cast<uint16_t>(fieldMask &
+                                      PERSISTABLE_CONFIGURATION_FIELDS);
           }
           if (!status.ok()) {
             return status;
@@ -1105,6 +1135,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           _active.phase = OperationPhase::WAIT_EXECUTION;
           _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
           _nextSafeCommandMs = _active.nextDueMs;
+          _nextSafeCommandValid = true;
           return Status::Error(Err::IN_PROGRESS, "Waiting after setting write");
         }
         status = _writeCommand(_readCommandFor(kind), TransferIntent::NORMAL,
@@ -1161,8 +1192,6 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
 
   switch (_active.phase) {
     case OperationPhase::SEND_COMMAND: {
-      status = _checkCommandSpacing(nowMs);
-      if (!status.ok()) return status;
       const TransferIntent intent =
           kind == OperationKind::WAKE_UP ? TransferIntent::EXPECTED_WRITE_NACK
                                          : TransferIntent::NORMAL;
@@ -1170,10 +1199,17 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                              callbacksRemaining, true);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
-      _active.effect = EffectState::ACKNOWLEDGED;
+      if (kind == OperationKind::WAKE_UP) {
+        _active.effect = effectFromWakeAttempt(_lastTransferDisposition);
+        // Verification below is what restores attached/idle state.
+        _markReconciliationRequired();
+      } else {
+        _active.effect = EffectState::ACKNOWLEDGED;
+      }
       _active.phase = OperationPhase::WAIT_EXECUTION;
       _active.nextDueMs = nowMs + _executionWaitMs(kind);
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
       return Status::Error(Err::IN_PROGRESS, "Waiting for command completion");
     }
 
@@ -1272,8 +1308,6 @@ Status SCD41::_stepMeasurement(uint32_t& nowMs,
   Status status;
   switch (_active.phase) {
     case OperationPhase::SEND_COMMAND:
-      status = _checkCommandSpacing(nowMs);
-      if (!status.ok()) return status;
       status = _writeCommand(_writeCommandFor(kind), TransferIntent::NORMAL,
                              nowMs, callbacksRemaining, true);
       if (status.inProgress()) return status;
@@ -1282,6 +1316,7 @@ Status SCD41::_stepMeasurement(uint32_t& nowMs,
       _active.phase = OperationPhase::WAIT_EXECUTION;
       _active.nextDueMs = nowMs + _executionWaitMs(kind);
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
       return Status::Error(Err::IN_PROGRESS, "Waiting for measurement");
 
     case OperationPhase::WAIT_EXECUTION:
@@ -1377,14 +1412,13 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _configuration.dirtyMask == 0U &&
       _active.phase == OperationPhase::SEND_COMMAND) {
     _workingValue.configuration = _configuration;
-    _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(), nowMs);
+    _finish(OperationOutcome::SUCCEEDED, EffectState::NOT_ATTEMPTED,
+            Status::Ok(), nowMs);
     return Status::Ok();
   }
 
   switch (_active.phase) {
     case OperationPhase::SEND_COMMAND:
-      status = _checkCommandSpacing(nowMs);
-      if (!status.ok()) return status;
       if (kind == OperationKind::FORCED_RECALIBRATION) {
         status = _writeCommandWithWord(cmd::CMD_PERFORM_FORCED_RECALIBRATION,
                                        static_cast<uint16_t>(_active.request.value),
@@ -1405,9 +1439,13 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       if (kind == OperationKind::REINIT || kind == OperationKind::FACTORY_RESET) {
         _markReconciliationRequired();
       }
+      if (kind == OperationKind::FACTORY_RESET) {
+        _configuration.persistenceIndeterminate = true;
+      }
       _active.phase = OperationPhase::WAIT_EXECUTION;
       _active.nextDueMs = nowMs + _executionWaitMs(kind);
       _nextSafeCommandMs = _active.nextDueMs;
+      _nextSafeCommandValid = true;
       return Status::Error(Err::IN_PROGRESS, "Waiting for maintenance command");
 
     case OperationPhase::WAIT_EXECUTION:
@@ -1556,8 +1594,6 @@ Status SCD41::_stepDiagnostic(uint32_t& nowMs,
         _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
         return Status::Error(Err::IN_PROGRESS, "Waiting for diagnostic read");
       }
-      status = _checkCommandSpacing(nowMs);
-      if (!status.ok()) return status;
       if (kind == OperationKind::DIAGNOSTIC_WRITE_WORD) {
         status = _writeCommandWithWord(_active.request.command,
                                        static_cast<uint16_t>(_active.request.value),
@@ -1703,6 +1739,7 @@ Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
       (transfer.completedMs - attemptStartedMs) < 0x80000000UL;
   if (!completionClockValid) {
     normalized.code = TransferCode::FAILED;
+    normalized.completedMs = attemptStartedMs;
     if (normalized.disposition != TransferDisposition::NOT_STARTED) {
       normalized.disposition = TransferDisposition::INDETERMINATE;
     }
@@ -1715,20 +1752,21 @@ Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
     normalized.disposition = TransferDisposition::INDETERMINATE;
   }
   if (normalized.code != TransferCode::OK &&
-      normalized.code != TransferCode::NACK &&
       normalized.disposition == TransferDisposition::COMPLETE) {
     normalized.disposition = TransferDisposition::INDETERMINATE;
   }
   _lastTransferDisposition = normalized.disposition;
-  _lastTransferCode = normalized.code;
   _lastTransferWasEffectful = effectful;
   if (effectful && normalized.disposition != TransferDisposition::NOT_STARTED) {
     _active.effectfulWriteAttempted = true;
-    _active.effect = EffectState::ATTEMPTED;
+    if (_active.effect == EffectState::NOT_ATTEMPTED) {
+      _active.effect = EffectState::ATTEMPTED;
+    }
   }
   const bool expectedNack =
       intent == TransferIntent::EXPECTED_WRITE_NACK &&
-      normalized.code == TransferCode::NACK;
+      normalized.code == TransferCode::NACK &&
+      normalized.disposition != TransferDisposition::NOT_STARTED;
   _recordTransfer(normalized, expectedNack);
 
   nowMs = completionClockValid ? transfer.completedMs : attemptStartedMs;
@@ -1737,8 +1775,8 @@ Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
     _lastOwnerNowValid = true;
   }
   if (normalized.disposition != TransferDisposition::NOT_STARTED) {
-    _lastAttemptCompletedMs = nowMs;
-    _lastAttemptValid = true;
+    _nextSafeCommandMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+    _nextSafeCommandValid = true;
   }
 
   if (!completionClockValid) {
@@ -1764,22 +1802,25 @@ Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
 }
 
 Status SCD41::_checkCommandSpacing(uint32_t nowMs) {
-  if (!_lastAttemptValid) {
+  if (!_nextSafeCommandValid ||
+      _timeReached(nowMs, _nextSafeCommandMs)) {
     return Status::Ok();
   }
-  const uint32_t due =
-      _lastAttemptCompletedMs + cmd::EXECUTION_TIME_SHORT_MS;
-  if (!_timeReached(nowMs, due)) {
-    _active.nextDueMs = due;
-    return Status::Error(Err::IN_PROGRESS, "Command spacing active");
-  }
-  return Status::Ok();
+  _active.nextDueMs = _nextSafeCommandMs;
+  return Status::Error(Err::IN_PROGRESS, "Command spacing active");
 }
 
 void SCD41::_finish(OperationOutcome outcome, EffectState effect,
                     const Status& status, uint32_t completedMs) {
   if (!_activeValid || _terminalValid) {
     return;
+  }
+  if (_fieldFor(_active.request.kind) != ConfigurationField::NONE ||
+      _active.request.kind == OperationKind::READ_CONFIGURATION ||
+      _active.request.kind == OperationKind::PERSIST_SETTINGS ||
+      _active.request.kind == OperationKind::REINIT ||
+      _active.request.kind == OperationKind::FACTORY_RESET) {
+    _workingValue.configuration = _configuration;
   }
   OperationResult result;
   result.id = _active.id;
@@ -1792,6 +1833,8 @@ void SCD41::_finish(OperationOutcome outcome, EffectState effect,
   result.completedMs = completedMs;
   result.deadlineMs = _active.deadlineMs;
   result.sensorEpoch = _sensorEpoch;
+  result.operatingMode = _operatingMode;
+  result.modeEvidence = _modeEvidence;
   result.completedFieldMask = _active.completedFieldMask;
   result.callbacksUsed = _active.callbacksUsed;
   result.reconciliationRequired = _reconciliationRequired;
@@ -1830,11 +1873,17 @@ void SCD41::_finishTransferFailure(const Status& status, uint32_t completedMs) {
       _markReconciliationRequired();
     }
   }
-  if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+  if ((_active.request.kind == OperationKind::PERSIST_SETTINGS ||
+       _active.request.kind == OperationKind::FACTORY_RESET) &&
       (effect == EffectState::UNKNOWN ||
        (_lastTransferWasEffectful && status.code == Err::TIMEOUT &&
         _lastTransferDisposition == TransferDisposition::COMPLETE))) {
     _configuration.persistenceIndeterminate = true;
+  }
+  if (_active.request.kind == OperationKind::READ_CONFIGURATION &&
+      _active.completedFieldMask != 0U) {
+    _workingValue.configuration = _configuration;
+    outcome = OperationOutcome::PARTIAL;
   }
   _finish(outcome, effect, status, completedMs);
 }
@@ -1907,6 +1956,9 @@ void SCD41::_storeSample(const uint16_t words[3], bool co2Valid,
 }
 
 void SCD41::_setMode(OperatingMode mode, ModeEvidence evidence) {
+  if (_operatingMode != mode) {
+    _sampleSequence = 0U;
+  }
   _operatingMode = mode;
   _modeEvidence = evidence;
 }
@@ -1924,6 +1976,7 @@ void SCD41::_advanceSensorEpoch() {
   if (_sensorEpoch == 0U) {
     _sensorEpoch = 1U;
   }
+  _sampleSequence = 0U;
   _latestSampleValid = false;
 }
 
@@ -1978,6 +2031,8 @@ void SCD41::_recordOperationOutcome(const OperationResult& result) {
       incrementSaturating(_health.totalOperationCancelled);
       _health.lastOperationErrorMs = result.completedMs;
       _health.lastOperationError = result.status;
+      _health.lastOperationErrorId = result.id;
+      _health.lastOperationErrorKind = result.kind;
       break;
     case OperationOutcome::FAILED:
     case OperationOutcome::TIMED_OUT:
@@ -1986,6 +2041,8 @@ void SCD41::_recordOperationOutcome(const OperationResult& result) {
       incrementSaturating(_health.totalOperationFailures);
       _health.lastOperationErrorMs = result.completedMs;
       _health.lastOperationError = result.status;
+      _health.lastOperationErrorId = result.id;
+      _health.lastOperationErrorKind = result.kind;
       break;
   }
 }
@@ -1997,21 +2054,6 @@ bool SCD41::_timeReached(uint32_t nowMs, uint32_t targetMs) {
 bool SCD41::_deadlineValid(uint32_t nowMs, uint32_t deadlineMs) {
   const uint32_t distance = deadlineMs - nowMs;
   return distance != 0U && distance < 0x80000000UL;
-}
-
-bool SCD41::_isSettingRead(OperationKind kind) {
-  switch (kind) {
-    case OperationKind::READ_TEMPERATURE_OFFSET:
-    case OperationKind::READ_SENSOR_ALTITUDE:
-    case OperationKind::READ_AMBIENT_PRESSURE:
-    case OperationKind::READ_ASC_ENABLED:
-    case OperationKind::READ_ASC_TARGET:
-    case OperationKind::READ_ASC_INITIAL_PERIOD:
-    case OperationKind::READ_ASC_STANDARD_PERIOD:
-      return true;
-    default:
-      return false;
-  }
 }
 
 bool SCD41::_isSettingWrite(OperationKind kind) {

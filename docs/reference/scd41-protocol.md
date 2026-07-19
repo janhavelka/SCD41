@@ -181,11 +181,13 @@ During command execution the sensor may NACK read attempts. The driver models
 these delays as observable, zero-I2C pending phases driven by caller polling,
 not hidden waits or early read retries.
 
-The `wake_up` command can NACK while still waking the sensor. The driver marks
-this one write attempt with `TransferIntent::EXPECTED_WRITE_NACK`. A generic
-transport NACK is accepted in that phase because common controllers do not
-expose address/data NACK precision. Timeout, bus fault, short transfer, and
-generic non-NACK failure remain failures.
+The `wake_up` command can NACK while still waking the sensor. Attach
+reconciliation may also see a stop-command NACK when periodic mode was not
+active. The driver marks only these expected attempts with
+`TransferIntent::EXPECTED_WRITE_NACK`. A generic transport NACK is accepted in
+a marked phase because common controllers do not expose address/data NACK
+precision. Timeout, bus fault, short transfer, and generic non-NACK failure
+remain failures.
 
 ## Measurement Modes
 

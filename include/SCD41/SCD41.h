@@ -160,13 +160,19 @@ static constexpr uint16_t ALL_CONFIGURATION_FIELDS =
     configurationFieldMask(ConfigurationField::ASC_INITIAL_PERIOD) |
     configurationFieldMask(ConfigurationField::ASC_STANDARD_PERIOD);
 
+/// Fields stored by the SCD41 `persist_settings` command. Ambient pressure is
+/// a runtime override and is intentionally excluded.
+static constexpr uint16_t PERSISTABLE_CONFIGURATION_FIELDS =
+    ALL_CONFIGURATION_FIELDS &
+    static_cast<uint16_t>(
+        ~configurationFieldMask(ConfigurationField::AMBIENT_PRESSURE));
+
 enum SampleFlag : uint16_t {
   SAMPLE_NONE = 0,
   SAMPLE_CO2_VALID = 1U << 0,
   SAMPLE_TEMPERATURE_VALID = 1U << 1,
   SAMPLE_HUMIDITY_VALID = 1U << 2,
-  SAMPLE_FRESH = 1U << 3,
-  SAMPLE_WARMUP_CANDIDATE = 1U << 4
+  SAMPLE_FRESH = 1U << 3
 };
 
 struct OperationId {
@@ -183,8 +189,11 @@ inline constexpr bool operator!=(const OperationId& lhs, const OperationId& rhs)
 }
 
 struct OperationOptions {
+  /// Caller correlation value. Zero is invalid.
   uint32_t requestId = 0;
+  /// Admission time in the owner's monotonic 32-bit millisecond clock.
   uint32_t nowMs = 0;
+  /// Immutable absolute deadline in the same clock; must be within 2^31 ms.
   uint32_t deadlineMs = 0;
 };
 
@@ -275,6 +284,8 @@ struct OperationLimits {
   OperationClass operationClass = OperationClass::RUNTIME;
   uint8_t maxCallbacks = 0;
   uint8_t maxRetries = 0;
+  /// Maximum cumulative driver-controlled wait after admission. A carried
+  /// safety window is rejected by `start()` before admission.
   uint32_t maxWaitMs = 0;
   bool writesNonvolatile = false;
   bool destructive = false;
@@ -298,6 +309,7 @@ struct FixedSample {
   uint32_t humidityMilliPercent = 0;
   uint32_t capturedAtMs = 0;
   uint32_t sensorEpoch = 0;
+  /// 1-based sample count since the latest sensor epoch or mode transition.
   uint32_t sequence = 0;
   OperatingMode mode = OperatingMode::UNKNOWN;
   uint16_t flags = SAMPLE_NONE;
@@ -313,8 +325,9 @@ struct ConfigurationSnapshot {
   uint16_t ascStandardPeriodHours = 0;
   /// Fields whose current RAM value was read back successfully.
   uint16_t verifiedMask = 0;
-  /// Fields changed or possibly changed through this instance and not known to
-  /// have been persisted.
+  /// EEPROM-persistable fields changed or possibly changed through this
+  /// instance and not known to have been persisted. Runtime ambient pressure
+  /// is never included.
   /// A field may be both verified and dirty.
   uint16_t dirtyMask = 0;
   uint32_t sensorEpoch = 0;
@@ -332,7 +345,9 @@ struct RuntimeSnapshot {
   OperationId operationId = {};
   OperationKind operationKind = OperationKind::NONE;
   uint32_t nextDueMs = 0;
+  /// Earliest safe admission/transfer time when `nextSafeCommandValid` is true.
   uint32_t nextSafeCommandMs = 0;
+  bool nextSafeCommandValid = false;
   uint32_t sensorEpoch = 0;
   bool reconciliationRequired = true;
   bool sampleAvailable = false;
@@ -356,10 +371,22 @@ struct HealthSnapshot {
   uint32_t totalOperationCancelled = 0;
   uint32_t lastOperationErrorMs = 0;
   Status lastOperationError = Status::Ok();
+  OperationId lastOperationErrorId = {};
+  OperationKind lastOperationErrorKind = OperationKind::NONE;
+  /// Most recently completed operation, whether successful or not.
   OperationId lastOperationId = {};
   OperationKind lastOperationKind = OperationKind::NONE;
 };
 
+/// Fixed result storage. Interpret members by `OperationResult::kind`:
+/// - sample operations -> `sample`
+/// - attach/identity/wake/reset verification -> `identity`
+/// - setting/configuration/persistence/reset operations -> `configuration`
+/// - data-ready -> `dataReady`
+/// - temperature offset/FRC -> `signedValue`
+/// - altitude/pressure/ASC numeric/self-test -> `value`
+/// - ASC enabled -> `boolValue`
+/// - diagnostic reads and raw maintenance responses -> `rawWords`/`wordCount`
 struct OperationValue {
   FixedSample sample = {};
   Identity identity = {};
@@ -383,7 +410,11 @@ struct OperationResult {
   uint32_t completedMs = 0;
   uint32_t deadlineMs = 0;
   uint32_t sensorEpoch = 0;
+  /// Managed mode and confidence when the operation terminated.
+  OperatingMode operatingMode = OperatingMode::UNKNOWN;
+  ModeEvidence modeEvidence = ModeEvidence::UNKNOWN;
   uint16_t completedFieldMask = 0;
+  /// Number of physical callback attempts consumed by this operation.
   uint8_t callbacksUsed = 0;
   bool reconciliationRequired = false;
   OperationValue value = {};
@@ -452,7 +483,6 @@ public:
 private:
   struct ActiveOperation {
     OperationRequest request = {};
-    OperationOptions options = {};
     OperationId id = {};
     OperationPhase phase = OperationPhase::NONE;
     EffectState effect = EffectState::NONE;
@@ -510,7 +540,6 @@ private:
 
   static bool _timeReached(uint32_t nowMs, uint32_t targetMs);
   static bool _deadlineValid(uint32_t nowMs, uint32_t deadlineMs);
-  static bool _isSettingRead(OperationKind kind);
   static bool _isSettingWrite(OperationKind kind);
   static bool _isMaintenance(OperationKind kind);
   static bool _isDiagnostic(OperationKind kind);
@@ -531,6 +560,7 @@ private:
   ModeEvidence _modeEvidence = ModeEvidence::UNKNOWN;
   bool _reconciliationRequired = true;
   uint32_t _nextSafeCommandMs = 0;
+  bool _nextSafeCommandValid = false;
   uint32_t _sensorEpoch = 0;
   uint32_t _sampleSequence = 0;
   uint32_t _nextGeneration = 1;
@@ -547,10 +577,7 @@ private:
   bool _latestSampleValid = false;
   HealthSnapshot _health = {};
 
-  uint32_t _lastAttemptCompletedMs = 0;
-  bool _lastAttemptValid = false;
   TransferDisposition _lastTransferDisposition = TransferDisposition::NOT_STARTED;
-  TransferCode _lastTransferCode = TransferCode::FAILED;
   bool _lastTransferWasEffectful = false;
   uint32_t _lastOwnerNowMs = 0;
   bool _lastOwnerNowValid = false;

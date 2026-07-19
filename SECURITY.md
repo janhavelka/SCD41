@@ -4,7 +4,8 @@
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | yes       |
+| 1.0.x release candidates | yes |
+| 0.1.x   | no        |
 
 ## Reporting a Vulnerability
 
@@ -33,7 +34,7 @@ This is an embedded sensor library. Relevant security and safety considerations 
 
 ## Best Practices For Users
 
-- Validate all external inputs before they reach `Config` or command wrappers.
+- Validate all external inputs before they reach `Config` or typed operation requests.
 - Budget the power rail for the SCD41 current pulse and avoid brownout-induced undefined behavior.
 - Use watchdogs and system-level recovery around the driver in production firmware.
 - Treat calibration and persistence commands as privileged maintenance actions, not routine telemetry flows.

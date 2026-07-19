@@ -31,31 +31,40 @@ build_unflags =
   -std=gnu++11
 build_flags =
   -std=gnu++17
+  -Ilib/SCD41/examples
+  -DTUNNELMONITOR_DIAGNOSTICS_ENGLISH=1
   -DARDUINO_USB_MODE=1
   -DARDUINO_USB_CDC_ON_BOOT=1
+  -DARDUINO_LOOP_STACK_SIZE=24576
   -DBOARD_HAS_PSRAM
+  -DTUNNELMONITOR_TARGET_ESP32S3=1
+  -DTUNNELMONITOR_REQUIRE_PSRAM=1
+  -DTUNNELMONITOR_ENABLE_I2C=1
+  -DTUNNELMONITOR_ENABLE_MEASUREMENT=1
 """
 
 CONSUMER = r'''
 #include <Arduino.h>
+#include <Wire.h>
 #include <SCD41/SCD41.h>
+#include "common/I2cTransport.h"
 
 namespace {
 SCD41::SCD41 sensor;
 volatile int consumerResult = 0;
-
-SCD41::TransferResult transfer(const SCD41::TransferRequest& request, void*) {
-  return SCD41::TransferResult::Ok(request.writeLength + request.readLength,
-                                   millis());
-}
 }  // namespace
 
 void setup() {
+  if (!transport::initWire(8, 9, 400000U, 20U)) {
+    consumerResult = 1;
+    return;
+  }
   SCD41::Config config;
-  config.transfer = transfer;
+  config.transfer = transport::wireTransfer;
+  config.transferUser = &Wire;
   config.transferTimeoutMs = 20U;
   if (!sensor.begin(config).ok()) {
-    consumerResult = 1;
+    consumerResult = 2;
     return;
   }
 
@@ -69,15 +78,15 @@ void setup() {
       static_cast<uint32_t>(limits.maxCallbacks) * config.transferTimeoutMs + 1000U;
   SCD41::OperationId id;
   if (!sensor.start(request, options, id).inProgress()) {
-    consumerResult = 2;
-    return;
-  }
-  if (!sensor.cancel(id, options.nowMs).ok()) {
     consumerResult = 3;
     return;
   }
+  if (!sensor.cancel(id, options.nowMs).ok()) {
+    consumerResult = 4;
+    return;
+  }
   SCD41::OperationResult result;
-  consumerResult = sensor.takeResult(id, result).ok() ? 0 : 4;
+  consumerResult = sensor.takeResult(id, result).ok() ? 0 : 5;
 }
 
 void loop() {}

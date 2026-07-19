@@ -3,7 +3,7 @@
 ## Role and Target
 You are a professional embedded software engineer building a production-grade SCD41 library.
 
-- Target: ESP32-S2 / ESP32-S3, Arduino framework, PlatformIO.
+- Target: ESP32-S2 / ESP32-S3, Arduino and native ESP-IDF consumers.
 - Device: Sensirion SCD41 photoacoustic NDIR CO2 sensor with integrated temperature and humidity outputs.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.
@@ -33,7 +33,8 @@ AGENTS.md
 
 Rules:
 - `examples/common/` is NOT part of the library. It simulates project glue and keeps examples self-contained.
-- No board-specific pins or bus setup in library code; only in `Config`.
+- No board-specific pins or bus setup in library code or `Config`; keep them in
+  application/example adapters.
 - Public headers only in `include/SCD41/`.
 - Examples demonstrate usage and may use `examples/common/BoardConfig.h`.
 - Keep the layout boring and predictable.
@@ -57,8 +58,12 @@ Rules:
 - Every hardware operation that can block must have a timeout and an observable failure path.
 - Recovery logic must be bounded, deterministic, and testable.
 - Do not hide hardware failures behind silent retries or fake success.
-- Non-blocking lifecycle: `Status begin(const Config&)`, `Status tick(uint32_t nowMs)`, `void end()`.
-- Any command or wait that can exceed about 1-2 ms must be split into bounded phases driven by `tick()`.
+- Non-blocking lifecycle: zero-I2C `begin()`, `start()`, `cancel()`,
+  `takeResult()`, and `end()`; only `poll(nowMs, maxCallbacks)` may invoke I2C.
+- `tick(nowMs)` is compatibility syntax for `poll(nowMs, 1)`, not a second
+  scheduler or completion path.
+- Every command sequence is one bounded operation with an absolute deadline,
+  request identity, callback limit, cancellation, and one terminal result.
 - No heap allocation in steady state (no `String`, `std::vector`, `new` in normal ops).
 - Avoid dynamic allocation in steady embedded paths unless it is already an accepted local pattern and the bound is clear.
 - No logging in library code; examples may log.
@@ -101,7 +106,9 @@ Rules:
 - The library MUST NOT own I2C. It never touches `Wire` directly.
 - Device drivers must not directly own or reconfigure a shared bus unless this repository's architecture explicitly says so.
 - `Config` MUST accept a transport adapter (function pointers or abstract interface).
-- Transport errors MUST map to `Status` (no leaking `Wire`, `esp_err_t`, etc.).
+- Adapter errors MUST map to framework-neutral `TransferCode`,
+  `TransferDisposition`, and detail values (no leaking `Wire` or `esp_err_t`
+  types into the core API).
 - The library MUST NOT configure bus timeouts or pins.
 - I2C transactions must be timeout-bounded and report errors clearly.
 - Do not implement chip protocols manually if an existing hardened project library already provides the needed timeout, recovery, and testability behavior.
@@ -130,12 +137,14 @@ struct Status {
 ## SCD41 Driver Requirements
 
 - I2C address is fixed at `0x62`.
-- Presence check in `begin()` uses `get_serial_number` and validates SCD41 variant bits `[15:12] == 0x1`.
+- `begin()` only validates and copies configuration. Explicit `ATTACH` performs
+  wake/stop reconciliation, reads `get_serial_number`, CRC-checks it, and
+  validates SCD41 variant bits `[15:12] == 0x1`.
 - All commands are 16-bit, MSB-first.
 - Every returned 16-bit data word MUST be CRC-8 checked.
 - Every written 16-bit payload word MUST append the correct CRC-8 byte.
 - Enforce minimum command spacing `tIDLE >= 1 ms`.
-- Respect power-up settle time `<= 30 ms` before the first command.
+- Wait at least the documented 30 ms power-up settle before the first command.
 - Support measurement modes:
   - periodic measurement, 1 sample per 5 s
   - low-power periodic measurement, 1 sample per 30 s
@@ -174,15 +183,27 @@ struct Status {
 
 ---
 
-## Driver Architecture: Managed Asynchronous Driver
+## Driver Architecture: Owner-Driven Operation Engine
 
-The driver follows a managed command model with health tracking:
+The driver has one execution model:
 
-- Short command writes and short reads may remain synchronous.
-- Long-running sensor operations (50 ms to 10 s) must be represented as start/poll/read sequences or other bounded state-machine steps driven by `tick()`.
-- `tick()` may be used for periodic scheduling, single-shot completion, wake-up settle timing, and other bounded command deadlines.
-- Health is tracked via tracked transport wrappers; public API never calls `_updateHealth()` directly.
-- Recovery is manual via `recover()` - the application controls retry strategy.
+- At most one active operation and one retained terminal result exist.
+- `start()` validates/admit work without I2C. Result backpressure prevents a
+  new operation until the prior result is consumed.
+- `poll(nowMs, maxCallbacks)` is the only transport executor and must never
+  exceed the supplied callback budget.
+- Every transport callback is one physical attempt. The library performs no
+  hidden retry (`OperationLimits::maxRetries == 0`).
+- Wait phases perform zero I2C. Absolute deadlines and 32-bit wrap-safe time
+  comparisons use the owner-supplied clock and callback completion timestamps.
+- `RuntimeSnapshot::nextSafeCommandMs` plus its validity flag is the earliest
+  safe next admission. `start()` returns zero-I2C `BUSY` during a retained
+  command-spacing or sensor settle window.
+- Cancellation stops future host work; it never claims hardware rollback.
+- Recovery, bus reset, rail cycling, retries, locking, and scheduling remain
+  application policy. Reconciliation after application recovery is `ATTACH`.
+- Diagnostic word commands are explicit operations and invalidate managed
+  state because unknown commands can have unknown side effects.
 
 ### DriverState (4 states only)
 
@@ -196,51 +217,48 @@ enum class DriverState : uint8_t {
 ```
 
 State transitions:
-- `begin()` success -> READY
+- `begin()` success -> READY (bound, not yet attached)
 - Any tracked I2C failure in READY -> DEGRADED
 - Success in DEGRADED/OFFLINE -> READY
 - Failures reach `offlineThreshold` -> OFFLINE
 - `end()` -> UNINIT
 
-### Transport Wrapper Architecture
-
-All I2C goes through layered wrappers:
+### Transport Contract
 
 ```text
-Public API (startMeasurement, readMeasurement, setOffset, etc.)
-    v
-Command helpers (writeCommand, writeCommandWithData, readWords)
-    v
-TRACKED wrappers (_i2cWriteReadTracked, _i2cWriteTracked)
-    v  <- _updateHealth() called here ONLY
-RAW wrappers (_i2cWriteReadRaw, _i2cWriteRaw)
-    v
-Transport callbacks (Config::i2cWrite, i2cWriteRead)
+typed OperationRequest
+    -> bounded operation phase
+    -> command/CRC helper
+    -> one TransferRequest callback attempt
+    -> normalized TransferResult + terminal OperationResult
 ```
 
 Rules:
-- Public API methods NEVER call `_updateHealth()` directly.
-- Command helpers use TRACKED wrappers so health updates automatically.
-- `probe()` uses RAW wrappers and does NOT update health.
-- `recover()` uses tracked access because the driver is initialized and failures must count.
-- Expected `wake_up` NACK must have a dedicated path and must not poison health counters.
+- A callback must return exact bytes, disposition, and completion time for one
+  attempt. Contradictory results are normalized conservatively.
+- Every attempted transfer advances the one command-safety gate. `NOT_STARTED`
+  does not.
+- Expected NACK intent is used only in the documented wake/reconciliation
+  phases and must not poison ordinary transfer-failure counters.
+- Ambiguous effectful writes are never retried and require reconciliation.
 
-### Health Tracking Rules
+### Health and Cache Rules
 
-- `_updateHealth()` is called ONLY inside tracked transport wrappers.
-- State transitions are guarded by `_initialized` (no DEGRADED/OFFLINE before `begin()` succeeds).
-- Validation failures (`INVALID_CONFIG`, `INVALID_PARAM`) do not update health.
-- Precondition failures (`NOT_INITIALIZED`) do not update health.
-- `probe()` is diagnostic only and does not update health.
-- Busy/not-ready readouts may map to `MEASUREMENT_NOT_READY` only when command context proves that interpretation.
-
-### Health Tracking Fields
-
-- `_lastOkMs` - timestamp of last successful I2C operation
-- `_lastErrorMs` - timestamp of last failed I2C operation
-- `_lastError` - most recent error `Status`
-- `_consecutiveFailures` - failures since last success (resets on success)
-- `_totalFailures` / `_totalSuccess` - lifetime counters (wrap at max)
+- Health is passive telemetry and never blocks a caller-authorized attempt.
+- Transport, protocol/CRC, and terminal-operation counters/errors are separate.
+- Validation, admission, and precondition failures do not update hardware
+  health. Expected NACKs have their own counter.
+- Busy/not-ready maps to `MEASUREMENT_NOT_READY` only when command context
+  proves that interpretation.
+- Identity, sample, and configuration caches carry sensor epoch/provenance.
+  Failed, cancelled, reset-like, or ambiguous work must not publish stale state
+  as verified.
+- Configuration setters read current hardware, avoid unchanged writes,
+  invalidate before mutation, and verify by readback.
+- `dirtyMask` contains only EEPROM-persistable settings. Ambient pressure is a
+  runtime override and never creates persistence work.
+- Persistence and factory-reset uncertainty block blind `PERSIST_SETTINGS`
+  until explicit reinit/reconciliation clears it.
 
 ---
 
@@ -257,7 +275,10 @@ Release steps:
 1. Update `library.json`.
 2. Update `CHANGELOG.md` (Added/Changed/Fixed/Removed).
 3. Update `README.md` and `ASSUMPTIONS.md` if device behavior or scope notes changed.
-4. Commit and tag: `Release vX.Y.Z`.
+4. Run native, sanitizer, package, target, and applicable framework builds.
+5. Run/record physical HIL gates required by the release policy.
+6. Commit and tag: `Release vX.Y.Z`. Do not create the release tag while a
+   required physical evidence gate remains open.
 
 ---
 

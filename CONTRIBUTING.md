@@ -10,7 +10,10 @@ Thanks for contributing to this repository.
 4. Run the repository checks that apply to your change:
    - `python tools/check_core_timing_guard.py`
    - `python tools/check_cli_contract.py`
+   - `python tools/check_idf_example_contract.py`
+   - `python scripts/generate_version.py check`
    - `pio test -e native`
+   - `pio test -e native_ubsan`
    - `pio run -e esp32s3dev`
    - `pio run -e esp32s2dev`
 5. Update `CHANGELOG.md` and package docs when behavior or metadata changes.
@@ -29,7 +32,12 @@ Thanks for contributing to this repository.
 - Follow the repository naming and layout conventions from `AGENTS.md`.
 - Use `constexpr` instead of macros for constants.
 - No heap allocation in steady-state library code.
-- Keep long sensor operations bounded and `tick()`-driven instead of blocking for hundreds or thousands of milliseconds.
+- Keep all sensor work in the one `start()` / callback-budgeted `poll()` /
+  `takeResult()` model. `tick()` is only a one-callback compatibility executor.
+- Keep admission, cancellation, and result consumption zero-I2C. Preserve
+  absolute deadlines, `nextSafeCommandMs`, and one terminal result per ID.
+- Keep transport attempts single-shot. Retry, bus reset, power cycling, and
+  locking belong to the application owner.
 - Keep EEPROM-writing commands explicit and rare.
 
 ### Pull Requests

@@ -60,8 +60,8 @@ Mapping guidance:
 
 Do not claim `NO_EFFECT` unless the platform proves it. Do not convert timeout
 or bus failure into NACK. The request intent `EXPECTED_WRITE_NACK` is used for
-SCD41 wake-up; a generic NACK is acceptable in that context, but other failures
-remain failures.
+SCD41 wake and attach stop-reconciliation phases; a generic NACK is acceptable
+only in those marked contexts, while other failures remain failures.
 
 ## Lifecycle
 
@@ -147,6 +147,11 @@ result has been consumed.
 `cancel(id, nowMs)` performs no I2C. It prevents later phases and stores a
 terminal cancelled result. If bytes were already accepted, the effect field and
 reconciliation flag remain conservative; cancellation is not hardware rollback.
+After every attempted transfer, and after cancellation or timeout during a
+long sensor action, `RuntimeSnapshot::nextSafeCommandMs` is the earliest safe
+admission time while `nextSafeCommandValid` is true. The validity flag matters
+when the absolute timestamp wraps to zero. `start()` returns zero-I2C `BUSY`
+until that time; no new operation silently absorbs an inherited wait.
 
 `end()` also performs no I2C. Active work becomes a retained cancellation
 result. The application remains responsible for any desired stop command, bus
@@ -167,7 +172,8 @@ argument, that result uses the last owner timestamp accepted by the driver.
 - `maxCallbacks`: total transport attempts in the complete operation
 - `maxRetries`: internal retries; currently zero
 - `maxWaitMs`: maximum cumulative sensor wait and mandatory inter-transaction
-  spacing in the operation
+  spacing after the operation is admitted. `start()` returns `BUSY` instead of
+  admitting work during a carried safety window from an earlier operation.
 - `writesNonvolatile` and `destructive` flags
 
 Rare work is not forced into a steady-state latency. Self-test can wait 10 s,
@@ -221,15 +227,29 @@ Effect states distinguish `NOT_ATTEMPTED`, `ATTEMPTED`, `ACKNOWLEDGED`,
 necessarily verified device state. Where readback is possible, verified cache
 state is published only after it succeeds.
 
+Use `OperationResult::kind` to select the authoritative value member:
+
+| Kind group | Result value |
+| --- | --- |
+| sample fetch/single shot | `sample` |
+| attach, identity, wake, reinit, factory reset | `identity` |
+| setting read/write, configuration read, persistence, reset | `configuration` |
+| data-ready | `dataReady` |
+| temperature offset / forced recalibration | `signedValue` |
+| altitude, pressure, ASC numbers, self-test | `value` |
+| ASC enabled | `boolValue` |
+| diagnostic read / raw maintenance word | `rawWords`, `wordCount` |
+
 ## Cache and publication
 
 Cache snapshots perform zero I2C. They are evidence, not commands.
 
 - `configurationSnapshot().verifiedMask` identifies read/verified fields.
-- `dirtyMask` identifies runtime fields changed or possibly changed through
-  this driver instance that are not known to have been persisted. A field can
-  be both verified and dirty. Persistence is rejected while a dirty field is
-  unverified; reconcile it through typed readback or reapply first.
+- `dirtyMask` identifies EEPROM-persistable fields changed or possibly changed
+  through this driver instance that are not known to have been persisted. A
+  field can be both verified and dirty. Ambient pressure is a runtime override
+  and never appears in `dirtyMask`. Persistence is rejected while a dirty field
+  is unverified; reconcile it through typed readback or reapply first.
 - `persistenceIndeterminate` prevents an ambiguous EEPROM result from being
   reported as known persisted state.
 - `runtimeSnapshot().reconciliationRequired` signals that normal publication or
@@ -260,7 +280,8 @@ request a new identity. Never resume polling an old timed-out or cancelled ID.
 
 `HealthSnapshot` separates transfer, protocol/CRC, and operation counters. Its
 `OFFLINE` state is a diagnostic threshold, not a hidden transport gate and not a
-replacement for system health policy.
+replacement for system health policy. `Config::offlineThreshold == 0` disables
+the `OFFLINE` transition; attempted failures still report `DEGRADED`.
 
 ## Integration checklist
 

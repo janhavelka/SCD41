@@ -9,6 +9,7 @@ namespace SCD41 {
 
 enum class TransferIntent : uint8_t {
   NORMAL = 0,
+  /// Wake/reconciliation write for which a generic NACK is expected.
   EXPECTED_WRITE_NACK
 };
 
@@ -67,11 +68,18 @@ struct TransferResult {
 using I2cTransferFn = TransferResult (*)(const TransferRequest& request, void* user);
 
 struct Config {
+  /// Required callback. It must perform exactly one bounded physical attempt.
   I2cTransferFn transfer = nullptr;
+  /// Non-owning callback context; it must outlive all driver use.
   void* transferUser = nullptr;
+  /// Maximum time passed to one adapter attempt, in milliseconds.
   uint32_t transferTimeoutMs = 50;
+  /// Initial attach power-up wait. Values below 30 ms are rejected.
   uint16_t powerUpDelayMs = 30;
+  /// Consecutive attempted transfer failures that report passive `OFFLINE`.
+  /// Zero disables `OFFLINE`; failures still report `DEGRADED`.
   uint8_t offlineThreshold = 5;
+  /// Reject observed family variants other than SCD41 during verification.
   bool strictVariantCheck = true;
 };
 

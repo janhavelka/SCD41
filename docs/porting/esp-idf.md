@@ -121,9 +121,10 @@ Set `bytesTransferred` to the full requested byte count only on `ESP_OK` unless
 the platform gives a trustworthy partial count. Store the raw `esp_err_t` in
 `detail`.
 
-Wake-up does not require fabricated address/data NACK codes. The driver marks
-that transfer with `TransferIntent::EXPECTED_WRITE_NACK`; a generic `NACK` is
-accepted only for that documented phase. Timeout and bus error remain failures.
+Wake-up and attach stop reconciliation do not require fabricated address/data
+NACK codes. The driver marks only those transfers with
+`TransferIntent::EXPECTED_WRITE_NACK`; a generic `NACK` is accepted only in a
+marked phase. Timeout and bus error remain failures.
 
 ## Owner-task loop
 

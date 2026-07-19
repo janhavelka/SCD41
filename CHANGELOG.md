@@ -6,9 +6,12 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-07-19
+The manifest is staged at `1.0.0` for compatibility validation. No `v1.0.0`
+release or tag exists yet; physical HIL is still a release gate.
 
-### Added
+### Planned 1.0.0
+
+#### Added
 
 - One typed, externally scheduled operation model with request ID, generation,
   immutable deadline, progress, cancellation, and exactly-once terminal result.
@@ -31,7 +34,7 @@ All notable changes are documented here. The format follows
   portability, and package-consumer validation.
 - Undefined-behavior sanitizer CI coverage and packed-library consumer checks.
 
-### Changed
+#### Changed
 
 - `begin(const Config&)` is now a zero-I2C bind. Hardware discovery and
   reconciliation use an explicit `ATTACH` operation.
@@ -51,7 +54,7 @@ All notable changes are documented here. The format follows
 - Release packages include stable integration documentation and exclude dated
   audit/HIL reports.
 
-### Removed
+#### Removed
 
 - Blocking/direct device command APIs and the separate legacy measurement
   scheduler.
@@ -60,7 +63,7 @@ All notable changes are documented here. The format follows
 - Precise address/data/read NACK requirements from the active transport API.
 - Legacy raw byte APIs that could bypass CRC or managed state.
 
-### Compatibility
+#### Compatibility
 
 This is a breaking release. Existing consumers must replace legacy callback
 fields and direct command calls with `Config::transfer`, typed
@@ -75,6 +78,5 @@ but the active unified transport maps ordinary NACKs to `Err::I2C_NACK`.
 - Initial SCD41 package metadata and repository policy files.
 - First SCD41 driver core, examples, native tests, and datasheet reference.
 
-[Unreleased]: https://github.com/janhavelka/SCD41/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/janhavelka/SCD41/compare/v0.1.0...v1.0.0
+[Unreleased]: https://github.com/janhavelka/SCD41/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/janhavelka/SCD41/releases/tag/v0.1.0

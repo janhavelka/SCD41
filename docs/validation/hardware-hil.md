@@ -85,8 +85,9 @@ Pass criteria:
 - Periodic and low-power samples arrive at their device cadence.
 - Full single shot reports CO2/T/RH valid; RHT-only does not report CO2 valid.
 - Stop-periodic includes the 500 ms settle without owner-task blocking.
-- Wake accepts the documented generic expected NACK without incrementing a real
-  transfer-failure counter; timeout and bus errors still fail.
+- Wake and attach reconciliation accept documented generic expected NACK phases
+  without incrementing a real transfer-failure counter; timeout and bus errors
+  still fail.
 - Every started operation has one correlated terminal result and the next
   request is not attributed to an older result.
 - Final health has no unexplained CRC, transport, operation, or offline event.
@@ -104,7 +105,7 @@ condition. Run them separately from the safe automated sequence.
 | Unknown retained mode | Leave the sensor in periodic mode, restart only the MCU, then issue `begin` | attach reconciles without assuming sensor reset; result identity is new and final mode/evidence is explicit |
 | Active-operation MCU restart | Restart MCU during stop, single-shot wait, or maintenance wait while sensor rail remains powered | new firmware does not publish the abandoned request; attach reconciles before normal work |
 | Shared-bus load | Run other known devices through the same owner with the configured SCD41 callback budget | no SCD41 poll exceeds its callback budget; other devices continue to receive service |
-| Generic wake NACK | Use the normal ESP-IDF adapter, which does not invent address/data NACK precision | wake succeeds only for generic NACK in the marked wake phase; health records expected NACK separately |
+| Generic expected NACK | Use the normal ESP-IDF adapter, which does not invent address/data NACK precision | wake and attach convergence succeed only for generic NACK in marked wake/stop reconciliation phases; health records expected NACK separately |
 | Sensor hot-unplug | Disconnect SCD41 between operation phases | bounded terminal failure/indeterminate result; no unbounded poll or silent success; other bus devices recover by owner policy |
 | Sensor hot-replug | Reconnect after a failed operation and submit a new attach ID | old result cannot be republished; new attach restores verified identity/state |
 | Rail interruption | Cut the sensor rail after an effectful write attempt and before readback | result remains cancelled, timed out, partial, or indeterminate as evidence permits; cache is not reported verified |

@@ -107,6 +107,11 @@ Only one operation or one unconsumed result exists per instance.
 4. When state becomes `RESULT_PENDING`, call `takeResult(id, result)` once.
 5. Start the next request only after consuming the terminal result.
 
+When `RuntimeSnapshot::nextSafeCommandValid` is true, honor
+`nextSafeCommandMs` even when its wrapped value is zero. `start()` returns
+zero-I2C `BUSY` while command spacing or a retained sensor settle window is
+active.
+
 `cancel(id, nowMs)` cancels host-side future work without I2C and retains a
 `CANCELLED` result. It cannot undo bytes already accepted by the sensor.
 `end()` also performs no I2C; active work becomes a retained cancelled result
@@ -165,15 +170,18 @@ dirty or requires reconciliation as applicable. Reset-like operations advance
 the sensor epoch so an older sample cannot be presented as current sensor state.
 Setting operations read the current value first, skip the write when it already
 matches, and verify after a real write. `dirtyMask` means this driver changed or
-may have changed the runtime field and does not know it to be persisted; a field
-may be both verified and dirty. Persistence is rejected while any dirty field is
-unverified. Persistence is a zero-write success when this instance has no known
-unpersisted field. That no-op does not read or prove EEPROM contents after a
-fresh bind.
+may have changed an EEPROM-persistable field and does not know it to be
+persisted; a field may be both verified and dirty. Ambient pressure is a runtime
+override and never creates persistence work. Persistence is rejected while any
+dirty field is unverified. Persistence is a zero-write success when this
+instance has no known unpersisted field. That no-op does not read or prove
+EEPROM contents after a fresh bind.
 
 `FixedSample` contains fixed-width CO2 ppm, temperature in milli-degrees C,
 humidity in milli-percent, capture time, sensor epoch, sequence, mode, and
-validity/freshness flags. The RHT-only operation does not mark CO2 valid.
+validity/freshness flags. Sequence is 1-based since the latest sensor epoch or
+mode transition; the application chooses any warm-up discard count. The
+RHT-only operation does not mark CO2 valid.
 
 ## Supported device functionality
 
@@ -209,10 +217,10 @@ The adapter maps platform results into:
 when bytes were requested must not be reported as success. `bytesTransferred`
 must be accurate when the platform exposes it.
 
-The SCD41 wake command can NACK by design. The request carries
-`EXPECTED_WRITE_NACK`, so even an adapter that exposes only a generic NACK can
-report it without inventing address/data precision. Timeouts and bus errors are
-not expected wake results.
+The SCD41 wake command can NACK by design, and attach reconciliation may see a
+stop-command NACK when no periodic mode is active. Those marked phases carry
+`EXPECTED_WRITE_NACK`, so an adapter exposing only a generic NACK need not
+invent address/data precision. Timeouts and bus errors are not expected NACKs.
 
 ## Concurrency and ownership
 
