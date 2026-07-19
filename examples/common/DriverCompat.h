@@ -1,6 +1,6 @@
 /**
  * @file DriverCompat.h
- * @brief Example-side aliases for the SCD41 driver API.
+ * @brief Small example aliases and stable diagnostic names.
  */
 
 #pragma once
@@ -16,99 +16,153 @@ using Status = api::Status;
 using Err = api::Err;
 using Config = api::Config;
 using DriverState = api::DriverState;
-using TransportCapability = api::TransportCapability;
-using SettingsSnapshot = api::SettingsSnapshot;
-using Identity = api::Identity;
-using Measurement = api::Measurement;
-using RawSample = api::RawSample;
-using CompensatedSample = api::CompensatedSample;
-using DataReadyStatus = api::DataReadyStatus;
 using OperatingMode = api::OperatingMode;
-using PendingCommand = api::PendingCommand;
-using SingleShotMode = api::SingleShotMode;
 using SensorVariant = api::SensorVariant;
+using OperationId = api::OperationId;
+using OperationKind = api::OperationKind;
+using OperationOptions = api::OperationOptions;
+using OperationOutcome = api::OperationOutcome;
+using OperationRequest = api::OperationRequest;
+using OperationResult = api::OperationResult;
+using OperationState = api::OperationState;
+using PollResult = api::PollResult;
+using EffectState = api::EffectState;
+using FixedSample = api::FixedSample;
+using RuntimeSnapshot = api::RuntimeSnapshot;
+using HealthSnapshot = api::HealthSnapshot;
+using ConfigurationSnapshot = api::ConfigurationSnapshot;
+using Identity = api::Identity;
 
-inline const char* driverName() { return "SCD41"; }
-inline const char* coreHeader() { return "SCD41/SCD41.h"; }
-inline const char* coreNamespace() { return "SCD41"; }
-inline const char* version() { return api::VERSION; }
-inline const char* versionFull() { return api::VERSION_FULL; }
-inline const char* buildTimestamp() { return api::BUILD_TIMESTAMP; }
-inline const char* gitCommit() { return api::GIT_COMMIT; }
-inline const char* gitStatus() { return api::GIT_STATUS; }
-
-inline const char* errToString(Err err) {
-  switch (err) {
+inline const char* errToString(Err value) {
+  switch (value) {
     case Err::OK: return "OK";
     case Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
     case Err::INVALID_CONFIG: return "INVALID_CONFIG";
-    case Err::I2C_ERROR: return "I2C_ERROR";
-    case Err::TIMEOUT: return "TIMEOUT";
     case Err::INVALID_PARAM: return "INVALID_PARAM";
-    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
-    case Err::CRC_MISMATCH: return "CRC_MISMATCH";
-    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
     case Err::BUSY: return "BUSY";
     case Err::IN_PROGRESS: return "IN_PROGRESS";
+    case Err::RESULT_NOT_READY: return "RESULT_NOT_READY";
+    case Err::STALE_RESULT: return "STALE_RESULT";
+    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
+    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
+    case Err::CRC_MISMATCH: return "CRC_MISMATCH";
     case Err::COMMAND_FAILED: return "COMMAND_FAILED";
     case Err::UNSUPPORTED: return "UNSUPPORTED";
+    case Err::TIMEOUT: return "TIMEOUT";
+    case Err::CANCELLED: return "CANCELLED";
+    case Err::PARTIAL: return "PARTIAL";
+    case Err::INDETERMINATE: return "INDETERMINATE";
+    case Err::CONFIRMATION_REQUIRED: return "CONFIRMATION_REQUIRED";
+    case Err::RECONCILIATION_REQUIRED: return "RECONCILIATION_REQUIRED";
+    case Err::I2C_ERROR: return "I2C_ERROR";
     case Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
     case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
     case Err::I2C_NACK_READ: return "I2C_NACK_READ";
+    case Err::I2C_NACK: return "I2C_NACK";
     case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
     case Err::I2C_BUS: return "I2C_BUS";
+    case Err::I2C_SHORT_TRANSFER: return "I2C_SHORT_TRANSFER";
     case Err::OFFLINE: return "OFFLINE";
-    default: return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
-inline const char* stateToString(DriverState state) {
-  switch (state) {
+inline const char* stateToString(DriverState value) {
+  switch (value) {
     case DriverState::UNINIT: return "UNINIT";
     case DriverState::READY: return "READY";
     case DriverState::DEGRADED: return "DEGRADED";
     case DriverState::OFFLINE: return "OFFLINE";
-    default: return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
-inline const char* modeToString(OperatingMode mode) {
-  switch (mode) {
+inline const char* modeToString(OperatingMode value) {
+  switch (value) {
+    case OperatingMode::UNKNOWN: return "UNKNOWN";
     case OperatingMode::IDLE: return "IDLE";
     case OperatingMode::PERIODIC: return "PERIODIC";
     case OperatingMode::LOW_POWER_PERIODIC: return "LOW_POWER_PERIODIC";
     case OperatingMode::POWER_DOWN: return "POWER_DOWN";
-    default: return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
-inline const char* pendingToString(PendingCommand cmd) {
-  switch (cmd) {
-    case PendingCommand::NONE: return "NONE";
-    case PendingCommand::STOP_PERIODIC: return "STOP_PERIODIC";
-    case PendingCommand::SINGLE_SHOT: return "SINGLE_SHOT";
-    case PendingCommand::SINGLE_SHOT_RHT_ONLY: return "SINGLE_SHOT_RHT_ONLY";
-    case PendingCommand::POWER_DOWN: return "POWER_DOWN";
-    case PendingCommand::WAKE_UP: return "WAKE_UP";
-    case PendingCommand::PERSIST_SETTINGS: return "PERSIST_SETTINGS";
-    case PendingCommand::REINIT: return "REINIT";
-    case PendingCommand::FACTORY_RESET: return "FACTORY_RESET";
-    case PendingCommand::SELF_TEST: return "SELF_TEST";
-    case PendingCommand::FORCED_RECALIBRATION: return "FORCED_RECALIBRATION";
-    case PendingCommand::POWER_CYCLE: return "POWER_CYCLE";
-    default: return "UNKNOWN";
+inline const char* operationToString(OperationKind value) {
+  switch (value) {
+    case OperationKind::NONE: return "NONE";
+    case OperationKind::ATTACH: return "ATTACH";
+    case OperationKind::READ_IDENTITY: return "READ_IDENTITY";
+    case OperationKind::START_PERIODIC: return "START_PERIODIC";
+    case OperationKind::START_LOW_POWER_PERIODIC: return "START_LOW_POWER_PERIODIC";
+    case OperationKind::STOP_PERIODIC: return "STOP_PERIODIC";
+    case OperationKind::READ_DATA_READY: return "READ_DATA_READY";
+    case OperationKind::FETCH_SAMPLE: return "FETCH_SAMPLE";
+    case OperationKind::SINGLE_SHOT: return "SINGLE_SHOT";
+    case OperationKind::SINGLE_SHOT_RHT_ONLY: return "SINGLE_SHOT_RHT_ONLY";
+    case OperationKind::READ_TEMPERATURE_OFFSET: return "READ_TEMPERATURE_OFFSET";
+    case OperationKind::SET_TEMPERATURE_OFFSET: return "SET_TEMPERATURE_OFFSET";
+    case OperationKind::READ_SENSOR_ALTITUDE: return "READ_SENSOR_ALTITUDE";
+    case OperationKind::SET_SENSOR_ALTITUDE: return "SET_SENSOR_ALTITUDE";
+    case OperationKind::READ_AMBIENT_PRESSURE: return "READ_AMBIENT_PRESSURE";
+    case OperationKind::SET_AMBIENT_PRESSURE: return "SET_AMBIENT_PRESSURE";
+    case OperationKind::READ_ASC_ENABLED: return "READ_ASC_ENABLED";
+    case OperationKind::SET_ASC_ENABLED: return "SET_ASC_ENABLED";
+    case OperationKind::READ_ASC_TARGET: return "READ_ASC_TARGET";
+    case OperationKind::SET_ASC_TARGET: return "SET_ASC_TARGET";
+    case OperationKind::READ_ASC_INITIAL_PERIOD: return "READ_ASC_INITIAL_PERIOD";
+    case OperationKind::SET_ASC_INITIAL_PERIOD: return "SET_ASC_INITIAL_PERIOD";
+    case OperationKind::READ_ASC_STANDARD_PERIOD: return "READ_ASC_STANDARD_PERIOD";
+    case OperationKind::SET_ASC_STANDARD_PERIOD: return "SET_ASC_STANDARD_PERIOD";
+    case OperationKind::READ_CONFIGURATION: return "READ_CONFIGURATION";
+    case OperationKind::POWER_DOWN: return "POWER_DOWN";
+    case OperationKind::WAKE_UP: return "WAKE_UP";
+    case OperationKind::REINIT: return "REINIT";
+    case OperationKind::SELF_TEST: return "SELF_TEST";
+    case OperationKind::FORCED_RECALIBRATION: return "FORCED_RECALIBRATION";
+    case OperationKind::PERSIST_SETTINGS: return "PERSIST_SETTINGS";
+    case OperationKind::FACTORY_RESET: return "FACTORY_RESET";
+    case OperationKind::DIAGNOSTIC_READ_WORDS: return "DIAGNOSTIC_READ_WORDS";
+    case OperationKind::DIAGNOSTIC_WRITE_COMMAND: return "DIAGNOSTIC_WRITE_COMMAND";
+    case OperationKind::DIAGNOSTIC_WRITE_WORD: return "DIAGNOSTIC_WRITE_WORD";
   }
+  return "UNKNOWN";
 }
 
-inline const char* variantToString(SensorVariant variant) {
-  switch (variant) {
+inline const char* outcomeToString(OperationOutcome value) {
+  switch (value) {
+    case OperationOutcome::SUCCEEDED: return "SUCCEEDED";
+    case OperationOutcome::NO_DATA: return "NO_DATA";
+    case OperationOutcome::FAILED: return "FAILED";
+    case OperationOutcome::CANCELLED: return "CANCELLED";
+    case OperationOutcome::TIMED_OUT: return "TIMED_OUT";
+    case OperationOutcome::PARTIAL: return "PARTIAL";
+    case OperationOutcome::INDETERMINATE: return "INDETERMINATE";
+  }
+  return "UNKNOWN";
+}
+
+inline const char* effectToString(EffectState value) {
+  switch (value) {
+    case EffectState::NONE: return "NONE";
+    case EffectState::NOT_ATTEMPTED: return "NOT_ATTEMPTED";
+    case EffectState::ATTEMPTED: return "ATTEMPTED";
+    case EffectState::ACKNOWLEDGED: return "ACKNOWLEDGED";
+    case EffectState::VERIFIED: return "VERIFIED";
+    case EffectState::UNKNOWN: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+inline const char* variantToString(SensorVariant value) {
+  switch (value) {
+    case SensorVariant::UNKNOWN: return "UNKNOWN";
     case SensorVariant::SCD40: return "SCD40";
     case SensorVariant::SCD41: return "SCD41";
     case SensorVariant::SCD42: return "SCD42";
     case SensorVariant::SCD43: return "SCD43";
-    case SensorVariant::UNKNOWN: return "UNKNOWN";
-    default: return "UNKNOWN";
   }
+  return "UNKNOWN";
 }
 
-} // namespace app_driver
+}  // namespace app_driver

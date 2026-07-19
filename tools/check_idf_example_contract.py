@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Keep the native ESP-IDF CLI aligned with the Arduino CLI and core boundary."""
 from __future__ import annotations
 
 import pathlib
@@ -9,67 +10,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 ARDUINO_MAIN = ROOT / "examples" / "01_basic_bringup_cli" / "main.cpp"
 IDF_ROOT = ROOT / "examples" / "idf" / "basic"
 IDF_MAIN = IDF_ROOT / "main" / "main.cpp"
-IDF_MAIN_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
-IDF_SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".h", ".hpp"}
+IDF_TRANSPORT = IDF_ROOT / "main" / "IdfI2cTransport.cpp"
+IDF_TRANSPORT_HEADER = IDF_ROOT / "main" / "IdfI2cTransport.h"
+IDF_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
 
 MANDATORY_COMMANDS = {
-    "?",
-    "help",
-    "version",
-    "ver",
-    "info",
-    "scan",
-    "begin",
-    "end",
-    "probe",
-    "recover",
-    "diag",
-    "demo",
-    "drv",
-    "drv1",
-    "state",
-    "cfg",
-    "settings",
-    "status",
-    "read",
-    "fetch",
-    "sample",
-    "last",
-    "raw",
-    "comp",
-    "dataready",
-    "watch",
-    "verbose",
-    "stress",
-    "single",
-    "single_start",
-    "convert",
-    "mode",
-    "periodic",
-    "sleep",
-    "wake",
-    "serial",
-    "variant",
-    "toffset",
-    "altitude",
-    "pressure",
-    "asc_enabled",
-    "asc_target",
-    "asc_initial",
-    "asc_standard",
-    "persist",
-    "reinit",
-    "factory_reset",
-    "selftest",
-    "selftest_result",
-    "frc",
-    "frc_result",
-    "command",
+    "?", "help", "version", "scan", "begin", "end", "status", "result",
+    "cancel", "identity", "periodic", "dataready", "read", "single", "sample",
+    "settings", "sleep", "wake", "toffset", "altitude", "pressure",
+    "asc_enabled", "asc_target", "asc_initial", "asc_standard", "reinit",
+    "selftest", "frc", "persist", "factory_reset", "command",
 }
-
-MANDATORY_RAW_SUBCOMMANDS = {"write", "write_data", "read", "read_word", "read_words"}
-
-REQUIRED_IDF_TOKENS = [
+REQUIRED_IDF_TOKENS = (
     "driver/i2c_master.h",
     "esp_timer.h",
     "freertos/task.h",
@@ -77,220 +29,141 @@ REQUIRED_IDF_TOKENS = [
     "i2c_new_master_bus",
     "i2c_master_bus_add_device",
     "i2c_master_probe",
-    "printPrompt",
-    "printStatus",
-    "printHealthDiff",
-    "printPendingWorkView",
-    "LOG_COLOR_GREEN",
-    "LOG_COLOR_YELLOW",
-    "LOG_COLOR_RED",
-    "const app_driver::Status tickSt = device.tick",
-    "printStatus(tickSt)",
-]
-REQUIRED_IDF_CMAKE_TOKENS = [
-    "SCD41",
-    "esp_driver_i2c",
-    "esp_timer",
-    "freertos",
-]
-DESTRUCTIVE_CONFIRMATION_TOKENS = [
-    'printHelpItem("persist confirm"',
-    'printHelpItem("factory_reset confirm"',
-    'printHelpItem("frc confirm <reference_ppm>"',
-    "use 'persist confirm' to write EEPROM",
-    "use 'factory_reset confirm' to erase/reset settings",
-    "use 'frc confirm <reference_ppm>' to update calibration history",
-]
-
-FORBIDDEN_IDF_INCLUDE_RE = re.compile(
-    r'^\s*#\s*include\s*[<"]'
-    r"(?:Arduino\.h|Wire\.h|string|driver/i2c\.h)"
-    r'[>"]',
-    re.MULTILINE,
+    "device.begin(config)",
+    "device.start(request, options, id)",
+    "device.poll(idfNowMs(), 1U)",
+    "device.cancel(runtime.operationId, idfNowMs())",
+    "device.takeResult(id, result)",
+    "SCD41::SCD41::limits(kind)",
 )
-
-FORBIDDEN_IDF_PATTERNS = {
-    "ArduinoCompat": re.compile(r"\bArduinoCompat\b"),
-    "IdfArduinoCompat": re.compile(r"\bIdfArduinoCompat\b"),
-    "TwoWire": re.compile(r"\bTwoWire\b"),
-    "String": re.compile(r"\bString\b"),
-    "Serial": re.compile(r"\bSerial\b"),
-    "<string>": re.compile(r"#\s*include\s*<string>"),
-    "std::string": re.compile(r"\bstd::string\b"),
-    "std::vector": re.compile(r"\bstd::vector\b"),
-    "operator new": re.compile(r"\bnew\b"),
-    "malloc": re.compile(r"\bmalloc\s*\("),
-    "calloc": re.compile(r"\bcalloc\s*\("),
-    "realloc": re.compile(r"\brealloc\s*\("),
-    "free": re.compile(r"\bfree\s*\("),
-    "millis()": re.compile(r"\bmillis\s*\("),
-    "Arduino CLI source": re.compile(r"examples/01_basic_bringup_cli/main\.cpp"),
-    "setup": re.compile(r"\bsetup\s*\(\s*\)\s*;"),
-    "loop": re.compile(r"\bloop\s*\(\s*\)\s*;"),
+REQUIRED_TRANSPORT_TOKENS = (
+    "SCD41::TransferResult idfI2cTransfer",
+    "const SCD41::TransferRequest& request",
+    "i2c_master_transmit_receive",
+    "ESP_ERR_INVALID_RESPONSE",
+    "SCD41::TransferCode::NACK",
+    "SCD41::TransferDisposition::INDETERMINATE",
+    "SCD41::TransferDisposition::NOT_STARTED",
+)
+FORBIDDEN_DRIVER_CALLS = (
+    ".tick(", ".probe(", ".recover(", ".readMeasurement(",
+    ".startPeriodicMeasurement(", ".stopPeriodicMeasurement(",
+)
+FORBIDDEN_PATTERNS = {
+    "Arduino header": re.compile(r'^\s*#\s*include\s*[<"](?:Arduino\.h|Wire\.h)[>"]', re.MULTILINE),
+    "legacy I2C header": re.compile(r'^\s*#\s*include\s*<driver/i2c\.h>', re.MULTILINE),
+    "Arduino facade": re.compile(r"\b(?:ArduinoCompat|IdfArduinoCompat|TwoWire|Serial|String)\b"),
+    "dynamic C++ container": re.compile(r"\bstd::(?:string|vector)\b"),
+    "heap allocation": re.compile(r"\b(?:malloc|calloc|realloc|free)\s*\(|\bnew\s+"),
+    "Arduino time": re.compile(r"\bmillis\s*\("),
+    "Arduino source reuse": re.compile(r"examples/01_basic_bringup_cli/main\.cpp"),
 }
 
-BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
-LINE_COMMENT_RE = re.compile(r"//[^\n]*")
-STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+LINE_COMMENT = re.compile(r"//[^\n]*")
+STRING = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
 
-def fail(msg: str) -> None:
-    print(f"IDF example contract FAILED: {msg}")
+def fail(message: str) -> None:
+    print(f"IDF example contract FAILED: {message}")
     raise SystemExit(1)
 
 
 def read(path: pathlib.Path) -> str:
-    if not path.exists():
+    if not path.is_file():
         fail(f"missing file: {path.relative_to(ROOT).as_posix()}")
     return path.read_text(encoding="utf-8", errors="replace")
 
 
 def strip_non_code(text: str) -> str:
-    text = BLOCK_COMMENT_RE.sub("", text)
-    text = LINE_COMMENT_RE.sub("", text)
-    return STRING_RE.sub('""', text)
-
-
-def idf_sources() -> list[pathlib.Path]:
-    if not IDF_ROOT.exists():
-        fail(f"missing IDF example directory: {IDF_ROOT.relative_to(ROOT).as_posix()}")
-    return sorted(
-        path
-        for path in IDF_ROOT.rglob("*")
-        if path.is_file() and path.suffix.lower() in IDF_SOURCE_SUFFIXES
-    )
+    return STRING.sub('""', LINE_COMMENT.sub("", BLOCK_COMMENT.sub("", text)))
 
 
 def help_sections(text: str) -> list[str]:
-    return re.findall(r"printHelpSection\(\"([^\"]+)\"\)", text)
+    return re.findall(r'printHelpSection\("([^"]+)"\)', text)
 
 
 def help_items(text: str) -> list[str]:
-    return re.findall(r"printHelpItem\(\"([^\"]+)\"", text)
+    return re.findall(r'printHelpItem\("([^"]+)"', text)
 
 
-def head_commands(text: str) -> set[str]:
-    return set(re.findall(r"\bhead\s*==\s*\"([^\"]+)\"", text))
-
-
-def raw_subcommands(text: str) -> set[str]:
-    return set(re.findall(r"\bsub\s*==\s*\"([^\"]+)\"", text))
-
-
-def aliases_from_help(items: list[str]) -> set[str]:
-    aliases: set[str] = set()
-    for item in items:
-        command_part = item.split(" ", 1)[0]
-        for alias in command_part.split("/"):
-            aliases.add(alias.strip())
-    return {alias for alias in aliases if alias}
+def command_names(text: str) -> set[str]:
+    commands = set(re.findall(r'\bhead\s*==\s*"([^"]+)"', text))
+    for item in help_items(text):
+        commands.update(alias for alias in item.split(" ", 1)[0].split("/") if alias)
+    return commands
 
 
 def command_block(text: str, command: str) -> str:
-    marker = f'if (head == "{command}")'
-    start = text.find(marker)
-    if start < 0:
-        fail(f"command handler for '{command}' missing")
-    next_start = text.find('\n  if (head == "', start + len(marker))
-    if next_start < 0:
-        next_start = len(text)
-    return text[start:next_start]
+    match = re.search(rf'\bhead\s*==\s*"{re.escape(command)}"', text)
+    if match is None:
+        fail(f"command handler missing: {command}")
+    following = re.search(r'\bhead\s*==\s*"', text[match.end():])
+    end = len(text) if following is None else match.end() + following.start()
+    return text[match.start():end]
 
 
-def ensure_order(block: str, before: str, after: str, label: str) -> None:
-    before_pos = block.find(before)
-    after_pos = block.find(after)
-    if before_pos < 0:
-        fail(f"{label}: missing '{before}'")
-    if after_pos < 0:
-        fail(f"{label}: missing '{after}'")
-    if before_pos > after_pos:
-        fail(f"{label}: '{before}' must appear before '{after}'")
+def require_before(block: str, guard: str, operation: str, label: str) -> None:
+    guard_pos = block.find(guard)
+    operation_pos = block.find(operation)
+    if guard_pos < 0 or operation_pos < 0 or guard_pos > operation_pos:
+        fail(f"{label} confirmation guard is missing or follows the operation")
 
 
-def check_destructive_confirmations(text: str, label: str) -> None:
-    for token in DESTRUCTIVE_CONFIRMATION_TOKENS:
-        if token not in text:
-            fail(f"{label}: destructive confirmation token missing: {token}")
-
-    persist = command_block(text, "persist")
-    ensure_order(persist, 'tail != "confirm"', "device.startPersistSettings()",
-                 f"{label} persist confirmation")
-
-    factory_reset = command_block(text, "factory_reset")
-    ensure_order(factory_reset, 'tail != "confirm"', "device.startFactoryReset()",
-                 f"{label} factory_reset confirmation")
-    ensure_order(factory_reset, 'tail != "confirm"', "clearSettingsCache()",
-                 f"{label} factory_reset cache clear")
-
-    frc = command_block(text, "frc")
-    ensure_order(frc, "confirm", "device.startForcedRecalibration",
-                 f"{label} frc confirmation")
+def check_confirmations(text: str) -> None:
+    require_before(command_block(text, "persist"), 'tail != "confirm"',
+                   "OperationRequest::persistSettings()", "persist")
+    require_before(command_block(text, "factory_reset"), 'tail != "confirm"',
+                   "OperationRequest::factoryReset()", "factory_reset")
+    require_before(command_block(text, "frc"), 'confirm != "confirm"',
+                   "OperationRequest::forcedRecalibration", "forced recalibration")
 
 
 def main() -> int:
     arduino = read(ARDUINO_MAIN)
     idf = read(IDF_MAIN)
-    cmake = read(IDF_MAIN_CMAKE)
+    transport = read(IDF_TRANSPORT) + "\n" + read(IDF_TRANSPORT_HEADER)
+    cmake = read(IDF_CMAKE)
 
-    arduino_sections = help_sections(arduino)
-    idf_sections = help_sections(idf)
-    if arduino_sections != idf_sections:
-        fail(f"help sections differ: Arduino={arduino_sections}, IDF={idf_sections}")
-
-    arduino_items = help_items(arduino)
-    idf_items = help_items(idf)
-    if arduino_items != idf_items:
-        missing = [item for item in arduino_items if item not in idf_items]
-        extra = [item for item in idf_items if item not in arduino_items]
-        fail(f"help items differ: missing={missing}, extra={extra}")
-
-    arduino_commands = head_commands(arduino)
-    idf_commands = head_commands(idf)
-    arduino_commands.update(aliases_from_help(arduino_items))
-    idf_commands.update(aliases_from_help(idf_items))
-
-    missing_mandatory = sorted(MANDATORY_COMMANDS - idf_commands)
-    if missing_mandatory:
-        fail(f"IDF CLI missing mandatory commands: {missing_mandatory}")
-
+    if help_sections(arduino) != help_sections(idf):
+        fail("Arduino and IDF help sections differ")
+    if help_items(arduino) != help_items(idf):
+        fail("Arduino and IDF help command lines differ")
+    arduino_commands = command_names(arduino)
+    idf_commands = command_names(idf)
     if arduino_commands != idf_commands:
-        missing = sorted(arduino_commands - idf_commands)
-        extra = sorted(idf_commands - arduino_commands)
-        fail(f"top-level command sets differ: missing={missing}, extra={extra}")
+        fail(f"top-level commands differ: missing={sorted(arduino_commands-idf_commands)}, extra={sorted(idf_commands-arduino_commands)}")
+    missing = sorted(MANDATORY_COMMANDS - idf_commands)
+    if missing:
+        fail(f"mandatory commands missing: {missing}")
 
-    arduino_raw = raw_subcommands(arduino)
-    idf_raw = raw_subcommands(idf)
-    if not MANDATORY_RAW_SUBCOMMANDS.issubset(idf_raw):
-        fail(f"IDF CLI missing raw subcommands: {sorted(MANDATORY_RAW_SUBCOMMANDS - idf_raw)}")
-    if arduino_raw != idf_raw:
-        fail(f"raw subcommand sets differ: Arduino={sorted(arduino_raw)}, IDF={sorted(idf_raw)}")
-
-    check_destructive_confirmations(arduino, "Arduino CLI")
-    check_destructive_confirmations(idf, "IDF CLI")
-
-    combined_idf = "\n".join(read(path) for path in idf_sources())
-    combined_idf_code = strip_non_code(combined_idf)
-
-    include_matches = FORBIDDEN_IDF_INCLUDE_RE.findall(combined_idf)
-    if include_matches:
-        fail("IDF example uses forbidden active include")
-
-    for label, pattern in FORBIDDEN_IDF_PATTERNS.items():
-        if pattern.search(combined_idf_code):
-            fail(f"IDF example uses forbidden Arduino/compat token: {label}")
-
+    combined = "\n".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in sorted(IDF_ROOT.rglob("*"))
+        if path.is_file() and path.suffix.lower() in {".c", ".cc", ".cpp", ".h", ".hpp"}
+    )
+    code = strip_non_code(combined)
+    for label, pattern in FORBIDDEN_PATTERNS.items():
+        target = combined if "header" in label else code
+        if pattern.search(target):
+            fail(f"IDF example uses forbidden {label}")
     for token in REQUIRED_IDF_TOKENS:
-        if token not in combined_idf:
-            fail(f"IDF example missing required token: {token}")
-
-    for token in REQUIRED_IDF_CMAKE_TOKENS:
-        if token not in cmake:
-            fail(f"IDF main CMakeLists.txt missing required dependency token: {token}")
-
+        if token not in combined:
+            fail(f"IDF example missing owner-safe token: {token}")
+    for token in REQUIRED_TRANSPORT_TOKENS:
+        if token not in transport:
+            fail(f"IDF transport missing token: {token}")
+    for token in FORBIDDEN_DRIVER_CALLS:
+        if token in combined:
+            fail(f"obsolete direct/blocking driver call present: {token}")
+    for dependency in ("SCD41", "esp_driver_i2c", "esp_timer", "freertos"):
+        if dependency not in cmake:
+            fail(f"CMake dependency missing: {dependency}")
     if re.search(r"\bArduino\b", cmake):
-        fail("IDF main CMakeLists.txt must not depend on Arduino")
+        fail("IDF example must not depend on Arduino")
 
+    check_confirmations(arduino)
+    check_confirmations(idf)
     print("IDF example contract PASSED")
     return 0
 

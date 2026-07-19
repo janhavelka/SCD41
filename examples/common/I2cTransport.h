@@ -1,8 +1,6 @@
 /**
  * @file I2cTransport.h
- * @brief Wire-based I2C transport adapter for examples.
- *
- * This is example-only glue. The library itself must not own Wire.
+ * @brief Single-attempt Wire transport used only by Arduino examples.
  */
 
 #pragma once
@@ -10,12 +8,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-#include "common/DriverCompat.h"
+#include "SCD41/Config.h"
 
 namespace transport {
-
-using app_driver::Err;
-using app_driver::Status;
 
 inline bool initWire(int sda, int scl, uint32_t freqHz, uint32_t timeoutMs) {
   if (!Wire.begin(sda, scl)) {
@@ -26,73 +21,91 @@ inline bool initWire(int sda, int scl, uint32_t freqHz, uint32_t timeoutMs) {
   return true;
 }
 
-inline Status wireWrite(uint8_t addr, const uint8_t* data, size_t len,
-                        uint32_t timeoutMs, void* user) {
-  TwoWire* wire = static_cast<TwoWire*>(user);
-  if (wire == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "Wire instance is null");
-  }
-  if (timeoutMs > 0U) {
-    wire->setTimeOut(timeoutMs);
-  }
-
-  wire->beginTransmission(addr);
-  const size_t written = wire->write(data, len);
-  const uint8_t result = wire->endTransmission(true);
-
-  if (result != 0U) {
-    switch (result) {
-      case 1: return Status::Error(Err::INVALID_PARAM, "I2C write too long", result);
-      case 2: return Status::Error(Err::I2C_NACK_ADDR, "I2C NACK addr", result);
-      case 3: return Status::Error(Err::I2C_NACK_DATA, "I2C NACK data", result);
-      case 4: return Status::Error(Err::I2C_BUS, "I2C bus error", result);
-      case 5: return Status::Error(Err::I2C_TIMEOUT, "I2C timeout", result);
-      default: return Status::Error(Err::I2C_ERROR, "I2C write failed", result);
-    }
-  }
-
-  if (written != len) {
-    return Status::Error(Err::I2C_ERROR, "I2C write incomplete", static_cast<int32_t>(written));
-  }
-
-  return Status::Ok();
+inline SCD41::TransferResult result(SCD41::TransferCode code,
+                                    SCD41::TransferDisposition disposition,
+                                    int32_t detail,
+                                    size_t bytes) {
+  return SCD41::TransferResult{code, disposition, detail, bytes, millis()};
 }
 
-inline Status wireWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
-                            uint8_t* rxData, size_t rxLen,
-                            uint32_t timeoutMs, void* user) {
+inline SCD41::TransferResult wireTransfer(
+    const SCD41::TransferRequest& request,
+    void* user) {
   TwoWire* wire = static_cast<TwoWire*>(user);
-  if (wire == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "Wire instance is null");
-  }
-  if (timeoutMs > 0U) {
-    wire->setTimeOut(timeoutMs);
-  }
-
-  if (txLen > 0U) {
-    return Status::Error(Err::INVALID_PARAM, "Combined write+read not supported");
+  if (wire == nullptr || request.timeoutMs == 0U ||
+      (request.writeLength == 0U && request.readLength == 0U) ||
+      (request.writeLength > 0U && request.writeData == nullptr) ||
+      (request.readLength > 0U && request.readData == nullptr)) {
+    return result(SCD41::TransferCode::FAILED,
+                  SCD41::TransferDisposition::NOT_STARTED, 0, 0);
   }
 
-  if (rxLen == 0U) {
-    return Status::Ok();
-  }
+  wire->setTimeOut(request.timeoutMs);
+  size_t transferred = 0;
 
-  const size_t received = wire->requestFrom(addr, rxLen);
-  if (received == 0U) {
-    return Status::Error(Err::I2C_ERROR, "I2C read returned 0 bytes", 0);
-  }
-  if (received != rxLen) {
-    for (size_t i = 0; i < received; ++i) {
-      (void)wire->read();
+  if (request.writeLength > 0U) {
+    wire->beginTransmission(request.address);
+    const size_t written =
+        wire->write(request.writeData, request.writeLength);
+    const uint8_t wireStatus =
+        wire->endTransmission(request.readLength == 0U);
+    transferred = written;
+    if (written != request.writeLength) {
+      return result(SCD41::TransferCode::SHORT_TRANSFER,
+                    SCD41::TransferDisposition::INDETERMINATE,
+                    static_cast<int32_t>(wireStatus), transferred);
     }
-    return Status::Error(Err::I2C_ERROR, "I2C read incomplete", static_cast<int32_t>(received));
+    switch (wireStatus) {
+      case 0:
+        break;
+      case 1:
+        return result(SCD41::TransferCode::SHORT_TRANSFER,
+                      SCD41::TransferDisposition::INDETERMINATE, wireStatus,
+                      transferred);
+      case 2:
+      case 3:
+        return result(SCD41::TransferCode::NACK,
+                      wireStatus == 2U ? SCD41::TransferDisposition::NO_EFFECT
+                                       : SCD41::TransferDisposition::INDETERMINATE,
+                      wireStatus, 0U);
+      case 4:
+        return result(SCD41::TransferCode::BUS_ERROR,
+                      SCD41::TransferDisposition::INDETERMINATE, wireStatus, 0U);
+      case 5:
+        return result(SCD41::TransferCode::TIMEOUT,
+                      SCD41::TransferDisposition::INDETERMINATE, wireStatus, 0U);
+      default:
+        return result(SCD41::TransferCode::FAILED,
+                      SCD41::TransferDisposition::INDETERMINATE, wireStatus, 0U);
+    }
   }
 
-  for (size_t i = 0; i < rxLen; ++i) {
-    rxData[i] = static_cast<uint8_t>(wire->read());
+  if (request.readLength > 0U) {
+    const size_t received =
+        wire->requestFrom(request.address, request.readLength, true);
+    if (received == 0U) {
+      return result(SCD41::TransferCode::NACK,
+                    request.writeLength == 0U
+                        ? SCD41::TransferDisposition::NO_EFFECT
+                        : SCD41::TransferDisposition::INDETERMINATE,
+                    0, transferred);
+    }
+    if (received != request.readLength) {
+      while (wire->available() > 0) {
+        (void)wire->read();
+      }
+      return result(SCD41::TransferCode::SHORT_TRANSFER,
+                    SCD41::TransferDisposition::INDETERMINATE,
+                    static_cast<int32_t>(received), transferred + received);
+    }
+    for (size_t i = 0; i < request.readLength; ++i) {
+      request.readData[i] = static_cast<uint8_t>(wire->read());
+    }
+    transferred += received;
   }
 
-  return Status::Ok();
+  return result(SCD41::TransferCode::OK,
+                SCD41::TransferDisposition::COMPLETE, 0, transferred);
 }
 
 }  // namespace transport

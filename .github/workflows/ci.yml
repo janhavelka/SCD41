@@ -64,6 +64,9 @@ jobs:
       - name: Run native tests
         run: python -m platformio test -e native
 
+      - name: Run native undefined-behavior sanitizer tests
+        run: python -m platformio test -e native_ubsan
+
   platformio-build:
     runs-on: ubuntu-latest
     strategy:
@@ -135,6 +138,9 @@ jobs:
 
       - name: Compile clean package consumer
         run: python tools/check_clean_consumer_compile.py dist/*.tar.gz
+
+      - name: Build exact TunnelMonitor-node target package consumer
+        run: python tools/check_target_package_consumer.py dist/*.tar.gz
 
   esp-idf-build:
     runs-on: ubuntu-latest

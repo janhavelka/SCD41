@@ -13,8 +13,4 @@ inline void scan(uint8_t preferredAddress = 0x62) {
   i2c::scan(preferredAddress);
 }
 
-inline bool probe(uint8_t address = 0x62) {
-  return i2c::checkAddress(address);
-}
-
 }  // namespace bus_diag

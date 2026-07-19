@@ -36,9 +36,4 @@ inline int scan(uint8_t preferredAddress = 0x62) {
   return count;
 }
 
-inline bool checkAddress(uint8_t address) {
-  Wire.beginTransmission(address);
-  return Wire.endTransmission() == 0U;
-}
-
 }  // namespace i2c
