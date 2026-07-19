@@ -1,10 +1,57 @@
 # SCD41 Library Suitability Audit for TunnelMonitor-node
 
-Date: 2026-07-19  
-Status: audit report; no production integration performed  
-Verdict: **not suitable for TunnelMonitor-node as-is; refactor the library before integration**
+Baseline date: 2026-07-19
+Re-audit completion date: 2026-07-19
+Status: library refactor complete; TunnelMonitor production integration not performed
+Verdict: **library-side owner contract resolved; physical SCD41 validation and
+TunnelMonitor product decisions remain before production integration**
 
-## Executive Summary
+## Re-audit And Implementation Disposition
+
+The findings below were rechecked at SCD41 revision
+`a66ac59ceb2044b0884a7bdf6111c75fc0fa1ef9` and TunnelMonitor-node revision
+`b708f511964db6c51e949e99c67820476f00f9c7`. All twelve findings still applied
+to that baseline. The SCD41 work was performed on
+`hardening/tunnelmonitor-suitability-reaudit`. TunnelMonitor-node remained
+read-only.
+
+The implemented design is one fixed-memory operation slot plus one retained
+terminal-result slot. `begin()` only validates and binds. `start()` only admits
+and identifies work. `poll(nowMs, budget)` is the only transport executor. The
+application supplies the absolute deadline and owns scheduling, locking,
+retries, bus recovery, and power control. The library performs no hidden retry.
+
+| Finding | Revalidated baseline evidence | Resolution and implementation evidence | Test evidence | Final status |
+| --- | --- | --- | --- | --- |
+| TM-SCD-01 - I2C budget was not end-to-end | Starts, polls, and completion paths could perform work outside one owner budget. | Every device action is an `OperationKind`. `start()` is zero-I2C. `poll()` receives an explicit callback budget and reports exact use. `OperationLimits` gives hard callback, cumulative sensor-wait, retry, nonvolatile, and destructive bounds. | `test_start_is_zero_io_and_result_backpressure_is_exact`, `test_attach_budget_waiting_and_expected_wake_nack`, stage-failure matrix. | **RESOLVED** |
+| TM-SCD-02 - No logical deadline or cancellation | The old mixed synchronous/async procedures had no immutable job deadline, exact cancellation result, or request correlation. | `OperationOptions` carries request ID, start time, and absolute deadline. `OperationId` adds a non-reused generation. `cancel()` is zero-I2C. One matching terminal result is consumed exactly once. | Deadline boundary/callback/wrap tests, backward-clock test, cancellation-before/after-effect tests, stale/exactly-once tests. | **RESOLVED** |
+| TM-SCD-03 - Initialization assumed idle sensor | The old initialization could issue idle-only work without converging a sensor left periodic or powered down by an MCU restart. | `begin()` performs no I2C. `ATTACH` is a bounded wake, settle, stop, settle, serial/CRC/variant verification sequence. It converges from idle, periodic, low-power periodic, and power-down modes and starts a new cache epoch on hotplug. | Attach mode/hotplug test plus fault injection at every attach transfer. | **RESOLVED** |
+| TM-SCD-04 - Two recovery authorities | The old library exposed bus reset/power-cycle recovery and blocked work through active offline policy. | Bus reset, power-cycle, library retry, automatic recovery, and recovery admission were removed. Health is passive only. `OFFLINE` never blocks a caller-authorized transfer. Reconciliation is a typed `ATTACH` operation after application recovery. | Passive-offline test and rebind/context tests. | **RESOLVED** |
+| TM-SCD-05 - Illegal/conflicting public work | Multiple old executors could overlap and admission allowed commands in invalid sensor modes. | One active operation/result invariant, zero-I2C admission, typed mode restrictions, result backpressure, and managed-command exclusion from diagnostics. Periodic mode admits only the commands allowed by the device. | Backpressure, periodic-admission, diagnostic-invalidation, end/rebind, and operation-stage tests. | **RESOLVED** |
+| TM-SCD-06 - Wake NACK was adapter-specific | Expected wake NACK could not be represented portably by the prior split transport API. | One `TransferRequest`/`TransferResult` callback uses `EXPECTED_WRITE_NACK`, generic `NACK`, and an explicit effect disposition. Expected wake NACK is counted separately and does not poison health. | Attach expected-NACK test; Arduino and native ESP-IDF adapter contract checks. | **RESOLVED** |
+| TM-SCD-07 - No direct fixed-point sample | The old public result path centered float values and did not provide a fixed-size consuming result suitable for the owner task. | `FixedSample` provides CO2 ppm, milli-degrees C, milli-percent RH, time, sequence, mode, sensor epoch, and validity flags. The terminal result is consuming; `peekLatestSample()` is explicitly non-consuming cache access. | Fixed-point sample/result/cache and conversion-boundary tests. | **RESOLVED** |
+| TM-SCD-08 - Settings cache could be stale but valid | Setters could publish desired values without complete verification and did not represent partial configuration reads. | Setters read current hardware, skip unchanged writes, invalidate before mutation, and read back after mutation. `verifiedMask`, `dirtyMask`, `completedFieldMask`, sensor epoch, and persistence-indeterminate state expose provenance. Ambiguous writes are never retried. | Fourteen-stage configuration read faults, setter readback/no-op, mutation ambiguity, later-verification fault, persistence retry-block tests. | **RESOLVED** |
+| TM-SCD-09 - Release and physical evidence incomplete | The baseline manifest/tag/evidence did not describe the substantially changed API or prove current hardware behavior. | Manifest/component/generated headers are aligned at `1.0.0`; packaging and clean consumers are checked; the stale retained HIL transcript is excluded from release artifacts. A release tag is intentionally withheld until physical evidence exists. | Version guard, package checks, Arduino S2/S3 builds, clean source/package consumers, exact Tunnel target package build. Physical HIL was not run. | **EXTERNAL GATE: PHYSICAL HIL** |
+| TM-SCD-10 - Transport health hid operation health | Transport-phase success/failure did not describe logical job completion. | `HealthSnapshot` separates transport, protocol/CRC, and terminal operation counters/errors. Terminal outcomes include success, no-data, failure, cancellation, timeout, partial, and indeterminate. Health remains diagnostic. | Transport-contract, CRC, passive-offline, cancellation, and stage-failure tests. | **RESOLVED** |
+| TM-SCD-11 - Attempt timing and float validation defects | Attempt timestamps could be recorded before the callback and float encoding did not reject all non-finite/extreme inputs. | Every callback returns its completion time in the owner clock domain. Deadline and command spacing use completion time. Backward callback time and contradictory/short completion contracts fail observably. Float helpers require finite in-range values. | Callback-deadline, transport-contract, owner-clock, wrap, and extreme-float tests. | **RESOLVED** |
+| TM-SCD-12 - Two apparent clocks | The old API combined caller time with platform timing hooks and an inert fallback clock. | Timing hooks and `PlatformTime.h` were removed. Start, poll, cancel, transfer completion, deadline, and spacing use one wrapping 32-bit monotonic millisecond domain. The driver rejects a backward owner clock without I2C. | Clock-wrap and backward-owner/callback-clock tests; core timing guard. | **RESOLVED** |
+
+Current host verification has 37 public-contract native tests passing. Arduino
+ESP32-S2 and ESP32-S3 builds, source/package consumers, repository guards, and
+the exact Tunnel target package compile/link check pass. Native ESP-IDF tools,
+local UBSan runtime, and physical hardware were unavailable; these are not
+claimed as passing. Linux CI includes the UBSan job.
+
+The library is now suitable for a future private TunnelMonitor leaf adapter.
+TunnelMonitor must still define the product hardware mapping, CO2 measurement
+contract, warm-up/publication policy, calibration values, maintenance policy,
+and exact dependency pin. None of those product facts were invented here.
+
+The remainder of this document preserves the detailed baseline evidence and
+original proposed direction. Old line numbers refer to the audited baseline,
+not the completed refactor.
+
+## Baseline Executive Summary
 
 The SCD41 library has a solid chip-protocol core. It already has injected I2C
 transport, CRC checking, fixed-point conversions, measurement-mode tracking,

@@ -1,164 +1,183 @@
-# Hardware And HIL Validation
+# Hardware and HIL Validation
 
-Hardware validation is optional because it needs real boards, a wired SCD41, and
-operator control for destructive commands. Do not mark a run as passed without
-a raw serial transcript or equivalent log.
+Hardware validation is optional and must use a real board, wired SCD41, and raw
+transcript. Parser tests, dry runs, native fake transports, and successful builds
+are not hardware evidence.
 
-Supported validation targets:
+Supported firmware entry points:
 
-- Arduino/PlatformIO bring-up CLI in `examples/01_basic_bringup_cli`
-- ESP-IDF CLI in `examples/idf/basic`
+- Arduino/PlatformIO: `examples/01_basic_bringup_cli`
+- native ESP-IDF: `examples/idf/basic`
 
-Both examples expose the same command contract. The examples own I2C pins, bus
-setup, timing hooks, reset/power hooks, and console output.
+Both examples expose the same owner-safe command contract. Each loop polls with
+a one-callback budget and automatically consumes and prints terminal results.
 
-## Evidence Required
+## Evidence record
 
-Record these fields for every run:
+Record for every run:
 
-- board type and revision
-- SCD41 module/board and wiring
-- SDA/SCL pins and pullups
-- supply voltage and power switching, if any
-- firmware commit and build environment
-- serial transcript path
-- ambient reference notes, if any
-- operator and date/time
+- firmware commit and whether its tree was clean
+- board and revision
+- SCD41 module/fixture identity
+- SDA/SCL pins, bus speed, pullups, and other bus devices
+- supply voltage, bulk capacitance, and rail-switch arrangement
+- framework/toolchain versions and exact build command
+- serial port, baud rate, operator, and UTC date/time
+- raw transcript and machine-readable summary paths
+- which safe, fault, maintenance, and soak gates were actually run
 
-Optional runner:
+Do not infer an unrun result. Use `not run`, `pass`, `fail`, or `blocked`, with
+the observation that supports it.
+
+## Runner
 
 ```bash
 python tools/scd41_hil_runner.py --parser-self-test
 python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
-python tools/scd41_hil_runner.py --port COM8 --baud 115200 --output-dir hil-results --board "ESP32-S3 DevKitC-1" --fixture "SCD41 on 3V3, SDA/SCL pullups recorded"
+python tools/scd41_hil_runner.py \
+  --port COM8 --baud 115200 --output-dir hil-results \
+  --board "ESP32-S3 DevKitC-1" \
+  --fixture "SCD41 at 3.3 V; SDA/SCL and pullups recorded"
 ```
 
-The parser self-test and dry run do not open serial and do not produce hardware
-evidence. A live runner invocation requires a source checkout, `pyserial`, a
-connected board, and a wired SCD41. It runs safe commands by default and writes
-raw transcript plus JSON/Markdown summaries. A passing runner result is
-evidence only for that connected hardware and environment.
+Parser self-test and dry-run do not open serial and do not create hardware
+evidence. A live run requires `pyserial` and writes a raw transcript plus JSON
+and Markdown summaries.
 
-This repository keeps the concrete entry point named
-`tools/scd41_hil_runner.py` because the sequence is SCD41-specific, including
-SCD41 timing, maintenance, and destructive-command safeguards.
+## Safe smoke sequence
 
-## Safe Smoke Sequence
-
-Safe smoke tests must not write EEPROM, factory-reset calibration, or run forced
-recalibration. Start with:
+The default runner executes this sequence. It does not change calibration or
+EEPROM state.
 
 ```text
 help
 version
-cfg
 scan
 begin
-drv
-serial
-variant
-dataready
-diag
-periodic on
 status
-# wait >= 5 s
+identity
+settings
 dataready
+periodic on
+# wait at least 5 s
 read
 sample
-raw
-comp
-stress 10
 periodic off
-# wait >= 500 ms
 status
-settings
 single full
-single_start full
-# wait >= 5 s
-read
 single rht
-single_start rht
-# wait >= 50 ms
-read
 periodic lp
-# wait >= 30 s
+# wait at least 30 s
 read
 periodic off
 sleep
-# wait >= 1 s
 wake
-# wait >= 30 ms
-serial
-recover
-drv
+identity
+status
 ```
 
-Safe smoke pass criteria:
+Pass criteria:
 
-- `scan` finds a device at `0x62`.
-- `begin` succeeds and `drv` reports `READY`.
-- `serial` returns a nonzero serial and SCD41 variant.
-- `dataready` and `read` behave at the expected periodic cadence.
-- Samples are plausible for the environment.
-- `periodic off` settles before idle-only commands are accepted.
-- single-shot full and RHT-only flows complete through pending work.
-- wake-up does not poison health when precise expected NACK is observed.
-- no hidden async failures or unexplained `OFFLINE` transition appears.
+- Scan finds address `0x62`.
+- `begin` produces a terminal successful `ATTACH` result.
+- Identity is valid, serial is nonzero, and variant is SCD41.
+- Settings read completes with verified fields and no unexplained dirty state.
+- Periodic and low-power samples arrive at their device cadence.
+- Full single shot reports CO2/T/RH valid; RHT-only does not report CO2 valid.
+- Stop-periodic includes the 500 ms settle without owner-task blocking.
+- Wake accepts the documented generic expected NACK without incrementing a real
+  transfer-failure counter; timeout and bus errors still fail.
+- Every started operation has one correlated terminal result and the next
+  request is not attributed to an older result.
+- Final health has no unexplained CRC, transport, operation, or offline event.
 
-Smoke plausibility ranges are not calibration proof:
+Plausibility ranges are a smoke check, not calibration proof. Record the actual
+environment before judging a value.
 
-- CO2: 300 ppm to 5000 ppm for ordinary indoor/outdoor tests
-- temperature: -10 C to 60 C
-- relative humidity: 0 % to 100 %
+## Required integration fault gates
 
-## Soak And Fault Coverage
+These gates need fixture control or a bus/sensor setup that can create the
+condition. Run them separately from the safe automated sequence.
 
-Recommended soak tests:
-
-| ID | Purpose | Minimum Evidence |
+| Gate | Procedure | Required observation |
 | --- | --- | --- |
-| T-01 | 5-minute periodic smoke | valid samples near 5 s cadence, no hidden failures |
-| T-02 | 30-minute periodic soak | stable health counters and no watchdog/reset events |
-| T-03 | low-power periodic soak | samples near 30 s cadence, clean stop settle |
-| T-04 | repeated single-shot loop | no stale cached sample across iterations |
-| T-05 | reset epoch freshness | old sample becomes stale after reinit/power-cycle |
+| Unknown retained mode | Leave the sensor in periodic mode, restart only the MCU, then issue `begin` | attach reconciles without assuming sensor reset; result identity is new and final mode/evidence is explicit |
+| Active-operation MCU restart | Restart MCU during stop, single-shot wait, or maintenance wait while sensor rail remains powered | new firmware does not publish the abandoned request; attach reconciles before normal work |
+| Shared-bus load | Run other known devices through the same owner with the configured SCD41 callback budget | no SCD41 poll exceeds its callback budget; other devices continue to receive service |
+| Generic wake NACK | Use the normal ESP-IDF adapter, which does not invent address/data NACK precision | wake succeeds only for generic NACK in the marked wake phase; health records expected NACK separately |
+| Sensor hot-unplug | Disconnect SCD41 between operation phases | bounded terminal failure/indeterminate result; no unbounded poll or silent success; other bus devices recover by owner policy |
+| Sensor hot-replug | Reconnect after a failed operation and submit a new attach ID | old result cannot be republished; new attach restores verified identity/state |
+| Rail interruption | Cut the sensor rail after an effectful write attempt and before readback | result remains cancelled, timed out, partial, or indeterminate as evidence permits; cache is not reported verified |
+| Deadline boundary | Delay owner polling through the operation deadline | old operation terminates timed out and cannot issue later I2C under that ID |
+| Cancellation boundary | Cancel before first transfer, during a zero-I2C wait, and after an acknowledged write | cancellation performs no I2C; effect/reconciliation fields differ conservatively by stage |
+| CRC corruption | Fixture or proxy corrupts each response word position | `CRC_MISMATCH`, no partial sample/config publication, protocol telemetry increments |
+| Short transfer | Fixture returns fewer bytes than requested | explicit short-transfer failure and no parse of missing data |
 
-Fault tests require a fixture, fake transport, switchable sensor rail, or
-controlled bus fault:
+For hot-plug or rail interruption, protect the board and sensor against unsafe
+connector transients. Use a fixture designed for controlled switching.
 
-| Fault | Expected Result |
-| --- | --- |
-| missing device/address NACK | explicit status, recover after reconnect |
-| data NACK | precise status when adapter can prove it |
-| bad CRC | `CRC_MISMATCH`, protocol telemetry updates |
-| truncated response | non-OK transport status, no partial parse |
-| OFFLINE recovery | normal I2C blocked until `recover()` succeeds |
+## Soak gates
 
-## Destructive Commands
+| ID | Purpose | Minimum evidence |
+| --- | --- | --- |
+| S-01 | 30-minute periodic run | samples near 5 s cadence, bounded callback use, stable counters |
+| S-02 | low-power periodic run | samples near 30 s cadence and clean stop settle |
+| S-03 | repeated single shots | unique request/result identity and increasing sample sequence |
+| S-04 | repeated end/begin/attach | no leaked result, stale identity, or false verified cache |
+| S-05 | clock-wrap fixture | correct deadlines and due scheduling across 32-bit wrap |
 
-Do not include destructive steps in safe CI/HIL runs. These require explicit
-operator approval and a transcript:
+Record maximum observed owner-call latency and transfer timeout. A successful
+sensor-only soak does not prove shared-bus scheduling.
 
+## Maintenance and destructive gates
+
+The default runner refuses these commands. They require explicit operator
+approval, known starting settings, suitable gas/reference conditions, and a
+transcript:
+
+- `frc confirm <reference_ppm>`
 - `persist confirm`
 - `factory_reset confirm`
-- `frc confirm <reference_ppm>`
-- ASC setting persistence
-- temperature-offset persistence
 
-The optional runner refuses destructive steps unless both flags are provided:
+Enable the runner only with the exact confirmation phrase:
 
 ```bash
-python tools/scd41_hil_runner.py --port COM7 --include-destructive --confirm-destructive "I understand EEPROM and calibration risk"
+python tools/scd41_hil_runner.py \
+  --port COM7 --include-destructive \
+  --confirm-destructive "I understand EEPROM and calibration risk"
 ```
 
-After destructive tests, restore known project defaults and record the final
-settings snapshot.
+The runner's destructive group covers the persistence request and factory reset.
+If no configuration field is dirty, persistence must complete as a zero-write
+no-op; that result does not prove an EEPROM write. To validate a real persist,
+the operator must record a deliberate setting change, the acknowledged persist
+effect, a power cycle, and readback. The runner does not automate forced
+recalibration: the required reference gas, stable
+concentration, operating-mode history, and stabilization interval cannot be
+proved by a serial script. Run `frc confirm <reference_ppm>` manually only after
+recording those conditions and the datasheet stabilization procedure.
 
-## Verdict Labels
+Maintenance evidence must distinguish:
 
-- `HIL not run`: no connected hardware or no transcript.
-- `Safe smoke passed`: safe sequence has transcript evidence on at least one
-  board/sensor combination.
-- `Soak/fault passed`: timing and recovery evidence exists for defined fixtures.
-- `Destructive passed`: explicit operator approval and command confirmations are
-  present in the transcript.
+- command not attempted
+- attempted but not acknowledged
+- acknowledged and verified
+- partial progress
+- indeterminate effect after timeout, bus fault, cancellation, or rail loss
+
+Do not automatically repeat an indeterminate EEPROM, calibration, or reset
+write. Reattach/read back where device behavior permits, then let the operator
+or product policy decide. Record EEPROM write count/cadence and restore project
+defaults after factory testing.
+
+## Verdict labels
+
+- `HIL not run`: no connected hardware transcript.
+- `Safe smoke passed`: the complete safe sequence passed on a recorded fixture.
+- `Fault gates passed`: each named fault has a separate recorded observation.
+- `Shared-bus passed`: callback budget and coexistence were measured under load.
+- `Soak passed`: the named soak and duration have evidence.
+- `Maintenance passed`: operator authority, setup, outcomes, and final restored
+  state are recorded.
+
+A release can state only the labels supported by retained evidence.
