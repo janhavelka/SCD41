@@ -1,11 +1,4 @@
-/**
- * @file SCD41.cpp
- * @brief SCD41 driver implementation.
- */
-
 #include "SCD41/SCD41.h"
-
-#include "PlatformTime.h"
 
 #include <cmath>
 #include <cstring>
@@ -14,3026 +7,2224 @@
 namespace SCD41 {
 namespace {
 
-static constexpr size_t MAX_WRITE_LEN = 5;
-static constexpr uint16_t MAX_COMMAND_DELAY_MS = 1000;
-static constexpr uint16_t MAX_POWER_UP_DELAY_MS = 1000;
-static constexpr uint32_t MAX_I2C_TIMEOUT_MS = 60000;
-static constexpr uint32_t MAX_RECOVER_BACKOFF_MS = 600000;
-static constexpr uint32_t MAX_PERIODIC_MARGIN_MS = 5000;
-static constexpr uint32_t MAX_RETRY_DELAY_MS = 60000;
-static constexpr uint32_t MIN_COMMAND_DELAY_US = 1000;
-static constexpr uint32_t MAX_WAIT_GUARD_EXTRA_ITERATIONS = 16;
-
-class ScopedOfflineI2cAllowance {
-public:
-  explicit ScopedOfflineI2cAllowance(bool& flag, bool allow) : _flag(flag), _old(flag) {
-    _flag = allow;
+template <typename T>
+void incrementSaturating(T& value) {
+  if (value != std::numeric_limits<T>::max()) {
+    ++value;
   }
-
-  ~ScopedOfflineI2cAllowance() {
-    _flag = _old;
-  }
-
-  ScopedOfflineI2cAllowance(const ScopedOfflineI2cAllowance&) = delete;
-  ScopedOfflineI2cAllowance& operator=(const ScopedOfflineI2cAllowance&) = delete;
-
-private:
-  bool& _flag;
-  bool _old;
-};
-
-static uint32_t saturatingAddU32(uint32_t a, uint32_t b) {
-  const uint32_t maxU32 = std::numeric_limits<uint32_t>::max();
-  if (a > (maxU32 - b)) {
-    return maxU32;
-  }
-  return static_cast<uint32_t>(a + b);
 }
 
-static bool isValidSingleShotMode(SingleShotMode mode) {
-  return mode == SingleShotMode::CO2_T_RH || mode == SingleShotMode::T_RH_ONLY;
+Status transferStatus(const TransferResult& result) {
+  switch (result.code) {
+    case TransferCode::OK:
+      return Status::Ok();
+    case TransferCode::NACK:
+      return Status::Error(Err::I2C_NACK, "I2C NACK", result.detail);
+    case TransferCode::TIMEOUT:
+      return Status::Error(Err::I2C_TIMEOUT, "I2C timeout", result.detail);
+    case TransferCode::BUS_ERROR:
+      return Status::Error(Err::I2C_BUS, "I2C bus error", result.detail);
+    case TransferCode::SHORT_TRANSFER:
+      return Status::Error(Err::I2C_SHORT_TRANSFER, "I2C short transfer",
+                           result.detail);
+    case TransferCode::FAILED:
+      return Status::Error(Err::I2C_ERROR, "I2C transfer failed", result.detail);
+  }
+  return Status::Error(Err::I2C_ERROR, "Unknown I2C result");
 }
 
-static uint32_t boundedWaitIterations(uint32_t delayMs, uint32_t timeoutMs) {
-  const uint32_t windowMs = saturatingAddU32(saturatingAddU32(delayMs, timeoutMs), 1U);
-  const uint32_t scaled = (windowMs > (std::numeric_limits<uint32_t>::max() / 4U))
-                              ? std::numeric_limits<uint32_t>::max()
-                              : windowMs * 4U;
-  return saturatingAddU32(scaled, MAX_WAIT_GUARD_EXTRA_ITERATIONS);
+uint64_t serialNumberFromWords(const uint16_t words[3]) {
+  return (static_cast<uint64_t>(words[0]) << 32) |
+         (static_cast<uint64_t>(words[1]) << 16) |
+         static_cast<uint64_t>(words[2]);
 }
 
-} // namespace
+bool isReadKind(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::READ_IDENTITY:
+    case OperationKind::READ_DATA_READY:
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+    case OperationKind::READ_SENSOR_ALTITUDE:
+    case OperationKind::READ_AMBIENT_PRESSURE:
+    case OperationKind::READ_ASC_ENABLED:
+    case OperationKind::READ_ASC_TARGET:
+    case OperationKind::READ_ASC_INITIAL_PERIOD:
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+    case OperationKind::READ_CONFIGURATION:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool isManagedCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_START_PERIODIC_MEASUREMENT:
+    case cmd::CMD_READ_MEASUREMENT:
+    case cmd::CMD_STOP_PERIODIC_MEASUREMENT:
+    case cmd::CMD_SET_TEMPERATURE_OFFSET:
+    case cmd::CMD_GET_TEMPERATURE_OFFSET:
+    case cmd::CMD_SET_SENSOR_ALTITUDE:
+    case cmd::CMD_GET_SENSOR_ALTITUDE:
+    case cmd::CMD_SET_AMBIENT_PRESSURE:
+    case cmd::CMD_PERFORM_FORCED_RECALIBRATION:
+    case cmd::CMD_SET_ASC_ENABLED:
+    case cmd::CMD_GET_ASC_ENABLED:
+    case cmd::CMD_SET_ASC_TARGET:
+    case cmd::CMD_GET_ASC_TARGET:
+    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
+    case cmd::CMD_GET_DATA_READY_STATUS:
+    case cmd::CMD_PERSIST_SETTINGS:
+    case cmd::CMD_GET_SERIAL_NUMBER:
+    case cmd::CMD_PERFORM_SELF_TEST:
+    case cmd::CMD_PERFORM_FACTORY_RESET:
+    case cmd::CMD_REINIT:
+    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
+    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
+    case cmd::CMD_MEASURE_SINGLE_SHOT:
+    case cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY:
+    case cmd::CMD_POWER_DOWN:
+    case cmd::CMD_WAKE_UP:
+      return true;
+    default:
+      return false;
+  }
+}
+
+uint16_t fieldAt(uint8_t index) {
+  static constexpr ConfigurationField FIELDS[] = {
+      ConfigurationField::TEMPERATURE_OFFSET,
+      ConfigurationField::SENSOR_ALTITUDE,
+      ConfigurationField::AMBIENT_PRESSURE,
+      ConfigurationField::ASC_ENABLED,
+      ConfigurationField::ASC_TARGET,
+      ConfigurationField::ASC_INITIAL_PERIOD,
+      ConfigurationField::ASC_STANDARD_PERIOD,
+  };
+  return index < (sizeof(FIELDS) / sizeof(FIELDS[0]))
+             ? configurationFieldMask(FIELDS[index])
+             : 0U;
+}
+
+OperationKind readKindAt(uint8_t index) {
+  static constexpr OperationKind KINDS[] = {
+      OperationKind::READ_TEMPERATURE_OFFSET,
+      OperationKind::READ_SENSOR_ALTITUDE,
+      OperationKind::READ_AMBIENT_PRESSURE,
+      OperationKind::READ_ASC_ENABLED,
+      OperationKind::READ_ASC_TARGET,
+      OperationKind::READ_ASC_INITIAL_PERIOD,
+      OperationKind::READ_ASC_STANDARD_PERIOD,
+  };
+  return index < (sizeof(KINDS) / sizeof(KINDS[0])) ? KINDS[index]
+                                                    : OperationKind::NONE;
+}
+
+}  // namespace
 
 Status SCD41::begin(const Config& config) {
-  _config = Config{};
-  _initialized = false;
-  _driverState = DriverState::UNINIT;
-  _operatingMode = OperatingMode::IDLE;
-  _singleShotMode = SingleShotMode::CO2_T_RH;
-  _pendingCommand = PendingCommand::NONE;
-  _lastOkMs = 0;
-  _lastErrorMs = 0;
-  _lastError = Status::Ok();
-  _consecutiveFailures = 0;
-  _totalFailures = 0;
-  _totalSuccess = 0;
-  _totalProtocolFailures = 0;
-  _totalCrcFailures = 0;
-  _consecutiveProtocolFailures = 0;
-  _lastProtocolErrorMs = 0;
-  _lastProtocolError = Status::Ok();
-  _allowOfflineI2c = false;
-  _lastAsyncStatus = Status::Ok();
-  _lastAsyncOperation = AsyncOperation::NONE;
-  _lastPollStatus = Status::Ok();
-  _pollStep = PollStep::NONE;
-  _lastCommandUs = 0;
-  _lastCommandValid = false;
-  _commandReadyMs = 0;
-  _measurementRequested = false;
-  _measurementReady = false;
-  _hasSample = false;
-  _sensorEpoch = 0;
-  _sampleEpoch = 0;
-  _measurementReadyMs = 0;
-  _periodicStartMs = 0;
-  _lastFetchMs = 0;
-  _sampleTimestampMs = 0;
-  _missedSamples = 0;
-  _lastSampleCo2Valid = false;
-  _rawSample = RawSample{};
-  _compSample = CompensatedSample{};
-  _sensorVariant = SensorVariant::UNKNOWN;
-  _serialNumber = 0;
-  _serialNumberValid = false;
-  _selfTestRaw = 0;
-  _selfTestRawValid = false;
-  _selfTestStatus = Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test not started");
-  _selfTestCompleted = false;
-  _forcedRecalibrationRaw = 0;
-  _forcedRecalibrationRawValid = false;
-  _forcedRecalibrationCorrectionPpm = 0;
-  _forcedRecalibrationStatus =
-      Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration not started");
-  _forcedRecalibrationCompleted = false;
-  _settingsReadActive = false;
-  _settingsReady = false;
-  _settingsLiveConfigValid = false;
-  _settingsAllLiveFieldsRead = false;
-  _settingsField = SettingsReadField::NONE;
-  _settingsTemperatureOffsetC_x1000 = 0;
-  _settingsSensorAltitudeM = 0;
-  _settingsAmbientPressurePa = 0;
-  _settingsAutomaticSelfCalibrationEnabled = false;
-  _settingsAutomaticSelfCalibrationTargetPpm = 0;
-  _settingsAutomaticSelfCalibrationInitialPeriodHours = 0;
-  _settingsAutomaticSelfCalibrationStandardPeriodHours = 0;
-  _lastRecoverMs = 0;
-  _lastRecoverValid = false;
-
-  if (config.i2cWrite == nullptr || config.i2cWriteRead == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C callbacks not set");
+  const Status validation = _validateConfig(config);
+  if (!validation.ok()) {
+    return validation;
   }
-  if (config.nowMs == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "nowMs callback not set");
-  }
-  if (config.nowUs == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "nowUs callback not set");
-  }
-  if (config.i2cAddress != cmd::I2C_ADDRESS) {
-    return Status::Error(Err::INVALID_CONFIG, "Invalid I2C address");
-  }
-  if (config.i2cTimeoutMs == 0 || config.i2cTimeoutMs > MAX_I2C_TIMEOUT_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Invalid I2C timeout");
-  }
-  if (!isValidSingleShotMode(config.singleShotMode)) {
-    return Status::Error(Err::INVALID_CONFIG, "Invalid single-shot mode");
-  }
-  if (config.commandDelayMs == 0 || config.commandDelayMs > MAX_COMMAND_DELAY_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Invalid command delay");
-  }
-  if (config.powerUpDelayMs > MAX_POWER_UP_DELAY_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Power-up delay too large");
-  }
-  if (config.periodicFetchMarginMs > MAX_PERIODIC_MARGIN_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Periodic fetch margin too large");
-  }
-  if (config.dataReadyRetryMs == 0 || config.dataReadyRetryMs > MAX_RETRY_DELAY_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Invalid retry delay");
-  }
-  if (config.recoverBackoffMs > MAX_RECOVER_BACKOFF_MS) {
-    return Status::Error(Err::INVALID_CONFIG, "Recover backoff too large");
+  if (_activeValid || _terminalValid) {
+    return Status::Error(Err::BUSY, "Operation or result pending");
   }
 
   _config = config;
-  if (_config.offlineThreshold == 0) {
-    _config.offlineThreshold = 1;
-  }
-  _singleShotMode = _config.singleShotMode;
-
-  Status st = _waitMs(_config.powerUpDelayMs);
-  if (!st.ok()) {
-    return st;
-  }
-
-  uint64_t serial = 0;
-  st = _readSerialNumberUnchecked(serial, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  if (_config.strictVariantCheck && _sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "Sensor is not SCD41",
-                         static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
-  }
-
-  _sensorEpoch = 1;
-  _initialized = true;
+  _bound = true;
+  _attached = false;
   _driverState = DriverState::READY;
-  return Status::Ok();
-}
-
-Status SCD41::tick(uint32_t nowMs) {
-  (void)nowMs;
-
-  if (!_initialized) {
-    return Status::Ok();
-  }
-
-  const uint32_t driverNowMs = _nowMs();
-
-  if (_pendingCommand != PendingCommand::NONE && _timeElapsed(driverNowMs, _commandReadyMs)) {
-    const AsyncOperation operation = _asyncOperationForPending(_pendingCommand);
-    const Status st = _handlePendingCommand(driverNowMs);
-    if (st.code == Err::MEASUREMENT_NOT_READY) {
-      return Status::Ok();
-    }
-    _recordAsyncStatus(operation, st);
-    return st.ok() ? Status::Ok() : st;
-  }
-
-  if (_pendingCommand == PendingCommand::NONE && _measurementRequested &&
-      _timeElapsed(driverNowMs, _measurementReadyMs)) {
-    const Status st = _completeMeasurement();
-    if (st.code == Err::MEASUREMENT_NOT_READY) {
-      return Status::Ok();
-    }
-    if (!st.ok()) {
-      _clearMeasurementRequest();
-    }
-    _recordAsyncStatus(AsyncOperation::PERIODIC_FETCH, st);
-    return st.ok() ? Status::Ok() : st;
-  }
-
-  return Status::Ok();
-}
-
-Status SCD41::poll(uint32_t nowMs, uint8_t maxInstructions) {
-  (void)nowMs;
-
-  if (!_initialized) {
-    return _recordPollStatus(Status::Ok());
-  }
-  if (maxInstructions == 0) {
-    return _recordPollStatus(Status::Error(Err::INVALID_PARAM, "No poll instructions"));
-  }
-
-  uint8_t instructionsRemaining = maxInstructions;
-  Status st = Status::Ok();
-  const uint32_t driverNowMs = _nowMs();
-
-  do {
-    const uint8_t before = instructionsRemaining;
-
-    if (_settingsReadActive || _pollStep == PollStep::SETTINGS_COMMAND ||
-        _pollStep == PollStep::SETTINGS_READ) {
-      st = _pollReadSettings(driverNowMs, instructionsRemaining);
-    } else if (_pollStep == PollStep::MEASUREMENT_DATA_READY_COMMAND ||
-               _pollStep == PollStep::MEASUREMENT_DATA_READY_READ ||
-               _pollStep == PollStep::MEASUREMENT_READ_COMMAND ||
-               _pollStep == PollStep::MEASUREMENT_READ_DATA ||
-               (_pendingCommand == PendingCommand::NONE && _measurementRequested &&
-                _timeElapsed(driverNowMs, _measurementReadyMs)) ||
-               ((_pendingCommand == PendingCommand::SINGLE_SHOT ||
-                 _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY) &&
-                _timeElapsed(driverNowMs, _commandReadyMs))) {
-      st = _pollMeasurement(driverNowMs, instructionsRemaining);
-    } else if (_pendingCommand != PendingCommand::NONE &&
-               _timeElapsed(driverNowMs, _commandReadyMs)) {
-      st = _pollPendingCommand(driverNowMs, instructionsRemaining);
-    } else {
-      st = pollBusy() ? Status::Error(Err::IN_PROGRESS, "Poll work pending") : Status::Ok();
-    }
-
-    if (st.ok() && pollBusy() &&
-        (instructionsRemaining == 0 || instructionsRemaining == before)) {
-      st = Status::Error(Err::IN_PROGRESS, "Poll work pending");
-    }
-    if (!st.ok() || instructionsRemaining == 0 || instructionsRemaining == before) {
-      return _recordPollStatus(st);
-    }
-  } while (pollBusy());
-
-  return _recordPollStatus(Status::Ok());
-}
-
-void SCD41::end() {
-  _initialized = false;
-  _driverState = DriverState::UNINIT;
-  _operatingMode = OperatingMode::IDLE;
-  _pendingCommand = PendingCommand::NONE;
-  _pollStep = PollStep::NONE;
-  _commandReadyMs = 0;
-  _measurementRequested = false;
-  _measurementReady = false;
-  _hasSample = false;
+  _operatingMode = OperatingMode::UNKNOWN;
+  _modeEvidence = ModeEvidence::UNKNOWN;
+  _reconciliationRequired = true;
+  _nextSafeCommandMs = 0;
   _sensorEpoch = 0;
-  _sampleEpoch = 0;
-  _measurementReadyMs = 0;
-  _periodicStartMs = 0;
-  _lastFetchMs = 0;
-  _sampleTimestampMs = 0;
-  _missedSamples = 0;
-  _lastSampleCo2Valid = false;
-  _rawSample = RawSample{};
-  _compSample = CompensatedSample{};
-  _lastCommandValid = false;
-  _totalProtocolFailures = 0;
-  _totalCrcFailures = 0;
-  _consecutiveProtocolFailures = 0;
-  _lastProtocolErrorMs = 0;
-  _lastProtocolError = Status::Ok();
-  _selfTestRaw = 0;
-  _selfTestRawValid = false;
-  _selfTestStatus = Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test not started");
-  _selfTestCompleted = false;
-  _forcedRecalibrationRaw = 0;
-  _forcedRecalibrationRawValid = false;
-  _forcedRecalibrationCorrectionPpm = 0;
-  _forcedRecalibrationStatus =
-      Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration not started");
-  _forcedRecalibrationCompleted = false;
-  _settingsReadActive = false;
-  _settingsReady = false;
-  _settingsField = SettingsReadField::NONE;
-  clearLastAsyncStatus();
-  _lastPollStatus = Status::Ok();
-}
-
-void SCD41::clearLastAsyncStatus() {
-  _lastAsyncStatus = Status::Ok();
-  _lastAsyncOperation = AsyncOperation::NONE;
-}
-
-bool SCD41::pollBusy() const {
-  return _pollStep != PollStep::NONE || _pendingCommand != PendingCommand::NONE ||
-         _measurementRequested || _settingsReadActive;
-}
-
-Status SCD41::probe() {
-  if (_config.i2cWrite == nullptr || _config.i2cWriteRead == nullptr) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_initialized && _pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-  if (_initialized && _operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-
-  const uint32_t savedLastCommandUs = _lastCommandUs;
-  const bool savedLastCommandValid = _lastCommandValid;
-
-  if (isPeriodicActive()) {
-    uint16_t raw = 0;
-    Status st = _readWord(cmd::CMD_GET_DATA_READY_STATUS, raw, false);
-    st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
-    if (!st.ok()) {
-      return st;
-    }
-    return Status::Ok();
-  }
-
-  uint16_t words[3] = {};
-  Status st = _readWords(cmd::CMD_GET_SERIAL_NUMBER, words, 3, false);
-  st = _restoreProbeCommandSpacing(savedLastCommandUs, savedLastCommandValid, st);
-  if (!st.ok()) {
-    return st;
-  }
-
+  _sampleSequence = 0;
+  _active = {};
+  _terminal = {};
+  _workingValue = {};
+  _identity = {};
+  _configuration = {};
+  _latestSample = {};
+  _latestSampleValid = false;
+  _health = {};
+  _health.state = DriverState::READY;
+  _lastAttemptCompletedMs = 0;
+  _lastAttemptValid = false;
+  _lastTransferDisposition = TransferDisposition::NOT_STARTED;
+  _lastTransferCode = TransferCode::FAILED;
+  _lastTransferWasEffectful = false;
+  _lastOwnerNowMs = 0U;
+  _lastOwnerNowValid = false;
   return Status::Ok();
 }
 
-Status SCD41::recover() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
+  PollResult result;
+  result.state = operationState();
+
+  if (_terminalValid) {
+    result.state = OperationState::RESULT_PENDING;
+    result.id = _terminal.id;
+    result.kind = _terminal.kind;
+    result.status = _terminal.status;
+    return result;
   }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
+  if (!_activeValid) {
+    result.status = Status::Ok();
+    return result;
   }
 
-  const uint32_t now = _nowMs();
-  if (_lastRecoverValid && !_timeElapsed(now, _lastRecoverMs + _config.recoverBackoffMs)) {
-    return Status::Error(Err::BUSY, "Recover backoff active");
+  result.id = _active.id;
+  result.kind = _active.request.kind;
+  if (_lastOwnerNowValid && !_timeReached(nowMs, _lastOwnerNowMs)) {
+    result.state = OperationState::ACTIVE;
+    result.status =
+        Status::Error(Err::INVALID_PARAM, "Owner clock moved backwards");
+    result.nextDueMs = _active.nextDueMs;
+    return result;
   }
-  _lastRecoverMs = now;
-  _lastRecoverValid = true;
+  _lastOwnerNowMs = nowMs;
+  _lastOwnerNowValid = true;
+  uint8_t callbacksRemaining = maxCallbacks;
+  const uint8_t callbacksBefore = callbacksRemaining;
+  uint32_t driverNowMs = nowMs;
 
-  const bool startedOffline = _driverState == DriverState::OFFLINE;
-  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  Status result = [this]() -> Status {
-    if (_operatingMode == OperatingMode::POWER_DOWN) {
-      return wakeUp();
+  if (_timeReached(driverNowMs, _active.deadlineMs)) {
+    EffectState effect = _active.effect;
+    if (_active.effectfulWriteAttempted && effect == EffectState::NOT_ATTEMPTED) {
+      effect = EffectState::UNKNOWN;
+    }
+    if (_active.effectfulWriteAttempted) {
+      _markReconciliationRequired();
+    }
+    if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+        _active.effectfulWriteAttempted) {
+      _configuration.persistenceIndeterminate = true;
+    }
+    _finish(OperationOutcome::TIMED_OUT, effect,
+            Status::Error(Err::TIMEOUT, "Operation deadline expired"),
+            driverNowMs);
+  }
+
+  uint8_t cpuTransitions = 0;
+  while (_activeValid && cpuTransitions < 32U) {
+    ++cpuTransitions;
+    if (!_timeReached(driverNowMs, _nextSafeCommandMs) &&
+        !_timeReached(driverNowMs, _active.nextDueMs)) {
+      break;
     }
 
-    Status lastFailure = Status::Error(Err::COMMAND_FAILED, "Recovery exhausted");
-    if (isPeriodicActive()) {
-      bool ready = false;
-      Status st = readDataReadyStatus(ready);
-      if (st.ok()) {
-        return Status::Ok();
-      }
-      lastFailure = st;
-    } else {
-      Status st = _verifySensorAfterRecovery();
-      if (st.ok()) {
-        return Status::Ok();
-      }
-      lastFailure = st;
+    const OperationPhase phaseBefore = _active.phase;
+    const uint32_t dueBefore = _active.nextDueMs;
+    const uint8_t remainingBefore = callbacksRemaining;
+    const Status stepStatus = _step(driverNowMs, callbacksRemaining);
+
+    if (!_activeValid || _terminalValid) {
+      break;
     }
-
-    if (_config.busReset != nullptr) {
-      Status st = _config.busReset(_config.controlUser);
-      if (!st.ok()) {
-        return st;
-      }
-
-      if (isPeriodicActive()) {
-        bool ready = false;
-        st = readDataReadyStatus(ready);
-      } else {
-        st = _verifySensorAfterRecovery();
-      }
-      if (st.ok()) {
-        return Status::Ok();
-      }
-      lastFailure = st;
+    if (!stepStatus.ok() && !stepStatus.inProgress()) {
+      _finishTransferFailure(stepStatus, driverNowMs);
+      break;
     }
-
-    if (_config.powerCycle != nullptr) {
-      Status st = _config.powerCycle(_config.controlUser);
-      if (!st.ok()) {
-        return st;
-      }
-      _operatingMode = OperatingMode::IDLE;
-      _clearMeasurementRequest();
-      _advanceSensorEpoch();
-      return _schedulePendingCommand(PendingCommand::POWER_CYCLE, _config.powerUpDelayMs);
+    if (callbacksRemaining == 0U) {
+      break;
     }
+    if (_active.phase == phaseBefore && _active.nextDueMs == dueBefore &&
+        callbacksRemaining == remainingBefore) {
+      break;
+    }
+    if (!_timeReached(driverNowMs, _active.nextDueMs)) {
+      break;
+    }
+  }
 
-    return lastFailure;
-  }();
-  if (startedOffline && !result.ok() && !result.inProgress()) {
-    _reassertOfflineLatch();
+  result.callbacksUsed = static_cast<uint8_t>(callbacksBefore - callbacksRemaining);
+  if (_terminalValid) {
+    result.state = OperationState::RESULT_PENDING;
+    result.id = _terminal.id;
+    result.kind = _terminal.kind;
+    result.status = _terminal.status;
+    result.nextDueMs = 0;
+  } else if (_activeValid) {
+    result.state = OperationState::ACTIVE;
+    result.id = _active.id;
+    result.kind = _active.request.kind;
+    result.status = Status::Error(Err::IN_PROGRESS, "Operation active");
+    result.nextDueMs = _active.nextDueMs;
+  } else {
+    result.state = OperationState::IDLE;
+    result.status = Status::Ok();
   }
   return result;
 }
 
-Status SCD41::requestMeasurement() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_driverState == DriverState::OFFLINE) {
-    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
-  }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-  if (_measurementRequested || _measurementReady) {
-    return Status::Error(Err::BUSY, "Measurement already pending");
-  }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-
-  if (isPeriodicActive()) {
-    _measurementRequested = true;
-    _measurementReady = false;
-    _measurementReadyMs = _periodicReadyMs(_nowMs());
-    return Status{Err::IN_PROGRESS, 0, "Periodic fetch scheduled"};
-  }
-
-  return _startSingleShot(_singleShotMode);
+Status SCD41::tick(uint32_t nowMs) {
+  return poll(nowMs, 1).status;
 }
 
-Status SCD41::readMeasurement(Measurement& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+Status SCD41::start(const OperationRequest& request,
+                    const OperationOptions& options,
+                    OperationId& assignedId) {
+  const Status validation = _validateStart(request, options);
+  if (!validation.ok()) {
+    return validation;
   }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-  if (_measurementReady) {
-    return getMeasurement(out);
-  }
-  if (_pendingCommand != PendingCommand::NONE && _pendingCommand != PendingCommand::SINGLE_SHOT &&
-      _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY) {
-    return Status::Error(Err::BUSY, "Command in progress");
+  if (_nextGeneration == 0U) {
+    return Status::Error(Err::STALE_RESULT, "Operation generation exhausted");
   }
 
-  const uint32_t nowMs = _nowMs();
-  if (_pendingCommand == PendingCommand::SINGLE_SHOT ||
-      _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY) {
-    if (!_timeElapsed(nowMs, _commandReadyMs)) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
+  const OperationId id{options.requestId, _nextGeneration};
+  if (_nextGeneration == std::numeric_limits<uint32_t>::max()) {
+    _nextGeneration = 0U;
+  } else {
+    ++_nextGeneration;
+  }
+
+  const Status beginStatus = _beginOperation(request, options, id);
+  if (!beginStatus.ok()) {
+    return beginStatus;
+  }
+  assignedId = id;
+  return Status::Error(Err::IN_PROGRESS, "Operation started");
+}
+
+Status SCD41::cancel(const OperationId& id, uint32_t nowMs) {
+  if (!_activeValid) {
+    return _terminalValid
+               ? Status::Error(Err::BUSY, "Terminal result pending")
+               : Status::Error(Err::RESULT_NOT_READY, "No active operation");
+  }
+  if (_active.id != id) {
+    return Status::Error(Err::STALE_RESULT, "Operation identity mismatch");
+  }
+  if (_lastOwnerNowValid && !_timeReached(nowMs, _lastOwnerNowMs)) {
+    return Status::Error(Err::INVALID_PARAM, "Owner clock moved backwards");
+  }
+  _lastOwnerNowMs = nowMs;
+  _lastOwnerNowValid = true;
+
+  EffectState effect = _active.effect;
+  if (_active.callbacksUsed == 0U) {
+    effect = _isEffectful(_active.request.kind) ? EffectState::NOT_ATTEMPTED
+                                                : EffectState::NONE;
+  } else {
+    if (!_timeReached(nowMs, _active.nextDueMs)) {
+      _nextSafeCommandMs = _active.nextDueMs;
     }
-
-    Status st = _completeMeasurement();
-    if (st.ok()) {
-      _clearPendingCommand();
-      return getMeasurement(out);
-    }
-    if (st.code != Err::MEASUREMENT_NOT_READY) {
-      _clearPendingCommand();
-      _clearMeasurementRequest();
-    }
-    return st;
-  }
-
-  if (_measurementRequested) {
-    if (!_timeElapsed(nowMs, _measurementReadyMs)) {
-      return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-    }
-
-    Status st = _completeMeasurement();
-    if (!st.ok()) {
-      if (st.code != Err::MEASUREMENT_NOT_READY) {
-        _clearMeasurementRequest();
-      }
-      return st;
-    }
-    return getMeasurement(out);
-  }
-
-  if (!isPeriodicActive()) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "No measurement pending");
-  }
-
-  bool ready = false;
-  Status st = readDataReadyStatus(ready);
-  if (!st.ok()) {
-    return st;
-  }
-  if (!ready) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-  }
-
-  RawSample sample = {};
-  st = _readMeasurementRaw(sample, true, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _storeSample(sample, true);
-  return getMeasurement(out);
-}
-
-Status SCD41::getMeasurement(Measurement& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!_measurementReady) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-  }
-  if (!hasFreshSample()) {
-    _measurementReady = false;
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Cached sample is stale");
-  }
-
-  out.co2Ppm = _rawSample.rawCo2;
-  out.temperatureC = convertTemperatureC(_rawSample.rawTemperature);
-  out.humidityPct = convertHumidityPct(_rawSample.rawHumidity);
-  out.co2Valid = _lastSampleCo2Valid;
-  _measurementReady = false;
-  return Status::Ok();
-}
-
-Status SCD41::getLastMeasurement(Measurement& out) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!_hasSample) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-  }
-
-  out.co2Ppm = _rawSample.rawCo2;
-  out.temperatureC = convertTemperatureC(_rawSample.rawTemperature);
-  out.humidityPct = convertHumidityPct(_rawSample.rawHumidity);
-  out.co2Valid = _lastSampleCo2Valid;
-  return Status::Ok();
-}
-
-Status SCD41::getRawSample(RawSample& out) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!_hasSample) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-  }
-  out = _rawSample;
-  return Status::Ok();
-}
-
-Status SCD41::getCompensatedSample(CompensatedSample& out) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!_hasSample) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "No sample available");
-  }
-  out = _compSample;
-  return Status::Ok();
-}
-
-Status SCD41::readDataReadyStatus(bool& ready) {
-  DataReadyStatus status;
-  Status st = readDataReadyStatus(status);
-  if (!st.ok()) {
-    return st;
-  }
-  ready = status.ready;
-  return Status::Ok();
-}
-
-Status SCD41::readDataReadyStatus(DataReadyStatus& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-
-  uint16_t raw = 0;
-  Status st = _readWord(cmd::CMD_GET_DATA_READY_STATUS, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  out.raw = raw;
-  out.ready = isDataReady(raw);
-  return Status::Ok();
-}
-
-Status SCD41::setSingleShotMode(SingleShotMode mode) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("single-shot mode");
-  if (!st.ok()) {
-    return st;
-  }
-  if (!isValidSingleShotMode(mode)) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid single-shot mode");
-  }
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
-    return Status::Error(Err::BUSY, "Operation in progress");
-  }
-  _singleShotMode = mode;
-  return Status::Ok();
-}
-
-Status SCD41::getSingleShotMode(SingleShotMode& out) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  out = _singleShotMode;
-  return Status::Ok();
-}
-
-Status SCD41::startSingleShotMeasurement() {
-  return _startSingleShot(SingleShotMode::CO2_T_RH);
-}
-
-Status SCD41::startSingleShotRhtOnlyMeasurement() {
-  return _startSingleShot(SingleShotMode::T_RH_ONLY);
-}
-
-Status SCD41::startPeriodicMeasurement() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_driverState == DriverState::OFFLINE) {
-    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
-  }
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
-    return Status::Error(Err::BUSY, "Operation in progress");
-  }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-  if (_operatingMode == OperatingMode::PERIODIC) {
-    return Status::Ok();
-  }
-  if (_operatingMode == OperatingMode::LOW_POWER_PERIODIC) {
-    return Status::Error(Err::BUSY, "Stop low-power periodic first");
-  }
-
-  Status st = _writeCommand(cmd::CMD_START_PERIODIC_MEASUREMENT, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _operatingMode = OperatingMode::PERIODIC;
-  _periodicStartMs = _nowMs();
-  _lastFetchMs = 0;
-  _measurementReady = false;
-  return Status::Ok();
-}
-
-Status SCD41::startLowPowerPeriodicMeasurement() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_driverState == DriverState::OFFLINE) {
-    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
-  }
-  Status st = _requireSCD41Variant("low-power periodic");
-  if (!st.ok()) {
-    return st;
-  }
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
-    return Status::Error(Err::BUSY, "Operation in progress");
-  }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-  if (_operatingMode == OperatingMode::LOW_POWER_PERIODIC) {
-    return Status::Ok();
-  }
-  if (_operatingMode == OperatingMode::PERIODIC) {
-    return Status::Error(Err::BUSY, "Stop periodic first");
-  }
-  st = _writeCommand(cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _operatingMode = OperatingMode::LOW_POWER_PERIODIC;
-  _periodicStartMs = _nowMs();
-  _lastFetchMs = 0;
-  _measurementReady = false;
-  return Status::Ok();
-}
-
-Status SCD41::stopPeriodicMeasurement() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!isPeriodicActive()) {
-    return Status::Error(Err::INVALID_PARAM, "Sensor is not in periodic mode");
-  }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-
-  Status st = _writeCommand(cmd::CMD_STOP_PERIODIC_MEASUREMENT, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _clearMeasurementRequest();
-  return _schedulePendingCommand(PendingCommand::STOP_PERIODIC,
-                                 cmd::EXECUTION_TIME_STOP_PERIODIC_MS);
-}
-
-Status SCD41::powerDown() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("power down");
-  if (!st.ok()) {
-    return st;
-  }
-  st = _requireSCD41Variant("power down");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommand(cmd::CMD_POWER_DOWN, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _schedulePendingCommand(PendingCommand::POWER_DOWN, cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::wakeUp() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-  Status st = _requireSCD41Variant("wake up");
-  if (!st.ok()) {
-    return st;
-  }
-  if (_operatingMode != OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::INVALID_PARAM, "Sensor is not powered down");
-  }
-
-  st = _writeCommand(cmd::CMD_WAKE_UP, true, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _schedulePendingCommand(PendingCommand::WAKE_UP, _config.powerUpDelayMs);
-}
-
-Status SCD41::readSerialNumber(uint64_t& serial) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("read serial number");
-  if (!st.ok()) {
-    return st;
-  }
-
-  return _readSerialNumberUnchecked(serial, true);
-}
-
-Status SCD41::_readSerialNumberUnchecked(uint64_t& serial, bool tracked) {
-  uint16_t words[3] = {};
-  Status st = _readWords(cmd::CMD_GET_SERIAL_NUMBER, words, 3, tracked);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _sensorVariant = _variantFromSerialWord(words[0]);
-  _serialNumber = (static_cast<uint64_t>(words[0]) << 32) |
-                  (static_cast<uint64_t>(words[1]) << 16) |
-                  static_cast<uint64_t>(words[2]);
-  _serialNumberValid = true;
-  serial = _serialNumber;
-  return Status::Ok();
-}
-
-Status SCD41::getIdentity(Identity& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!_serialNumberValid) {
-    uint64_t serial = 0;
-    Status st = readSerialNumber(serial);
-    if (!st.ok()) {
-      return st;
+    _markReconciliationRequired();
+    if (_active.effectfulWriteAttempted && effect == EffectState::NOT_ATTEMPTED) {
+      effect = EffectState::UNKNOWN;
     }
   }
-
-  out.serialNumber = _serialNumber;
-  out.variant = _sensorVariant;
+  if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+      _active.effectfulWriteAttempted) {
+    _configuration.persistenceIndeterminate = true;
+  }
+  _finish(OperationOutcome::CANCELLED, effect,
+          Status::Error(Err::CANCELLED, "Operation cancelled"), nowMs);
   return Status::Ok();
 }
 
-Status SCD41::readSensorVariant(SensorVariant& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+Status SCD41::takeResult(const OperationId& expectedId, OperationResult& out) {
+  if (!_terminalValid) {
+    return Status::Error(Err::RESULT_NOT_READY, "No terminal result");
   }
-  if (!_serialNumberValid) {
-    uint64_t serial = 0;
-    Status st = readSerialNumber(serial);
-    if (!st.ok()) {
-      return st;
+  if (_terminal.id != expectedId) {
+    return Status::Error(Err::STALE_RESULT, "Result identity mismatch");
+  }
+  out = _terminal;
+  _terminal = {};
+  _terminalValid = false;
+  return Status::Ok();
+}
+
+void SCD41::end() {
+  if (_activeValid && !_terminalValid) {
+    const uint32_t completedMs =
+        _lastOwnerNowValid ? _lastOwnerNowMs : _active.options.nowMs;
+    if (_active.callbacksUsed > 0U) {
+      _markReconciliationRequired();
     }
-  }
-  out = _sensorVariant;
-  return Status::Ok();
-}
-
-Status SCD41::setTemperatureOffsetC(float offsetC) {
-  if (!std::isfinite(offsetC)) {
-    return Status::Error(Err::INVALID_PARAM, "Temperature offset must be finite");
-  }
-  const int32_t milli = static_cast<int32_t>(
-      (offsetC * 1000.0f) + (offsetC >= 0.0f ? 0.5f : -0.5f));
-  return setTemperatureOffsetC_x1000(milli);
-}
-
-Status SCD41::getTemperatureOffsetC(float& out) {
-  int32_t milli = 0;
-  Status st = getTemperatureOffsetC_x1000(milli);
-  if (!st.ok()) {
-    return st;
-  }
-  out = static_cast<float>(milli) / 1000.0f;
-  return Status::Ok();
-}
-
-Status SCD41::setTemperatureOffsetC_x1000(int32_t offsetC_x1000) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (offsetC_x1000 < 0 || offsetC_x1000 > 20000) {
-    return Status::Error(Err::INVALID_PARAM, "Temperature offset out of range");
-  }
-  Status st = _ensureIdleForConfig("set temperature offset");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_TEMPERATURE_OFFSET,
-                             encodeTemperatureOffsetC_x1000(offsetC_x1000), true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getTemperatureOffsetC_x1000(int32_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("get temperature offset");
-  if (!st.ok()) {
-    return st;
-  }
-
-  uint16_t raw = 0;
-  st = _readWord(cmd::CMD_GET_TEMPERATURE_OFFSET, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-  out = decodeTemperatureOffsetC_x1000(raw);
-  return Status::Ok();
-}
-
-Status SCD41::setSensorAltitudeM(uint16_t altitudeM) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (altitudeM < cmd::ALTITUDE_MIN_M || altitudeM > cmd::ALTITUDE_MAX_M) {
-    return Status::Error(Err::INVALID_PARAM, "Altitude out of range");
-  }
-  Status st = _ensureIdleForConfig("set altitude");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_SENSOR_ALTITUDE, altitudeM, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getSensorAltitudeM(uint16_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("get altitude");
-  if (!st.ok()) {
-    return st;
-  }
-
-  uint16_t raw = 0;
-  st = _readWord(cmd::CMD_GET_SENSOR_ALTITUDE, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-  out = raw;
-  return Status::Ok();
-}
-
-Status SCD41::setAmbientPressurePa(uint32_t pressurePa) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (pressurePa < cmd::AMBIENT_PRESSURE_MIN_PA || pressurePa > cmd::AMBIENT_PRESSURE_MAX_PA) {
-    return Status::Error(Err::INVALID_PARAM, "Ambient pressure out of range");
-  }
-  if (_pendingCommand != PendingCommand::NONE || _operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is busy");
-  }
-
-  const uint16_t raw = encodeAmbientPressurePa(pressurePa);
-  Status st = _writeCommandWithData(cmd::CMD_SET_AMBIENT_PRESSURE, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getAmbientPressurePa(uint32_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand != PendingCommand::NONE || _operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is busy");
-  }
-
-  uint16_t raw = 0;
-  Status st = _readWord(cmd::CMD_GET_AMBIENT_PRESSURE, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-  out = decodeAmbientPressurePa(raw);
-  return Status::Ok();
-}
-
-Status SCD41::setAutomaticSelfCalibrationEnabled(bool enabled) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("set ASC enabled");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_ASC_ENABLED, enabled ? 1U : 0U, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getAutomaticSelfCalibrationEnabled(bool& enabled) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("get ASC enabled");
-  if (!st.ok()) {
-    return st;
-  }
-
-  uint16_t raw = 0;
-  st = _readWord(cmd::CMD_GET_ASC_ENABLED, raw, true);
-  if (!st.ok()) {
-    return st;
-  }
-  enabled = raw != 0;
-  return Status::Ok();
-}
-
-Status SCD41::setAutomaticSelfCalibrationTargetPpm(uint16_t ppm) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC target");
-  if (!st.ok()) {
-    return st;
-  }
-  if (ppm < 1 || ppm > cmd::CO2_MAX_PPM) {
-    return Status::Error(Err::INVALID_PARAM, "ASC target out of range");
-  }
-  st = _ensureIdleForConfig("set ASC target");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_ASC_TARGET, ppm, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getAutomaticSelfCalibrationTargetPpm(uint16_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC target");
-  if (!st.ok()) {
-    return st;
-  }
-  st = _ensureIdleForConfig("get ASC target");
-  if (!st.ok()) {
-    return st;
-  }
-
-  return _readWord(cmd::CMD_GET_ASC_TARGET, out, true);
-}
-
-Status SCD41::setAutomaticSelfCalibrationInitialPeriodHours(uint16_t hours) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC initial period");
-  if (!st.ok()) {
-    return st;
-  }
-  if (hours != 0 && (hours % cmd::ASC_PERIOD_STEP_HOURS) != 0) {
-    return Status::Error(Err::INVALID_PARAM, "Initial ASC period must be multiple of 4 h");
-  }
-  st = _ensureIdleForConfig("set ASC initial period");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_ASC_INITIAL_PERIOD, hours, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getAutomaticSelfCalibrationInitialPeriodHours(uint16_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC initial period");
-  if (!st.ok()) {
-    return st;
-  }
-  st = _ensureIdleForConfig("get ASC initial period");
-  if (!st.ok()) {
-    return st;
-  }
-
-  return _readWord(cmd::CMD_GET_ASC_INITIAL_PERIOD, out, true);
-}
-
-Status SCD41::setAutomaticSelfCalibrationStandardPeriodHours(uint16_t hours) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC standard period");
-  if (!st.ok()) {
-    return st;
-  }
-  if (hours == 0 || (hours % cmd::ASC_PERIOD_STEP_HOURS) != 0) {
-    return Status::Error(Err::INVALID_PARAM, "Standard ASC period must be positive multiple of 4 h");
-  }
-  st = _ensureIdleForConfig("set ASC standard period");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_SET_ASC_STANDARD_PERIOD, hours, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-}
-
-Status SCD41::getAutomaticSelfCalibrationStandardPeriodHours(uint16_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _requireSCD41Variant("ASC standard period");
-  if (!st.ok()) {
-    return st;
-  }
-  st = _ensureIdleForConfig("get ASC standard period");
-  if (!st.ok()) {
-    return st;
-  }
-
-  return _readWord(cmd::CMD_GET_ASC_STANDARD_PERIOD, out, true);
-}
-
-Status SCD41::startPersistSettings() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("persist settings");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommand(cmd::CMD_PERSIST_SETTINGS, true);
-  if (!st.ok()) {
-    return st;
-  }
-  return _schedulePendingCommand(PendingCommand::PERSIST_SETTINGS,
-                                 cmd::EXECUTION_TIME_PERSIST_MS);
-}
-
-Status SCD41::startReinit() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("reinit");
-  if (!st.ok()) {
-    return st;
-  }
-
-  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  st = _writeCommand(cmd::CMD_REINIT, true);
-  if (!st.ok()) {
-    return st;
-  }
-  _advanceSensorEpoch();
-  return _schedulePendingCommand(PendingCommand::REINIT, cmd::EXECUTION_TIME_REINIT_MS);
-}
-
-Status SCD41::startFactoryReset() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("factory reset");
-  if (!st.ok()) {
-    return st;
-  }
-
-  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  st = _writeCommand(cmd::CMD_PERFORM_FACTORY_RESET, true);
-  if (!st.ok()) {
-    return st;
-  }
-  _advanceSensorEpoch();
-  return _schedulePendingCommand(PendingCommand::FACTORY_RESET,
-                                 cmd::EXECUTION_TIME_FACTORY_RESET_MS);
-}
-
-Status SCD41::startSelfTest() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _ensureIdleForConfig("self test");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommand(cmd::CMD_PERFORM_SELF_TEST, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _selfTestCompleted = false;
-  _selfTestRaw = 0;
-  _selfTestRawValid = false;
-  _selfTestStatus = Status::Error(Err::IN_PROGRESS, "Self-test running");
-  return _schedulePendingCommand(PendingCommand::SELF_TEST, cmd::EXECUTION_TIME_SELF_TEST_MS);
-}
-
-Status SCD41::getSelfTestResult(uint16_t& rawResult) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand == PendingCommand::SELF_TEST) {
-    return Status::Error(Err::BUSY, "Self-test still running");
-  }
-  if (!_selfTestCompleted) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test result not available");
-  }
-  if (!_selfTestStatus.ok()) {
-    return _selfTestStatus;
-  }
-  rawResult = _selfTestRaw;
-  return Status::Ok();
-}
-
-Status SCD41::getSelfTestRawResult(uint16_t& rawResult) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand == PendingCommand::SELF_TEST) {
-    return Status::Error(Err::BUSY, "Self-test still running");
-  }
-  if (!_selfTestCompleted) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Self-test result not available");
-  }
-  if (!_selfTestRawValid) {
-    return _selfTestStatus;
-  }
-  rawResult = _selfTestRaw;
-  return Status::Ok();
-}
-
-Status SCD41::startForcedRecalibration(uint16_t referencePpm) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (referencePpm == 0 || referencePpm > cmd::CO2_MAX_PPM) {
-    return Status::Error(Err::INVALID_PARAM, "Reference CO2 out of range");
-  }
-  Status st = _ensureIdleForConfig("forced recalibration");
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _writeCommandWithData(cmd::CMD_PERFORM_FORCED_RECALIBRATION, referencePpm, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  _forcedRecalibrationCompleted = false;
-  _forcedRecalibrationStatus = Status::Error(Err::IN_PROGRESS, "Forced recalibration running");
-  _forcedRecalibrationRaw = 0;
-  _forcedRecalibrationRawValid = false;
-  return _schedulePendingCommand(PendingCommand::FORCED_RECALIBRATION,
-                                 cmd::EXECUTION_TIME_FRC_MS);
-}
-
-Status SCD41::getForcedRecalibrationCorrectionPpm(int16_t& correctionPpm) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand == PendingCommand::FORCED_RECALIBRATION) {
-    return Status::Error(Err::BUSY, "Forced recalibration still running");
-  }
-  if (!_forcedRecalibrationCompleted) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration result not available");
-  }
-  if (!_forcedRecalibrationStatus.ok()) {
-    return _forcedRecalibrationStatus;
-  }
-  correctionPpm = _forcedRecalibrationCorrectionPpm;
-  return Status::Ok();
-}
-
-Status SCD41::getForcedRecalibrationRawResult(uint16_t& rawResult) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_pendingCommand == PendingCommand::FORCED_RECALIBRATION) {
-    return Status::Error(Err::BUSY, "Forced recalibration still running");
-  }
-  if (!_forcedRecalibrationCompleted) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Forced recalibration result not available");
-  }
-  if (!_forcedRecalibrationRawValid) {
-    return _forcedRecalibrationStatus;
-  }
-  rawResult = _forcedRecalibrationRaw;
-  return Status::Ok();
-}
-
-Status SCD41::getSettings(SettingsSnapshot& out) const {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-
-  out.initialized = _initialized;
-  out.state = _driverState;
-  out.operatingMode = _operatingMode;
-  out.singleShotMode = _singleShotMode;
-  out.pendingCommand = _pendingCommand;
-  out.busy = (_pendingCommand != PendingCommand::NONE);
-  out.commandReadyMs = _commandReadyMs;
-  out.i2cAddress = _config.i2cAddress;
-  out.i2cTimeoutMs = _config.i2cTimeoutMs;
-  out.offlineThreshold = _config.offlineThreshold;
-  out.totalProtocolFailures = _totalProtocolFailures;
-  out.totalCrcFailures = _totalCrcFailures;
-  out.consecutiveProtocolFailures = _consecutiveProtocolFailures;
-  out.lastProtocolErrorMs = _lastProtocolErrorMs;
-  out.lastProtocolError = _lastProtocolError;
-  out.measurementPending = _measurementRequested;
-  out.measurementReady = measurementReady();
-  out.hasSample = _hasSample;
-  out.hasFreshSample = hasFreshSample();
-  out.sampleStale = sampleStale();
-  out.sensorEpoch = _sensorEpoch;
-  out.sampleEpoch = _sampleEpoch;
-  out.measurementReadyMs = _measurementReadyMs;
-  out.sampleTimestampMs = _sampleTimestampMs;
-  out.missedSamples = _missedSamples;
-  out.lastSampleCo2Valid = _lastSampleCo2Valid;
-  out.sensorVariant = _sensorVariant;
-  out.serialNumberValid = _serialNumberValid;
-  out.serialNumber = _serialNumber;
-  out.liveConfigValid = _settingsLiveConfigValid;
-  out.temperatureOffsetC_x1000 = _settingsTemperatureOffsetC_x1000;
-  out.sensorAltitudeM = _settingsSensorAltitudeM;
-  out.ambientPressurePa = _settingsAmbientPressurePa;
-  out.automaticSelfCalibrationEnabled = _settingsAutomaticSelfCalibrationEnabled;
-  out.automaticSelfCalibrationTargetPpm = _settingsAutomaticSelfCalibrationTargetPpm;
-  out.automaticSelfCalibrationInitialPeriodHours =
-      _settingsAutomaticSelfCalibrationInitialPeriodHours;
-  out.automaticSelfCalibrationStandardPeriodHours =
-      _settingsAutomaticSelfCalibrationStandardPeriodHours;
-  return Status::Ok();
-}
-
-Status SCD41::startReadSettings() {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (_driverState == DriverState::OFFLINE) {
-    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
-  }
-  if (_settingsReadActive || _pollStep == PollStep::SETTINGS_COMMAND ||
-      _pollStep == PollStep::SETTINGS_READ) {
-    return Status::Error(Err::BUSY, "Settings read in progress");
-  }
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested ||
-      _operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Operation in progress");
-  }
-
-  _settingsReady = false;
-  _settingsAllLiveFieldsRead = !isPeriodicActive();
-  _settingsLiveConfigValid = false;
-  _settingsTemperatureOffsetC_x1000 = 0;
-  _settingsSensorAltitudeM = 0;
-  _settingsAmbientPressurePa = 0;
-  _settingsAutomaticSelfCalibrationEnabled = false;
-  _settingsAutomaticSelfCalibrationTargetPpm = 0;
-  _settingsAutomaticSelfCalibrationInitialPeriodHours = 0;
-  _settingsAutomaticSelfCalibrationStandardPeriodHours = 0;
-  _settingsField = isPeriodicActive() ? SettingsReadField::AMBIENT_PRESSURE
-                                      : SettingsReadField::TEMPERATURE_OFFSET;
-  _settingsReadActive = true;
-  _pollStep = PollStep::SETTINGS_COMMAND;
-  return Status{Err::IN_PROGRESS, 0, "Settings read scheduled"};
-}
-
-Status SCD41::readSettings(SettingsSnapshot& out) {
-  Status st = getSettings(out);
-  if (!st.ok()) {
-    return st;
-  }
-
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested ||
-      _operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Ok();
-  }
-
-  if (isPeriodicActive()) {
-    uint32_t ambientPressurePa = 0;
-    st = getAmbientPressurePa(ambientPressurePa);
-    if (!st.ok()) {
-      return st;
+    if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+        _active.effectfulWriteAttempted) {
+      _configuration.persistenceIndeterminate = true;
     }
-    st = getSettings(out);
-    if (!st.ok()) {
-      return st;
-    }
-    out.ambientPressurePa = ambientPressurePa;
-    _settingsAmbientPressurePa = ambientPressurePa;
-    _settingsLiveConfigValid = false;
-    return Status::Ok();
+    _finish(OperationOutcome::CANCELLED,
+            _active.effect,
+            Status::Error(Err::CANCELLED, "Driver unbound"), completedMs);
   }
+  _bound = false;
+  _attached = false;
+  _driverState = DriverState::UNINIT;
+  _operatingMode = OperatingMode::UNKNOWN;
+  _modeEvidence = ModeEvidence::UNKNOWN;
+  _reconciliationRequired = true;
+  _config = {};
+  _identity.valid = false;
+  _configuration.verifiedMask = 0;
+  _latestSampleValid = false;
+  _health.state = DriverState::UNINIT;
+}
 
-  int32_t temperatureOffsetC_x1000 = 0;
-  uint16_t sensorAltitudeM = 0;
-  uint32_t ambientPressurePa = 0;
-  bool automaticSelfCalibrationEnabled = false;
-  uint16_t automaticSelfCalibrationTargetPpm = 0;
-  uint16_t automaticSelfCalibrationInitialPeriodHours = 0;
-  uint16_t automaticSelfCalibrationStandardPeriodHours = 0;
-
-  st = getTemperatureOffsetC_x1000(temperatureOffsetC_x1000);
-  if (!st.ok()) {
-    return st;
+OperationState SCD41::operationState() const {
+  if (_terminalValid) {
+    return OperationState::RESULT_PENDING;
   }
+  return _activeValid ? OperationState::ACTIVE : OperationState::IDLE;
+}
 
-  st = getSensorAltitudeM(sensorAltitudeM);
-  if (!st.ok()) {
-    return st;
+RuntimeSnapshot SCD41::runtimeSnapshot() const {
+  RuntimeSnapshot snapshot;
+  snapshot.bound = _bound;
+  snapshot.attached = _attached;
+  snapshot.driverState = _driverState;
+  snapshot.operatingMode = _operatingMode;
+  snapshot.modeEvidence = _modeEvidence;
+  snapshot.operationState = operationState();
+  if (_activeValid) {
+    snapshot.operationId = _active.id;
+    snapshot.operationKind = _active.request.kind;
+    snapshot.nextDueMs = _active.nextDueMs;
+  } else if (_terminalValid) {
+    snapshot.operationId = _terminal.id;
+    snapshot.operationKind = _terminal.kind;
   }
+  snapshot.nextSafeCommandMs = _nextSafeCommandMs;
+  snapshot.sensorEpoch = _sensorEpoch;
+  snapshot.reconciliationRequired = _reconciliationRequired;
+  snapshot.sampleAvailable = _latestSampleValid;
+  return snapshot;
+}
 
-  st = getAmbientPressurePa(ambientPressurePa);
-  if (!st.ok()) {
-    return st;
+Status SCD41::peekLatestSample(FixedSample& out) const {
+  if (!_latestSampleValid) {
+    return Status::Error(Err::MEASUREMENT_NOT_READY, "No cached sample");
   }
-
-  st = getAutomaticSelfCalibrationEnabled(automaticSelfCalibrationEnabled);
-  if (!st.ok()) {
-    return st;
-  }
-
-  bool allLiveFieldsRead = true;
-  st = getAutomaticSelfCalibrationTargetPpm(automaticSelfCalibrationTargetPpm);
-  if (!st.ok()) {
-    if (!st.is(Err::UNSUPPORTED)) {
-      return st;
-    }
-    allLiveFieldsRead = false;
-  }
-
-  st = getAutomaticSelfCalibrationInitialPeriodHours(
-      automaticSelfCalibrationInitialPeriodHours);
-  if (!st.ok()) {
-    if (!st.is(Err::UNSUPPORTED)) {
-      return st;
-    }
-    allLiveFieldsRead = false;
-  }
-
-  st = getAutomaticSelfCalibrationStandardPeriodHours(
-      automaticSelfCalibrationStandardPeriodHours);
-  if (!st.ok()) {
-    if (!st.is(Err::UNSUPPORTED)) {
-      return st;
-    }
-    allLiveFieldsRead = false;
-  }
-
-  st = getSettings(out);
-  if (!st.ok()) {
-    return st;
-  }
-  out.temperatureOffsetC_x1000 = temperatureOffsetC_x1000;
-  out.sensorAltitudeM = sensorAltitudeM;
-  out.ambientPressurePa = ambientPressurePa;
-  out.automaticSelfCalibrationEnabled = automaticSelfCalibrationEnabled;
-  out.automaticSelfCalibrationTargetPpm = automaticSelfCalibrationTargetPpm;
-  out.automaticSelfCalibrationInitialPeriodHours = automaticSelfCalibrationInitialPeriodHours;
-  out.automaticSelfCalibrationStandardPeriodHours = automaticSelfCalibrationStandardPeriodHours;
-  out.liveConfigValid = allLiveFieldsRead;
-  _settingsTemperatureOffsetC_x1000 = temperatureOffsetC_x1000;
-  _settingsSensorAltitudeM = sensorAltitudeM;
-  _settingsAmbientPressurePa = ambientPressurePa;
-  _settingsAutomaticSelfCalibrationEnabled = automaticSelfCalibrationEnabled;
-  _settingsAutomaticSelfCalibrationTargetPpm = automaticSelfCalibrationTargetPpm;
-  _settingsAutomaticSelfCalibrationInitialPeriodHours =
-      automaticSelfCalibrationInitialPeriodHours;
-  _settingsAutomaticSelfCalibrationStandardPeriodHours =
-      automaticSelfCalibrationStandardPeriodHours;
-  _settingsLiveConfigValid = allLiveFieldsRead;
+  out = _latestSample;
   return Status::Ok();
 }
 
-Status SCD41::writeCommand(uint16_t command, bool allowExpectedNack) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
+OperationLimits SCD41::limits(OperationKind kind) {
+  OperationLimits limitsValue;
+  limitsValue.maxRetries = 0;
+  switch (kind) {
+    case OperationKind::ATTACH:
+      limitsValue.maxCallbacks = 4;
+      limitsValue.maxWaitMs = 1531;
+      break;
+    case OperationKind::READ_IDENTITY:
+    case OperationKind::READ_DATA_READY:
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+    case OperationKind::READ_SENSOR_ALTITUDE:
+    case OperationKind::READ_AMBIENT_PRESSURE:
+    case OperationKind::READ_ASC_ENABLED:
+    case OperationKind::READ_ASC_TARGET:
+    case OperationKind::READ_ASC_INITIAL_PERIOD:
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+      limitsValue.maxCallbacks = 2;
+      limitsValue.maxWaitMs = 1;
+      limitsValue.operationClass = OperationClass::STEADY_STATE;
+      break;
+    case OperationKind::START_PERIODIC:
+    case OperationKind::START_LOW_POWER_PERIODIC:
+    case OperationKind::POWER_DOWN:
+      limitsValue.maxCallbacks = 1;
+      limitsValue.maxWaitMs = 1;
+      break;
+    case OperationKind::STOP_PERIODIC:
+      limitsValue.maxCallbacks = 1;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_STOP_PERIODIC_MS;
+      break;
+    case OperationKind::FETCH_SAMPLE:
+      limitsValue.maxCallbacks = 4;
+      limitsValue.maxWaitMs = 3;
+      limitsValue.operationClass = OperationClass::STEADY_STATE;
+      break;
+    case OperationKind::SINGLE_SHOT:
+      limitsValue.maxCallbacks = 5;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_SINGLE_SHOT_MS + 3U;
+      break;
+    case OperationKind::SINGLE_SHOT_RHT_ONLY:
+      limitsValue.maxCallbacks = 5;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_SINGLE_SHOT_RHT_MS + 3U;
+      break;
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+    case OperationKind::SET_SENSOR_ALTITUDE:
+    case OperationKind::SET_AMBIENT_PRESSURE:
+    case OperationKind::SET_ASC_ENABLED:
+    case OperationKind::SET_ASC_TARGET:
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      limitsValue.maxCallbacks = 5;
+      limitsValue.maxWaitMs = 4;
+      break;
+    case OperationKind::READ_CONFIGURATION:
+      limitsValue.maxCallbacks = 14;
+      limitsValue.maxWaitMs = 13;
+      break;
+    case OperationKind::WAKE_UP:
+    case OperationKind::REINIT:
+      limitsValue.maxCallbacks = 3;
+      limitsValue.maxWaitMs = 31;
+      break;
+    case OperationKind::SELF_TEST:
+      limitsValue.maxCallbacks = 2;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_SELF_TEST_MS;
+      limitsValue.operationClass = OperationClass::MAINTENANCE;
+      break;
+    case OperationKind::FORCED_RECALIBRATION:
+      limitsValue.maxCallbacks = 2;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_FRC_MS;
+      limitsValue.operationClass = OperationClass::MAINTENANCE;
+      limitsValue.writesNonvolatile = true;
+      break;
+    case OperationKind::PERSIST_SETTINGS:
+      limitsValue.maxCallbacks = 1;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_PERSIST_MS;
+      limitsValue.operationClass = OperationClass::MAINTENANCE;
+      limitsValue.writesNonvolatile = true;
+      break;
+    case OperationKind::FACTORY_RESET:
+      limitsValue.maxCallbacks = 3;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_FACTORY_RESET_MS + 1U;
+      limitsValue.operationClass = OperationClass::MAINTENANCE;
+      limitsValue.writesNonvolatile = true;
+      limitsValue.destructive = true;
+      break;
+    case OperationKind::DIAGNOSTIC_READ_WORDS:
+      limitsValue.maxCallbacks = 2;
+      limitsValue.maxWaitMs = 1;
+      limitsValue.operationClass = OperationClass::DIAGNOSTIC;
+      break;
+    case OperationKind::DIAGNOSTIC_WRITE_COMMAND:
+    case OperationKind::DIAGNOSTIC_WRITE_WORD:
+      limitsValue.maxCallbacks = 1;
+      limitsValue.maxWaitMs = 1;
+      limitsValue.operationClass = OperationClass::DIAGNOSTIC;
+      break;
+    case OperationKind::NONE:
+      break;
   }
-  if (allowExpectedNack) {
-    return Status::Error(Err::UNSUPPORTED, "Expected NACK is managed only");
-  }
-  Status st = _validateRawCommand(command);
-  if (!st.ok()) {
-    return st;
-  }
-  if (_isWordReturningCommand(command)) {
-    return Status::Error(Err::UNSUPPORTED, "Use CRC-checked read helper");
-  }
-  if (_isWordPayloadCommand(command)) {
-    return Status::Error(Err::UNSUPPORTED, "Use data-word write helper");
-  }
-  return _writeCommand(command, true, false);
-}
-
-Status SCD41::writeCommandWithData(uint16_t command, uint16_t data) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _validateRawCommand(command);
-  if (!st.ok()) {
-    return st;
-  }
-  if (!_isWordPayloadCommand(command) && _isWordReturningCommand(command)) {
-    return Status::Error(Err::UNSUPPORTED, "Command is read-only");
-  }
-  return _writeCommandWithData(command, data, true);
-}
-
-Status SCD41::readCommand(uint16_t command, uint8_t* out, size_t len, bool allowNoData) {
-  (void)allowNoData;
-  return _readCommandRawBytes(command, out, len, false);
-}
-
-Status SCD41::readCommandUnsafe(uint16_t command, uint8_t* out, size_t len) {
-  return _readCommandRawBytes(command, out, len, true);
-}
-
-Status SCD41::_readCommandRawBytes(uint16_t command, uint8_t* out, size_t len,
-                                   bool unsafeRawBytes) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (out == nullptr || len == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
-  }
-  if (len > cmd::MEASUREMENT_RESPONSE_LEN) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-  Status st = _validateRawCommand(command);
-  if (!st.ok()) {
-    return st;
-  }
-  if (!unsafeRawBytes && _isWordReturningCommand(command)) {
-    return Status::Error(Err::UNSUPPORTED, "Use CRC-checked word helper");
-  }
-
-  st = _writeCommand(command, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-  if (!st.ok()) {
-    return st;
-  }
-
-  return _readOnly(out, len, true, false);
-}
-
-Status SCD41::readWordCommand(uint16_t command, uint16_t& out) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _validateRawCommand(command);
-  if (!st.ok()) {
-    return st;
-  }
-  return _readWord(command, out, true);
-}
-
-Status SCD41::readWordsCommand(uint16_t command, uint16_t* out, size_t count) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  Status st = _validateRawCommand(command);
-  if (!st.ok()) {
-    return st;
-  }
-  return _readWords(command, out, count, true);
+  return limitsValue;
 }
 
 float SCD41::convertTemperatureC(uint16_t raw) {
-  return -45.0f + (175.0f * static_cast<float>(raw) / 65535.0f);
+  return -45.0F + (175.0F * static_cast<float>(raw) / 65535.0F);
 }
 
 float SCD41::convertHumidityPct(uint16_t raw) {
-  return 100.0f * static_cast<float>(raw) / 65535.0f;
+  return 100.0F * static_cast<float>(raw) / 65535.0F;
 }
 
-int32_t SCD41::convertTemperatureC_x1000(uint16_t raw) {
+int32_t SCD41::convertTemperatureMilliC(uint16_t raw) {
   return ((21875 * static_cast<int32_t>(raw)) >> 13) - 45000;
 }
 
-uint32_t SCD41::convertHumidityPct_x1000(uint16_t raw) {
-  return static_cast<uint32_t>((12500U * static_cast<uint32_t>(raw)) >> 13);
+uint32_t SCD41::convertHumidityMilliPercent(uint16_t raw) {
+  return (12500U * static_cast<uint32_t>(raw)) >> 13;
 }
 
-uint16_t SCD41::encodeTemperatureOffsetC(float offsetC) {
-  if (!std::isfinite(offsetC)) {
-    return 0;
+Status SCD41::encodeTemperatureOffsetC(float offsetC, uint16_t& out) {
+  if (!std::isfinite(offsetC) || offsetC < 0.0F || offsetC > 20.0F) {
+    return Status::Error(Err::INVALID_PARAM, "Temperature offset out of range");
   }
-  const int32_t milli = static_cast<int32_t>(
-      (offsetC * 1000.0f) + (offsetC >= 0.0f ? 0.5f : -0.5f));
-  return encodeTemperatureOffsetC_x1000(milli);
+  const int32_t milli = static_cast<int32_t>(offsetC * 1000.0F + 0.5F);
+  return encodeTemperatureOffsetMilliC(milli, out);
 }
 
-uint16_t SCD41::encodeTemperatureOffsetC_x1000(int32_t offsetC_x1000) {
-  if (offsetC_x1000 <= 0) {
-    return 0;
+Status SCD41::encodeTemperatureOffsetMilliC(int32_t offsetMilliC,
+                                             uint16_t& out) {
+  if (offsetMilliC < 0 || offsetMilliC > 20000) {
+    return Status::Error(Err::INVALID_PARAM, "Temperature offset out of range");
   }
-  const uint64_t numerator = static_cast<uint64_t>(offsetC_x1000) * 65535ULL + 87500ULL;
-  const uint64_t encoded = numerator / 175000ULL;
-  return static_cast<uint16_t>(
-      encoded > std::numeric_limits<uint16_t>::max()
-          ? std::numeric_limits<uint16_t>::max()
-          : encoded);
+  const uint64_t numerator = static_cast<uint64_t>(offsetMilliC) * 65535ULL +
+                             87500ULL;
+  out = static_cast<uint16_t>(numerator / 175000ULL);
+  return Status::Ok();
 }
 
 float SCD41::decodeTemperatureOffsetC(uint16_t raw) {
-  return static_cast<float>(decodeTemperatureOffsetC_x1000(raw)) / 1000.0f;
+  return static_cast<float>(decodeTemperatureOffsetMilliC(raw)) / 1000.0F;
 }
 
-int32_t SCD41::decodeTemperatureOffsetC_x1000(uint16_t raw) {
-  const uint32_t numerator = static_cast<uint32_t>(raw) * 175000U + 32767U;
-  return static_cast<int32_t>(numerator / 65535U);
+int32_t SCD41::decodeTemperatureOffsetMilliC(uint16_t raw) {
+  return static_cast<int32_t>((static_cast<uint64_t>(raw) * 175000ULL +
+                               32767ULL) /
+                              65535ULL);
 }
 
-uint16_t SCD41::encodeAmbientPressurePa(uint32_t pressurePa) {
-  return static_cast<uint16_t>(pressurePa / 100U);
+Status SCD41::encodeAmbientPressurePa(uint32_t pressurePa, uint16_t& out) {
+  if (pressurePa < cmd::AMBIENT_PRESSURE_MIN_PA ||
+      pressurePa > cmd::AMBIENT_PRESSURE_MAX_PA) {
+    return Status::Error(Err::INVALID_PARAM, "Ambient pressure out of range");
+  }
+  out = static_cast<uint16_t>((pressurePa + 50U) / 100U);
+  return Status::Ok();
 }
 
 uint32_t SCD41::decodeAmbientPressurePa(uint16_t raw) {
   return static_cast<uint32_t>(raw) * 100U;
 }
 
-Status SCD41::_validateRawCommand(uint16_t command) const {
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
-    return Status::Error(Err::BUSY, "Operation in progress");
+Status SCD41::_validateConfig(const Config& config) const {
+  if (config.transfer == nullptr) {
+    return Status::Error(Err::INVALID_CONFIG, "Transfer callback is required");
   }
-  if (_isSCD41OnlyCommand(command) && _sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "Command requires SCD41");
+  if (config.transferTimeoutMs == 0U || config.transferTimeoutMs > 1000U) {
+    return Status::Error(Err::INVALID_CONFIG, "Transfer timeout out of range");
   }
-  if (_isManagedOnlyRawCommand(command)) {
-    return Status::Error(Err::UNSUPPORTED, "Use typed API for managed command");
+  if (config.powerUpDelayMs < cmd::EXECUTION_TIME_POWER_UP_MS ||
+      config.powerUpDelayMs > 1000U) {
+    return Status::Error(Err::INVALID_CONFIG, "Power-up delay out of range");
+  }
+  return Status::Ok();
+}
+
+Status SCD41::_validateStart(const OperationRequest& request,
+                             const OperationOptions& options) const {
+  if (!_bound) {
+    return Status::Error(Err::NOT_INITIALIZED, "Driver is not bound");
+  }
+  if (_activeValid || _terminalValid) {
+    return Status::Error(Err::BUSY, "Operation or result pending");
+  }
+  if (request.kind == OperationKind::NONE || options.requestId == 0U) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid operation request");
+  }
+  if (!_deadlineValid(options.nowMs, options.deadlineMs)) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid operation deadline");
+  }
+  if (_lastOwnerNowValid &&
+      !_timeReached(options.nowMs, _lastOwnerNowMs)) {
+    return Status::Error(Err::INVALID_PARAM, "Owner clock moved backwards");
+  }
+  Status status = _validateRequestValue(request);
+  if (!status.ok()) {
+    return status;
+  }
+  return _validateAdmission(request.kind);
+}
+
+Status SCD41::_validateRequestValue(const OperationRequest& request) const {
+  switch (request.kind) {
+    case OperationKind::SET_TEMPERATURE_OFFSET: {
+      uint16_t ignored = 0;
+      return encodeTemperatureOffsetMilliC(request.signedValue, ignored);
+    }
+    case OperationKind::SET_SENSOR_ALTITUDE:
+      if (request.value > cmd::ALTITUDE_MAX_M) {
+        return Status::Error(Err::INVALID_PARAM, "Altitude out of range");
+      }
+      break;
+    case OperationKind::SET_AMBIENT_PRESSURE: {
+      uint16_t ignored = 0;
+      return encodeAmbientPressurePa(request.value, ignored);
+    }
+    case OperationKind::SET_ASC_ENABLED:
+      if (request.value > 1U) {
+        return Status::Error(Err::INVALID_PARAM, "ASC enable must be boolean");
+      }
+      break;
+    case OperationKind::SET_ASC_TARGET:
+      if (request.value == 0U || request.value > cmd::CO2_MAX_PPM) {
+        return Status::Error(Err::INVALID_PARAM, "ASC target out of range");
+      }
+      break;
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      if (request.value > 65532U ||
+          (request.value % cmd::ASC_PERIOD_STEP_HOURS) != 0U) {
+        return Status::Error(Err::INVALID_PARAM, "ASC period out of range");
+      }
+      break;
+    case OperationKind::FORCED_RECALIBRATION:
+      if (request.confirmation != MaintenanceConfirmation::FORCED_RECALIBRATION) {
+        return Status::Error(Err::CONFIRMATION_REQUIRED,
+                             "FRC confirmation required");
+      }
+      if (request.value == 0U || request.value > cmd::CO2_MAX_PPM) {
+        return Status::Error(Err::INVALID_PARAM, "FRC reference out of range");
+      }
+      break;
+    case OperationKind::PERSIST_SETTINGS:
+      if (request.confirmation != MaintenanceConfirmation::PERSIST_SETTINGS) {
+        return Status::Error(Err::CONFIRMATION_REQUIRED,
+                             "Persistence confirmation required");
+      }
+      break;
+    case OperationKind::FACTORY_RESET:
+      if (request.confirmation != MaintenanceConfirmation::FACTORY_RESET) {
+        return Status::Error(Err::CONFIRMATION_REQUIRED,
+                             "Factory-reset confirmation required");
+      }
+      break;
+    case OperationKind::DIAGNOSTIC_READ_WORDS:
+      if (request.command == 0U || request.wordCount == 0U ||
+          request.wordCount > 3U) {
+        return Status::Error(Err::INVALID_PARAM, "Invalid diagnostic read");
+      }
+      if (isManagedCommand(request.command)) {
+        return Status::Error(Err::UNSUPPORTED,
+                             "Use typed operation for managed command");
+      }
+      break;
+    case OperationKind::DIAGNOSTIC_WRITE_COMMAND:
+    case OperationKind::DIAGNOSTIC_WRITE_WORD:
+      if (request.command == 0U || isManagedCommand(request.command)) {
+        return Status::Error(Err::UNSUPPORTED,
+                             "Use typed operation for managed command");
+      }
+      if (request.kind == OperationKind::DIAGNOSTIC_WRITE_WORD &&
+          request.value > std::numeric_limits<uint16_t>::max()) {
+        return Status::Error(Err::INVALID_PARAM,
+                             "Diagnostic word is out of range");
+      }
+      break;
+    default:
+      break;
+  }
+  return Status::Ok();
+}
+
+Status SCD41::_validateAdmission(OperationKind kind) const {
+  if (kind == OperationKind::ATTACH) {
+    return Status::Ok();
+  }
+  if (!_attached) {
+    return _reconciliationRequired
+               ? Status::Error(Err::RECONCILIATION_REQUIRED,
+                               "Attach reconciliation required")
+               : Status::Error(Err::NOT_INITIALIZED, "Sensor is not attached");
+  }
+  if (_reconciliationRequired || _operatingMode == OperatingMode::UNKNOWN) {
+    return Status::Error(Err::RECONCILIATION_REQUIRED,
+                         "Sensor state is unknown");
+  }
+  if (kind == OperationKind::PERSIST_SETTINGS &&
+      !_configuration.persistenceIndeterminate &&
+      (_configuration.dirtyMask &
+       static_cast<uint16_t>(~_configuration.verifiedMask)) != 0U) {
+    return Status::Error(Err::RECONCILIATION_REQUIRED,
+                         "Dirty settings require verified readback");
+  }
+
+  if (_identity.valid && _identity.variant != SensorVariant::SCD41) {
+    switch (kind) {
+      case OperationKind::START_LOW_POWER_PERIODIC:
+      case OperationKind::SINGLE_SHOT:
+      case OperationKind::SINGLE_SHOT_RHT_ONLY:
+      case OperationKind::READ_ASC_TARGET:
+      case OperationKind::SET_ASC_TARGET:
+      case OperationKind::READ_ASC_INITIAL_PERIOD:
+      case OperationKind::SET_ASC_INITIAL_PERIOD:
+      case OperationKind::READ_ASC_STANDARD_PERIOD:
+      case OperationKind::SET_ASC_STANDARD_PERIOD:
+      case OperationKind::POWER_DOWN:
+      case OperationKind::WAKE_UP:
+        return Status::Error(Err::UNSUPPORTED, "Operation requires SCD41");
+      default:
+        break;
+    }
+  }
+
+  if (_operatingMode == OperatingMode::PERIODIC ||
+      _operatingMode == OperatingMode::LOW_POWER_PERIODIC) {
+    return _periodicAllowed(kind)
+               ? Status::Ok()
+               : Status::Error(Err::BUSY, "Operation forbidden in periodic mode");
   }
   if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
+    return kind == OperationKind::WAKE_UP
+               ? Status::Ok()
+               : Status::Error(Err::BUSY, "Sensor is powered down");
   }
-  if (isPeriodicActive() && !_isPeriodicAllowedCommand(command)) {
-    return Status::Error(Err::BUSY, "Command not allowed during periodic measurement");
+  if (kind == OperationKind::FETCH_SAMPLE) {
+    return Status::Error(Err::BUSY, "Periodic measurement is not active");
   }
   return Status::Ok();
 }
 
-Status SCD41::_requireSCD41Variant(const char* opName) const {
-  if (_sensorVariant == SensorVariant::SCD41) {
-    return Status::Ok();
-  }
-  return Status::Error(Err::UNSUPPORTED,
-                       (opName == nullptr) ? "Operation requires SCD41" : opName,
-                       static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
-}
+Status SCD41::_beginOperation(const OperationRequest& request,
+                              const OperationOptions& options,
+                              const OperationId& id) {
+  _active = {};
+  _workingValue = {};
+  _active.request = request;
+  _active.options = options;
+  _active.id = id;
+  _active.startedMs = options.nowMs;
+  _active.deadlineMs = options.deadlineMs;
+  _active.nextDueMs = options.nowMs;
+  _active.effect = _isEffectful(request.kind) ? EffectState::NOT_ATTEMPTED
+                                               : EffectState::NONE;
+  _lastTransferWasEffectful = false;
+  _lastOwnerNowMs = options.nowMs;
+  _lastOwnerNowValid = true;
 
-bool SCD41::_isPeriodicAllowedCommand(uint16_t command) {
-  switch (command) {
-    case cmd::CMD_READ_MEASUREMENT:
-    case cmd::CMD_GET_DATA_READY_STATUS:
-    case cmd::CMD_SET_AMBIENT_PRESSURE:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool SCD41::_isManagedOnlyRawCommand(uint16_t command) {
-  switch (command) {
-    case cmd::CMD_START_PERIODIC_MEASUREMENT:
-    case cmd::CMD_STOP_PERIODIC_MEASUREMENT:
-    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
-    case cmd::CMD_MEASURE_SINGLE_SHOT:
-    case cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY:
-    case cmd::CMD_PERFORM_FORCED_RECALIBRATION:
-    case cmd::CMD_PERSIST_SETTINGS:
-    case cmd::CMD_PERFORM_SELF_TEST:
-    case cmd::CMD_PERFORM_FACTORY_RESET:
-    case cmd::CMD_REINIT:
-    case cmd::CMD_POWER_DOWN:
-    case cmd::CMD_WAKE_UP:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool SCD41::_isWordReturningCommand(uint16_t command) {
-  switch (command) {
-    case cmd::CMD_READ_MEASUREMENT:
-    case cmd::CMD_GET_TEMPERATURE_OFFSET:
-    case cmd::CMD_GET_SENSOR_ALTITUDE:
-    case cmd::CMD_GET_AMBIENT_PRESSURE:
-    case cmd::CMD_GET_ASC_ENABLED:
-    case cmd::CMD_GET_ASC_TARGET:
-    case cmd::CMD_GET_DATA_READY_STATUS:
-    case cmd::CMD_GET_SERIAL_NUMBER:
-    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
-    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool SCD41::_isWordPayloadCommand(uint16_t command) {
-  switch (command) {
-    case cmd::CMD_SET_TEMPERATURE_OFFSET:
-    case cmd::CMD_SET_SENSOR_ALTITUDE:
-    case cmd::CMD_SET_AMBIENT_PRESSURE:
-    case cmd::CMD_SET_ASC_ENABLED:
-    case cmd::CMD_SET_ASC_TARGET:
-    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
-    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
-      return true;
-    default:
-      return false;
-  }
-}
-
-bool SCD41::_isSCD41OnlyCommand(uint16_t command) {
-  switch (command) {
-    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
-    case cmd::CMD_SET_ASC_TARGET:
-    case cmd::CMD_GET_ASC_TARGET:
-    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
-    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
-    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
-    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
-    case cmd::CMD_MEASURE_SINGLE_SHOT:
-    case cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY:
-    case cmd::CMD_POWER_DOWN:
-    case cmd::CMD_WAKE_UP:
-      return true;
-    default:
-      return false;
-  }
-}
-
-Status SCD41::_i2cWriteReadRaw(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf, size_t rxLen) {
-  if (_config.i2cWriteRead == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C read callback not set");
-  }
-  if ((txLen > 0 && txBuf == nullptr) || rxBuf == nullptr || rxLen == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid I2C read buffers");
-  }
-  return _config.i2cWriteRead(_config.i2cAddress, txBuf, txLen, rxBuf, rxLen,
-                              _config.i2cTimeoutMs, _config.i2cUser);
-}
-
-Status SCD41::_i2cWriteRaw(const uint8_t* buf, size_t len) {
-  if (_config.i2cWrite == nullptr) {
-    return Status::Error(Err::INVALID_CONFIG, "I2C write callback not set");
-  }
-  if (buf == nullptr || len == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid I2C write buffer");
-  }
-  return _config.i2cWrite(_config.i2cAddress, buf, len, _config.i2cTimeoutMs, _config.i2cUser);
-}
-
-Status SCD41::_i2cWriteTracked(const uint8_t* buf, size_t len) {
-  Status allowed = _ensureNormalI2cAllowed();
-  if (!allowed.ok()) {
-    return allowed;
-  }
-  return _updateHealth(_i2cWriteRaw(buf, len));
-}
-
-Status SCD41::_i2cWriteTrackedAllowExpectedNack(const uint8_t* buf, size_t len) {
-  Status allowed = _ensureNormalI2cAllowed();
-  if (!allowed.ok()) {
-    return allowed;
-  }
-  Status st = _i2cWriteRaw(buf, len);
-  if (st.ok()) {
-    return _updateHealth(st);
-  }
-  if (st.code == Err::I2C_NACK_ADDR || st.code == Err::I2C_NACK_DATA) {
-    return Status::Ok();
-  }
-  return _updateHealth(st);
-}
-
-Status SCD41::_i2cWriteReadTracked(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf,
-                                   size_t rxLen) {
-  Status allowed = _ensureNormalI2cAllowed();
-  if (!allowed.ok()) {
-    return allowed;
-  }
-  return _updateHealth(_i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen));
-}
-
-Status SCD41::_i2cWriteReadTrackedAllowNoData(const uint8_t* txBuf, size_t txLen, uint8_t* rxBuf,
-                                              size_t rxLen, bool allowNoData) {
-  Status allowed = _ensureNormalI2cAllowed();
-  if (!allowed.ok()) {
-    return allowed;
-  }
-  Status st = _i2cWriteReadRaw(txBuf, txLen, rxBuf, rxLen);
-  if (allowNoData && st.code == Err::I2C_NACK_READ &&
-      hasCapability(_config.transportCapabilities, TransportCapability::READ_HEADER_NACK)) {
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "No data available");
-  }
-  return _updateHealth(st);
-}
-
-Status SCD41::_writeCommand(uint16_t cmd, bool tracked, bool allowExpectedNack) {
-  Status st = _ensureCommandDelay();
-  if (!st.ok()) {
-    return st;
-  }
-
-  const uint8_t buf[2] = {
-      static_cast<uint8_t>((cmd >> 8) & 0xFF),
-      static_cast<uint8_t>(cmd & 0xFF),
-  };
-
-  if (tracked) {
-    st = allowExpectedNack ? _i2cWriteTrackedAllowExpectedNack(buf, sizeof(buf))
-                           : _i2cWriteTracked(buf, sizeof(buf));
+  if (request.kind == OperationKind::ATTACH) {
+    _active.phase = OperationPhase::WAIT_POWER_UP;
+    _active.nextDueMs = options.nowMs + _config.powerUpDelayMs;
+  } else if (request.kind == OperationKind::FETCH_SAMPLE) {
+    _active.phase = OperationPhase::SEND_READY_COMMAND;
+  } else if (request.kind == OperationKind::SINGLE_SHOT ||
+             request.kind == OperationKind::SINGLE_SHOT_RHT_ONLY ||
+             _isMaintenance(request.kind) || _isDiagnostic(request.kind) ||
+             _isSettingWrite(request.kind) ||
+             request.kind == OperationKind::START_PERIODIC ||
+             request.kind == OperationKind::START_LOW_POWER_PERIODIC ||
+             request.kind == OperationKind::STOP_PERIODIC ||
+             request.kind == OperationKind::POWER_DOWN ||
+             request.kind == OperationKind::WAKE_UP) {
+    _active.phase = OperationPhase::SEND_COMMAND;
+  } else if (isReadKind(request.kind)) {
+    _active.phase = OperationPhase::SEND_COMMAND;
   } else {
-    st = _i2cWriteRaw(buf, sizeof(buf));
-  }
-  if (!st.ok()) {
-    return st;
+    return Status::Error(Err::UNSUPPORTED, "Unsupported operation");
   }
 
-  _lastCommandUs = _nowUs();
-  _lastCommandValid = true;
+  if (request.kind == OperationKind::SET_TEMPERATURE_OFFSET) {
+    Status status = encodeTemperatureOffsetMilliC(request.signedValue,
+                                                   _active.desiredRaw);
+    if (!status.ok()) {
+      return status;
+    }
+  } else if (request.kind == OperationKind::SET_AMBIENT_PRESSURE) {
+    Status status = encodeAmbientPressurePa(request.value, _active.desiredRaw);
+    if (!status.ok()) {
+      return status;
+    }
+  } else if (_isSettingWrite(request.kind)) {
+    _active.desiredRaw = static_cast<uint16_t>(request.value);
+  }
+
+  _activeValid = true;
   return Status::Ok();
 }
 
-Status SCD41::_writeCommandWithData(uint16_t cmd, uint16_t data, bool tracked) {
-  Status st = _ensureCommandDelay();
-  if (!st.ok()) {
-    return st;
+Status SCD41::_step(uint32_t& nowMs, uint8_t& callbacksRemaining) {
+  if (_timeReached(nowMs, _active.deadlineMs)) {
+    return Status::Error(Err::TIMEOUT, "Operation deadline expired");
+  }
+  if (!_timeReached(nowMs, _nextSafeCommandMs)) {
+    _active.nextDueMs = _nextSafeCommandMs;
+    return Status::Error(Err::IN_PROGRESS, "Sensor busy window active");
   }
 
-  uint8_t buf[MAX_WRITE_LEN] = {
-      static_cast<uint8_t>((cmd >> 8) & 0xFF),
-      static_cast<uint8_t>(cmd & 0xFF),
-      static_cast<uint8_t>((data >> 8) & 0xFF),
-      static_cast<uint8_t>(data & 0xFF),
-      0,
-  };
-  buf[4] = _crc8(&buf[2], 2);
-
-  st = tracked ? _i2cWriteTracked(buf, sizeof(buf)) : _i2cWriteRaw(buf, sizeof(buf));
-  if (!st.ok()) {
-    return st;
+  const OperationKind kind = _active.request.kind;
+  if (kind == OperationKind::ATTACH) {
+    return _stepAttach(nowMs, callbacksRemaining);
   }
-
-  _lastCommandUs = _nowUs();
-  _lastCommandValid = true;
-  return Status::Ok();
+  if (kind == OperationKind::FETCH_SAMPLE || kind == OperationKind::SINGLE_SHOT ||
+      kind == OperationKind::SINGLE_SHOT_RHT_ONLY) {
+    return _stepMeasurement(nowMs, callbacksRemaining);
+  }
+  if (_isMaintenance(kind)) {
+    return _stepMaintenance(nowMs, callbacksRemaining);
+  }
+  if (_isDiagnostic(kind)) {
+    return _stepDiagnostic(nowMs, callbacksRemaining);
+  }
+  if (_isSettingWrite(kind) || kind == OperationKind::START_PERIODIC ||
+      kind == OperationKind::START_LOW_POWER_PERIODIC ||
+      kind == OperationKind::STOP_PERIODIC || kind == OperationKind::POWER_DOWN ||
+      kind == OperationKind::WAKE_UP) {
+    return _stepWriteLike(nowMs, callbacksRemaining);
+  }
+  return _stepReadLike(nowMs, callbacksRemaining);
 }
 
-Status SCD41::_readCommand(uint16_t cmd, uint8_t* out, size_t len, bool tracked) {
-  Status st = _writeCommand(cmd, tracked);
-  if (!st.ok()) {
-    return st;
-  }
+Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
+  Status status;
+  switch (_active.phase) {
+    case OperationPhase::WAIT_POWER_UP:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for power-up");
+      }
+      _active.phase = OperationPhase::SEND_WAKE;
+      return Status::Error(Err::IN_PROGRESS, "Attach progressing");
 
-  st = _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-  if (!st.ok()) {
-    return st;
-  }
+    case OperationPhase::SEND_WAKE:
+      status = _writeCommand(cmd::CMD_WAKE_UP, TransferIntent::EXPECTED_WRITE_NACK,
+                             nowMs, callbacksRemaining, true);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.effect = EffectState::ACKNOWLEDGED;
+      _active.phase = OperationPhase::WAIT_WAKE;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_POWER_UP_MS;
+      _nextSafeCommandMs = _active.nextDueMs;
+      return Status::Error(Err::IN_PROGRESS, "Waiting after wake");
 
-  return _readOnly(out, len, tracked);
-}
+    case OperationPhase::WAIT_WAKE:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting after wake");
+      }
+      _active.phase = OperationPhase::SEND_STOP;
+      return Status::Error(Err::IN_PROGRESS, "Attach progressing");
 
-Status SCD41::_readOnly(uint8_t* out, size_t len, bool tracked, bool allowNoData) {
-  if (out == nullptr || len == 0 || len > cmd::MEASUREMENT_RESPONSE_LEN) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid read buffer");
-  }
+    case OperationPhase::SEND_STOP:
+      status = _writeCommand(cmd::CMD_STOP_PERIODIC_MEASUREMENT,
+                             TransferIntent::EXPECTED_WRITE_NACK, nowMs,
+                             callbacksRemaining, true);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_STOP;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_STOP_PERIODIC_MS;
+      _nextSafeCommandMs = _active.nextDueMs;
+      return Status::Error(Err::IN_PROGRESS, "Waiting after stop");
 
-  Status st = _ensureCommandDelay();
-  if (!st.ok()) {
-    return st;
-  }
+    case OperationPhase::WAIT_STOP:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting after stop");
+      }
+      _active.phase = OperationPhase::SEND_READ_COMMAND;
+      return Status::Error(Err::IN_PROGRESS, "Attach progressing");
 
-  if (tracked) {
-    st = _i2cWriteReadTrackedAllowNoData(nullptr, 0, out, len, allowNoData);
-  } else {
-    st = _i2cWriteReadRaw(nullptr, 0, out, len);
-  }
-  if (st.ok() || st.code == Err::MEASUREMENT_NOT_READY) {
-    _lastCommandUs = _nowUs();
-    _lastCommandValid = true;
-  }
-  if (!st.ok()) {
-    return st;
-  }
-  return Status::Ok();
-}
+    case OperationPhase::SEND_READ_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER, TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for identity");
 
-Status SCD41::_readWord(uint16_t cmd, uint16_t& value, bool tracked) {
-  return _readWords(cmd, &value, 1, tracked);
-}
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for identity");
+      }
+      _active.phase = OperationPhase::READ_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Identity response due");
 
-Status SCD41::_readWords(uint16_t cmd, uint16_t* values, size_t count, bool tracked) {
-  if (values == nullptr || count == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
-  }
-  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-
-  const size_t len = count * cmd::DATA_WORD_WITH_CRC;
-  uint8_t buf[cmd::MEASUREMENT_RESPONSE_LEN] = {};
-  if (len > sizeof(buf)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-
-  Status st = _readCommand(cmd, buf, len, tracked);
-  if (!st.ok()) {
-    return st;
-  }
-
-  for (size_t i = 0; i < count; ++i) {
-    const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
-    const uint8_t expected = _crc8(&buf[offset], 2);
-    if (buf[offset + 2] != expected) {
-      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
-    }
-    values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
-                                      static_cast<uint16_t>(buf[offset + 1]));
-  }
-
-  return _recordProtocolStatus(Status::Ok(), tracked);
-}
-
-Status SCD41::_readWordsOnly(uint16_t* values, size_t count, bool tracked, bool allowNoData) {
-  if (values == nullptr || count == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
-  }
-  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-
-  const size_t len = count * cmd::DATA_WORD_WITH_CRC;
-  uint8_t buf[cmd::MEASUREMENT_RESPONSE_LEN] = {};
-  if (len > sizeof(buf)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-
-  Status st = _readOnly(buf, len, tracked, allowNoData);
-  if (!st.ok()) {
-    return st;
-  }
-
-  for (size_t i = 0; i < count; ++i) {
-    const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
-    const uint8_t expected = _crc8(&buf[offset], 2);
-    if (buf[offset + 2] != expected) {
-      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
-    }
-    values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
-                                      static_cast<uint16_t>(buf[offset + 1]));
-  }
-
-  return _recordProtocolStatus(Status::Ok(), tracked);
-}
-
-Status SCD41::_writeCommandPoll(uint16_t cmd, bool tracked, bool allowExpectedNack) {
-  if (!_commandDelayReady()) {
-    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
-  }
-
-  const uint8_t buf[2] = {
-      static_cast<uint8_t>((cmd >> 8) & 0xFF),
-      static_cast<uint8_t>(cmd & 0xFF),
-  };
-
-  Status st = Status::Ok();
-  if (tracked) {
-    st = allowExpectedNack ? _i2cWriteTrackedAllowExpectedNack(buf, sizeof(buf))
-                           : _i2cWriteTracked(buf, sizeof(buf));
-  } else {
-    st = _i2cWriteRaw(buf, sizeof(buf));
-  }
-  if (!st.ok()) {
-    return st;
-  }
-
-  _lastCommandUs = _nowUs();
-  _lastCommandValid = true;
-  return Status::Ok();
-}
-
-Status SCD41::_writeCommandWithDataPoll(uint16_t cmd, uint16_t data, bool tracked) {
-  if (!_commandDelayReady()) {
-    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
-  }
-
-  uint8_t buf[MAX_WRITE_LEN] = {
-      static_cast<uint8_t>((cmd >> 8) & 0xFF),
-      static_cast<uint8_t>(cmd & 0xFF),
-      static_cast<uint8_t>((data >> 8) & 0xFF),
-      static_cast<uint8_t>(data & 0xFF),
-      0,
-  };
-  buf[4] = _crc8(&buf[2], 2);
-
-  Status st = tracked ? _i2cWriteTracked(buf, sizeof(buf)) : _i2cWriteRaw(buf, sizeof(buf));
-  if (!st.ok()) {
-    return st;
-  }
-
-  _lastCommandUs = _nowUs();
-  _lastCommandValid = true;
-  return Status::Ok();
-}
-
-Status SCD41::_readWordsOnlyPoll(uint16_t* values, size_t count, bool tracked,
-                                 bool allowNoData) {
-  if (values == nullptr || count == 0) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid output buffer");
-  }
-  if (count > (cmd::MEASUREMENT_RESPONSE_LEN / cmd::DATA_WORD_WITH_CRC)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-  if (!_commandDelayReady()) {
-    return Status::Error(Err::IN_PROGRESS, "Command delay pending");
-  }
-
-  const size_t len = count * cmd::DATA_WORD_WITH_CRC;
-  uint8_t buf[cmd::MEASUREMENT_RESPONSE_LEN] = {};
-  if (len > sizeof(buf)) {
-    return Status::Error(Err::INVALID_PARAM, "Read length too large");
-  }
-
-  Status st = Status::Ok();
-  if (tracked) {
-    st = _i2cWriteReadTrackedAllowNoData(nullptr, 0, buf, len, allowNoData);
-  } else {
-    st = _i2cWriteReadRaw(nullptr, 0, buf, len);
-  }
-  if (st.ok() || st.code == Err::MEASUREMENT_NOT_READY) {
-    _lastCommandUs = _nowUs();
-    _lastCommandValid = true;
-  }
-  if (!st.ok()) {
-    return st;
-  }
-
-  for (size_t i = 0; i < count; ++i) {
-    const size_t offset = i * cmd::DATA_WORD_WITH_CRC;
-    const uint8_t expected = _crc8(&buf[offset], 2);
-    if (buf[offset + 2] != expected) {
-      return _recordProtocolStatus(Status::Error(Err::CRC_MISMATCH, "CRC mismatch"), tracked);
-    }
-    values[i] = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset]) << 8) |
-                                      static_cast<uint16_t>(buf[offset + 1]));
-  }
-
-  return _recordProtocolStatus(Status::Ok(), tracked);
-}
-
-Status SCD41::_recordProtocolStatus(const Status& st, bool tracked) {
-  if (!tracked || !_initialized || st.inProgress()) {
-    return st;
-  }
-  if (st.ok()) {
-    _consecutiveProtocolFailures = 0;
-    return st;
-  }
-  if (st.code == Err::CRC_MISMATCH) {
-    _lastProtocolErrorMs = _nowMs();
-    _lastProtocolError = st;
-    if (_totalProtocolFailures != std::numeric_limits<uint32_t>::max()) {
-      ++_totalProtocolFailures;
-    }
-    if (_totalCrcFailures != std::numeric_limits<uint32_t>::max()) {
-      ++_totalCrcFailures;
-    }
-    if (_consecutiveProtocolFailures != std::numeric_limits<uint8_t>::max()) {
-      ++_consecutiveProtocolFailures;
-    }
-  }
-  return st;
-}
-
-Status SCD41::_readMeasurementRaw(RawSample& out, bool tracked, bool allowNoData) {
-  uint16_t words[3] = {};
-  Status st = _writeCommand(cmd::CMD_READ_MEASUREMENT, tracked);
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _waitMs(cmd::EXECUTION_TIME_SHORT_MS);
-  if (!st.ok()) {
-    return st;
-  }
-
-  st = _readWordsOnly(words, 3, tracked, allowNoData);
-  if (!st.ok()) {
-    return st;
-  }
-
-  out.rawCo2 = words[0];
-  out.rawTemperature = words[1];
-  out.rawHumidity = words[2];
-  return Status::Ok();
-}
-
-Status SCD41::_restoreProbeCommandSpacing(uint32_t savedLastCommandUs,
-                                          bool savedLastCommandValid,
-                                          const Status& probeStatus) {
-  const bool touchedSpacing =
-      _lastCommandValid &&
-      (!savedLastCommandValid || _lastCommandUs != savedLastCommandUs);
-
-  Status drainStatus = Status::Ok();
-  if (touchedSpacing) {
-    drainStatus = _ensureCommandDelay();
-  }
-
-  _lastCommandUs = savedLastCommandUs;
-  _lastCommandValid = savedLastCommandValid;
-
-  if (probeStatus.ok() && !drainStatus.ok()) {
-    return drainStatus;
-  }
-  return probeStatus;
-}
-
-Status SCD41::_updateHealth(const Status& st) {
-  if (!_initialized || st.inProgress()) {
-    return st;
-  }
-
-  const uint32_t now = _nowMs();
-
-  if (st.ok()) {
-    _lastOkMs = now;
-    if (_totalSuccess != std::numeric_limits<uint32_t>::max()) {
-      ++_totalSuccess;
-    }
-    _consecutiveFailures = 0;
-    _lastError = Status::Ok();
-    _driverState = DriverState::READY;
-    return st;
-  }
-
-  if (_isI2cFailure(st.code)) {
-    _lastErrorMs = now;
-    _lastError = st;
-    if (_totalFailures != std::numeric_limits<uint32_t>::max()) {
-      ++_totalFailures;
-    }
-    if (_consecutiveFailures != std::numeric_limits<uint8_t>::max()) {
-      ++_consecutiveFailures;
-    }
-    _driverState = (_consecutiveFailures >= _config.offlineThreshold)
-                       ? DriverState::OFFLINE
-                       : DriverState::DEGRADED;
-  }
-
-  return st;
-}
-
-void SCD41::_reassertOfflineLatch() {
-  _driverState = DriverState::OFFLINE;
-  const uint8_t threshold = _config.offlineThreshold == 0 ? 1 : _config.offlineThreshold;
-  if (_consecutiveFailures < threshold) {
-    _consecutiveFailures = threshold;
-  }
-}
-
-Status SCD41::_ensureNormalI2cAllowed() const {
-  if (_initialized && _driverState == DriverState::OFFLINE && !_allowOfflineI2c) {
-    return Status::Error(Err::OFFLINE, "Driver is offline; call recover()");
-  }
-  return Status::Ok();
-}
-
-Status SCD41::_ensureCommandDelay() {
-  if (!_lastCommandValid) {
-    return Status::Ok();
-  }
-
-  const uint32_t minDelayUs = static_cast<uint32_t>(_config.commandDelayMs) * 1000U;
-  if (minDelayUs <= MIN_COMMAND_DELAY_US) {
-    const uint32_t nowUs = _nowUs();
-    if ((nowUs - _lastCommandUs) >= MIN_COMMAND_DELAY_US) {
+    case OperationPhase::READ_RESPONSE: {
+      uint16_t words[3] = {};
+      status = _readWords(words, 3, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+        _advanceSensorEpoch();
+        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
+                Status::Error(Err::UNSUPPORTED, "Detected variant is not SCD41"),
+                nowMs);
+        return Status::Ok();
+      }
+      const uint64_t serialNumber = serialNumberFromWords(words);
+      const bool sameSensor = _identity.valid &&
+                              _identity.serialNumber == serialNumber;
+      const ConfigurationSnapshot previousConfiguration = _configuration;
+      _advanceSensorEpoch();
+      _identity.serialNumber = serialNumber;
+      _identity.variant = variant;
+      _identity.sensorEpoch = _sensorEpoch;
+      _identity.valid = true;
+      _workingValue.identity = _identity;
+      _attached = true;
+      _reconciliationRequired = false;
+      _setMode(OperatingMode::IDLE, ModeEvidence::VERIFIED);
+      _configuration = sameSensor ? previousConfiguration
+                                  : ConfigurationSnapshot{};
+      _configuration.verifiedMask = 0U;
+      _configuration.sensorEpoch = _sensorEpoch;
+      _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+              nowMs);
       return Status::Ok();
     }
-  }
 
-  const uint32_t startMs = _nowMs();
-  uint32_t iterations = 0;
-  const uint32_t maxIterations = boundedWaitIterations(_config.commandDelayMs,
-                                                       _config.i2cTimeoutMs);
-  while ((_nowUs() - _lastCommandUs) < minDelayUs) {
-    if (_timeElapsed(_nowMs(), startMs + _config.commandDelayMs + _config.i2cTimeoutMs)) {
-      return Status::Error(Err::TIMEOUT, "Command delay guard timed out");
-    }
-    if (iterations++ >= maxIterations) {
-      return Status::Error(Err::TIMEOUT, "Command delay guard stalled");
-    }
-    _cooperativeYield();
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid attach phase");
   }
-  return Status::Ok();
 }
 
-Status SCD41::_waitMs(uint32_t delayMs) {
-  if (delayMs == 0) {
+Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
+  OperationKind readKind = _active.request.kind;
+  if (readKind == OperationKind::READ_CONFIGURATION) {
+    readKind = readKindAt(_active.fieldIndex);
+  }
+  Status status;
+  switch (_active.phase) {
+    case OperationPhase::SEND_COMMAND:
+      status = _writeCommand(_readCommandFor(readKind), TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for read response");
+
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for read response");
+      }
+      _active.phase = OperationPhase::READ_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Read response due");
+
+    case OperationPhase::READ_RESPONSE: {
+      uint16_t words[3] = {};
+      const uint8_t count = readKind == OperationKind::READ_IDENTITY ? 3U : 1U;
+      status = _readWords(words, count, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) {
+        if (_active.request.kind == OperationKind::READ_CONFIGURATION &&
+            _active.completedFieldMask != 0U) {
+          _workingValue.configuration = _configuration;
+          _finish(OperationOutcome::PARTIAL, EffectState::NONE, status, nowMs);
+          return Status::Ok();
+        }
+        return status;
+      }
+
+      if (readKind == OperationKind::READ_IDENTITY) {
+        const SensorVariant variant = _variantFromSerialWord(words[0]);
+        if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+          _advanceSensorEpoch();
+          _identity.serialNumber = serialNumberFromWords(words);
+          _identity.variant = variant;
+          _identity.sensorEpoch = _sensorEpoch;
+          _identity.valid = true;
+          _configuration = {};
+          _configuration.sensorEpoch = _sensorEpoch;
+          _workingValue.identity = _identity;
+          _markReconciliationRequired();
+          _finish(OperationOutcome::FAILED, EffectState::NONE,
+                  Status::Error(Err::UNSUPPORTED,
+                                "Detected variant is not SCD41"), nowMs);
+          return Status::Ok();
+        }
+        const uint64_t serialNumber = serialNumberFromWords(words);
+        if (_identity.valid && _identity.serialNumber != serialNumber) {
+          _advanceSensorEpoch();
+          _configuration = {};
+          _configuration.sensorEpoch = _sensorEpoch;
+          _identity.serialNumber = serialNumber;
+          _identity.variant = variant;
+          _identity.sensorEpoch = _sensorEpoch;
+          _identity.valid = true;
+          _workingValue.identity = _identity;
+          _markReconciliationRequired();
+          _finish(OperationOutcome::FAILED, EffectState::NONE,
+                  Status::Error(Err::RECONCILIATION_REQUIRED,
+                                "Sensor identity changed; attach required"),
+                  nowMs);
+          return Status::Ok();
+        }
+        _identity.serialNumber = serialNumber;
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _workingValue.identity = _identity;
+      } else if (readKind == OperationKind::READ_DATA_READY) {
+        _workingValue.dataReady.raw = words[0];
+        _workingValue.dataReady.ready = isDataReady(words[0]);
+        _workingValue.boolValue = _workingValue.dataReady.ready;
+      } else {
+        if (readKind == OperationKind::READ_ASC_ENABLED && words[0] > 1U) {
+          _recordProtocolFailure(
+              Status::Error(Err::COMMAND_FAILED, "Invalid ASC enable word"),
+              nowMs);
+          return Status::Error(Err::COMMAND_FAILED, "Invalid ASC enable word");
+        }
+        _applyReadValue(readKind, words[0], nowMs);
+      }
+
+      if (_active.request.kind == OperationKind::READ_CONFIGURATION) {
+        const uint16_t fieldMask = fieldAt(_active.fieldIndex);
+        _active.completedFieldMask |= fieldMask;
+        _configuration.verifiedMask |= fieldMask;
+        if (_operatingMode == OperatingMode::PERIODIC ||
+            _operatingMode == OperatingMode::LOW_POWER_PERIODIC ||
+            _active.fieldIndex >= 6U) {
+          _workingValue.configuration = _configuration;
+          _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
+                  nowMs);
+          return Status::Ok();
+        }
+        ++_active.fieldIndex;
+        _active.phase = OperationPhase::SEND_COMMAND;
+        _active.nextDueMs = nowMs;
+        return Status::Error(Err::IN_PROGRESS, "Reading next setting");
+      }
+
+      _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(), nowMs);
+      return Status::Ok();
+    }
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid read phase");
+  }
+}
+
+Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
+  const OperationKind kind = _active.request.kind;
+  const bool setting = _isSettingWrite(kind);
+  Status status;
+
+  if (setting) {
+    switch (_active.phase) {
+      case OperationPhase::SEND_COMMAND:
+        if (_active.fieldIndex == 0U) {
+          status = _writeCommand(_readCommandFor(kind), TransferIntent::NORMAL,
+                                 nowMs, callbacksRemaining);
+          if (status.inProgress()) return status;
+          if (!status.ok()) return status;
+          _active.phase = OperationPhase::WAIT_EXECUTION;
+          _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+          return Status::Error(Err::IN_PROGRESS, "Waiting for current setting");
+        }
+        if (_active.fieldIndex == 1U) {
+          status = _checkCommandSpacing(nowMs);
+          if (!status.ok()) return status;
+          status = _writeCommandWithWord(_writeCommandFor(kind),
+                                         _active.desiredRaw, nowMs,
+                                         callbacksRemaining, true);
+          if (status.inProgress()) return status;
+          const uint16_t fieldMask =
+              configurationFieldMask(_fieldFor(kind));
+          if (_lastTransferDisposition == TransferDisposition::COMPLETE ||
+              _lastTransferDisposition == TransferDisposition::INDETERMINATE) {
+            _configuration.verifiedMask &=
+                static_cast<uint16_t>(~fieldMask);
+            _configuration.dirtyMask |= fieldMask;
+          }
+          if (!status.ok()) {
+            return status;
+          }
+          _active.effect = EffectState::ACKNOWLEDGED;
+          _active.fieldIndex = 2U;
+          _active.phase = OperationPhase::WAIT_EXECUTION;
+          _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+          _nextSafeCommandMs = _active.nextDueMs;
+          return Status::Error(Err::IN_PROGRESS, "Waiting after setting write");
+        }
+        status = _writeCommand(_readCommandFor(kind), TransferIntent::NORMAL,
+                               nowMs, callbacksRemaining);
+        if (status.inProgress()) return status;
+        if (!status.ok()) return status;
+        _active.fieldIndex = 3U;
+        _active.phase = OperationPhase::WAIT_EXECUTION;
+        _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+        return Status::Error(Err::IN_PROGRESS, "Waiting for setting verify");
+
+      case OperationPhase::WAIT_EXECUTION:
+        if (!_timeReached(nowMs, _active.nextDueMs)) {
+          return Status::Error(Err::IN_PROGRESS, "Waiting for setting phase");
+        }
+        _active.phase = _active.fieldIndex == 2U
+                            ? OperationPhase::SEND_COMMAND
+                            : OperationPhase::READ_RESPONSE;
+        return Status::Error(Err::IN_PROGRESS, "Setting response due");
+
+      case OperationPhase::READ_RESPONSE: {
+        uint16_t word = 0;
+        status = _readWords(&word, 1, nowMs, callbacksRemaining);
+        if (status.inProgress()) return status;
+        if (!status.ok()) return status;
+        if (_active.fieldIndex == 0U) {
+          _applyReadValue(kind, word, nowMs);
+          if (word == _active.desiredRaw) {
+            _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+                    nowMs);
+            return Status::Ok();
+          }
+          _active.fieldIndex = 1U;
+          _active.phase = OperationPhase::SEND_COMMAND;
+          _active.nextDueMs = nowMs;
+          return Status::Error(Err::IN_PROGRESS, "Setting write required");
+        }
+        _applyVerifiedSetting(kind, word);
+        if (word != _active.desiredRaw) {
+          _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+                  Status::Error(Err::COMMAND_FAILED,
+                                "Setting readback mismatch", word), nowMs);
+          return Status::Ok();
+        }
+        _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+                nowMs);
+        return Status::Ok();
+      }
+
+      default:
+        return Status::Error(Err::COMMAND_FAILED, "Invalid setting phase");
+    }
+  }
+
+  switch (_active.phase) {
+    case OperationPhase::SEND_COMMAND: {
+      status = _checkCommandSpacing(nowMs);
+      if (!status.ok()) return status;
+      const TransferIntent intent =
+          kind == OperationKind::WAKE_UP ? TransferIntent::EXPECTED_WRITE_NACK
+                                         : TransferIntent::NORMAL;
+      status = _writeCommand(_writeCommandFor(kind), intent, nowMs,
+                             callbacksRemaining, true);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.effect = EffectState::ACKNOWLEDGED;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + _executionWaitMs(kind);
+      _nextSafeCommandMs = _active.nextDueMs;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for command completion");
+    }
+
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for command completion");
+      }
+      if (kind == OperationKind::WAKE_UP) {
+        _active.phase = _active.fieldIndex == 3U
+                            ? OperationPhase::READ_VERIFY_RESPONSE
+                            : OperationPhase::SEND_VERIFY_COMMAND;
+        return Status::Error(Err::IN_PROGRESS, "Wake verification due");
+      }
+      if (kind == OperationKind::START_PERIODIC) {
+        _setMode(OperatingMode::PERIODIC, ModeEvidence::ACKNOWLEDGED);
+      } else if (kind == OperationKind::START_LOW_POWER_PERIODIC) {
+        _setMode(OperatingMode::LOW_POWER_PERIODIC, ModeEvidence::ACKNOWLEDGED);
+      } else if (kind == OperationKind::STOP_PERIODIC) {
+        _setMode(OperatingMode::IDLE, ModeEvidence::ACKNOWLEDGED);
+      } else if (kind == OperationKind::POWER_DOWN) {
+        _setMode(OperatingMode::POWER_DOWN, ModeEvidence::ACKNOWLEDGED);
+      }
+      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
+
+    case OperationPhase::SEND_VERIFY_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER, TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.fieldIndex = 3U;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for wake verification");
+
+    case OperationPhase::READ_VERIFY_RESPONSE: {
+      uint16_t words[3] = {};
+      status = _readWords(words, 3, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+        _advanceSensorEpoch();
+        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::FAILED, EffectState::UNKNOWN,
+                Status::Error(Err::UNSUPPORTED,
+                              "Wake verified wrong variant"), nowMs);
+        return Status::Ok();
+      }
+      const uint64_t serialNumber = serialNumberFromWords(words);
+      if (_identity.valid && _identity.serialNumber != serialNumber) {
+        _advanceSensorEpoch();
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _identity.serialNumber = serialNumber;
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::FAILED, EffectState::UNKNOWN,
+                Status::Error(Err::RECONCILIATION_REQUIRED,
+                              "Sensor changed during wake; attach required"),
+                nowMs);
+        return Status::Ok();
+      }
+      _identity.serialNumber = serialNumber;
+      _identity.variant = variant;
+      _identity.sensorEpoch = _sensorEpoch;
+      _identity.valid = true;
+      _workingValue.identity = _identity;
+      _attached = true;
+      _reconciliationRequired = false;
+      _setMode(OperatingMode::IDLE, ModeEvidence::VERIFIED);
+      _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+              nowMs);
+      return Status::Ok();
+    }
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid write phase");
+  }
+}
+
+Status SCD41::_stepMeasurement(uint32_t& nowMs,
+                               uint8_t& callbacksRemaining) {
+  const OperationKind kind = _active.request.kind;
+  Status status;
+  switch (_active.phase) {
+    case OperationPhase::SEND_COMMAND:
+      status = _checkCommandSpacing(nowMs);
+      if (!status.ok()) return status;
+      status = _writeCommand(_writeCommandFor(kind), TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining, true);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.effect = EffectState::ACKNOWLEDGED;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + _executionWaitMs(kind);
+      _nextSafeCommandMs = _active.nextDueMs;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for measurement");
+
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for measurement");
+      }
+      _active.phase = OperationPhase::SEND_READY_COMMAND;
+      return Status::Error(Err::IN_PROGRESS, "Measurement readiness due");
+
+    case OperationPhase::SEND_READY_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_DATA_READY_STATUS,
+                             TransferIntent::NORMAL, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_WAKE;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for ready response");
+
+    case OperationPhase::WAIT_WAKE:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for ready response");
+      }
+      _active.phase = OperationPhase::READ_READY_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Ready response due");
+
+    case OperationPhase::READ_READY_RESPONSE: {
+      uint16_t readyWord = 0;
+      status = _readWords(&readyWord, 1, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _workingValue.dataReady.raw = readyWord;
+      _workingValue.dataReady.ready = isDataReady(readyWord);
+      if (!isDataReady(readyWord)) {
+        _finish(OperationOutcome::NO_DATA, _active.effect,
+                Status::Error(Err::MEASUREMENT_NOT_READY,
+                              "Measurement not ready"), nowMs);
+        return Status::Ok();
+      }
+      _active.phase = OperationPhase::SEND_READ_COMMAND;
+      return Status::Error(Err::IN_PROGRESS, "Sample read due");
+    }
+
+    case OperationPhase::SEND_READ_COMMAND:
+      status = _writeCommand(cmd::CMD_READ_MEASUREMENT, TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_STOP;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for sample response");
+
+    case OperationPhase::WAIT_STOP:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for sample response");
+      }
+      _active.phase = OperationPhase::READ_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Sample response due");
+
+    case OperationPhase::READ_RESPONSE: {
+      uint16_t words[3] = {};
+      status = _readWords(words, 3, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _storeSample(words, kind != OperationKind::SINGLE_SHOT_RHT_ONLY, nowMs);
+      _workingValue.sample = _latestSample;
+      _finish(OperationOutcome::SUCCEEDED,
+              kind == OperationKind::FETCH_SAMPLE ? EffectState::NONE
+                                                  : EffectState::VERIFIED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
+    }
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid measurement phase");
+  }
+}
+
+Status SCD41::_stepMaintenance(uint32_t& nowMs,
+                               uint8_t& callbacksRemaining) {
+  const OperationKind kind = _active.request.kind;
+  Status status;
+  if (kind == OperationKind::PERSIST_SETTINGS &&
+      _configuration.persistenceIndeterminate &&
+      _active.phase == OperationPhase::SEND_COMMAND) {
+    _workingValue.configuration = _configuration;
+    _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+            Status::Error(Err::INDETERMINATE,
+                          "Persistence requires reinit reconciliation"),
+            nowMs);
     return Status::Ok();
   }
-  const uint32_t start = _nowMs();
-  uint32_t iterations = 0;
-  const uint32_t maxIterations = boundedWaitIterations(delayMs, _config.i2cTimeoutMs);
-  while (!_timeElapsed(_nowMs(), start + delayMs)) {
-    if (_timeElapsed(_nowMs(), start + delayMs + _config.i2cTimeoutMs)) {
-      return Status::Error(Err::TIMEOUT, "Delay timed out");
+  if (kind == OperationKind::PERSIST_SETTINGS &&
+      _configuration.dirtyMask == 0U &&
+      _active.phase == OperationPhase::SEND_COMMAND) {
+    _workingValue.configuration = _configuration;
+    _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(), nowMs);
+    return Status::Ok();
+  }
+
+  switch (_active.phase) {
+    case OperationPhase::SEND_COMMAND:
+      status = _checkCommandSpacing(nowMs);
+      if (!status.ok()) return status;
+      if (kind == OperationKind::FORCED_RECALIBRATION) {
+        status = _writeCommandWithWord(cmd::CMD_PERFORM_FORCED_RECALIBRATION,
+                                       static_cast<uint16_t>(_active.request.value),
+                                       nowMs, callbacksRemaining, true);
+      } else {
+        status = _writeCommand(_writeCommandFor(kind), TransferIntent::NORMAL,
+                               nowMs, callbacksRemaining, true);
+      }
+      if (status.inProgress()) return status;
+      if (!status.ok()) {
+        if (kind == OperationKind::PERSIST_SETTINGS &&
+            _lastTransferDisposition == TransferDisposition::INDETERMINATE) {
+          _configuration.persistenceIndeterminate = true;
+        }
+        return status;
+      }
+      _active.effect = EffectState::ACKNOWLEDGED;
+      if (kind == OperationKind::REINIT || kind == OperationKind::FACTORY_RESET) {
+        _markReconciliationRequired();
+      }
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + _executionWaitMs(kind);
+      _nextSafeCommandMs = _active.nextDueMs;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for maintenance command");
+
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for maintenance command");
+      }
+      if (kind == OperationKind::SELF_TEST ||
+          kind == OperationKind::FORCED_RECALIBRATION) {
+        _active.phase = OperationPhase::READ_DEFERRED_RESULT;
+        return Status::Error(Err::IN_PROGRESS, "Maintenance result due");
+      }
+      if (kind == OperationKind::REINIT || kind == OperationKind::FACTORY_RESET) {
+        _active.phase = OperationPhase::SEND_VERIFY_COMMAND;
+        return Status::Error(Err::IN_PROGRESS, "Maintenance verification due");
+      }
+      if (kind == OperationKind::PERSIST_SETTINGS) {
+        _configuration.dirtyMask = 0U;
+        _configuration.persistenceIndeterminate = false;
+        _workingValue.configuration = _configuration;
+      }
+      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
+
+    case OperationPhase::READ_DEFERRED_RESULT: {
+      uint16_t word = 0;
+      status = _readWords(&word, 1, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _workingValue.value = word;
+      _workingValue.rawWords[0] = word;
+      _workingValue.wordCount = 1;
+      if (kind == OperationKind::SELF_TEST) {
+        if (word != cmd::SELF_TEST_PASS) {
+          _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+                  Status::Error(Err::COMMAND_FAILED, "Self-test failed", word),
+                  nowMs);
+        } else {
+          _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
+                  Status::Ok(), nowMs);
+        }
+      } else if (word == cmd::FRC_FAILED) {
+        _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+                Status::Error(Err::COMMAND_FAILED, "FRC failed", word), nowMs);
+      } else {
+        _workingValue.signedValue =
+            static_cast<int32_t>(word) - static_cast<int32_t>(cmd::FRC_OFFSET_BIAS);
+        _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
+                Status::Ok(), nowMs);
+      }
+      return Status::Ok();
     }
-    if (iterations++ >= maxIterations) {
-      return Status::Error(Err::TIMEOUT, "Delay stalled");
+
+    case OperationPhase::SEND_VERIFY_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER, TransferIntent::NORMAL,
+                             nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::SEND_READ_COMMAND;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for identity verify");
+
+    case OperationPhase::SEND_READ_COMMAND:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for identity verify");
+      }
+      _active.phase = OperationPhase::READ_VERIFY_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Identity verify response due");
+
+    case OperationPhase::READ_VERIFY_RESPONSE: {
+      uint16_t words[3] = {};
+      status = _readWords(words, 3, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+        _advanceSensorEpoch();
+        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+                Status::Error(Err::UNSUPPORTED,
+                              "Reset verified wrong variant"), nowMs);
+        return Status::Ok();
+      }
+      const uint64_t serialNumber = serialNumberFromWords(words);
+      if (_identity.valid && _identity.serialNumber != serialNumber) {
+        _advanceSensorEpoch();
+        _identity.serialNumber = serialNumber;
+        _identity.variant = variant;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+                Status::Error(Err::RECONCILIATION_REQUIRED,
+                              "Sensor changed during reset verification"),
+                nowMs);
+        return Status::Ok();
+      }
+      _advanceSensorEpoch();
+      _identity.serialNumber = serialNumber;
+      _identity.variant = variant;
+      _identity.sensorEpoch = _sensorEpoch;
+      _identity.valid = true;
+      _configuration.verifiedMask = 0;
+      _configuration.dirtyMask = 0;
+      _configuration.sensorEpoch = _sensorEpoch;
+      _configuration.persistenceIndeterminate = false;
+      _workingValue.identity = _identity;
+      _workingValue.configuration = _configuration;
+      _attached = true;
+      _reconciliationRequired = false;
+      _setMode(OperatingMode::IDLE, ModeEvidence::VERIFIED);
+      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
     }
-    _cooperativeYield();
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid maintenance phase");
+  }
+}
+
+Status SCD41::_stepDiagnostic(uint32_t& nowMs,
+                              uint8_t& callbacksRemaining) {
+  const OperationKind kind = _active.request.kind;
+  Status status;
+  switch (_active.phase) {
+    case OperationPhase::SEND_COMMAND:
+      if (kind == OperationKind::DIAGNOSTIC_READ_WORDS) {
+        status = _writeCommand(_active.request.command, TransferIntent::NORMAL,
+                               nowMs, callbacksRemaining, true);
+        if (status.inProgress()) return status;
+        if (!status.ok()) return status;
+        _active.effect = EffectState::ACKNOWLEDGED;
+        _markReconciliationRequired();
+        _active.phase = OperationPhase::WAIT_EXECUTION;
+        _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+        return Status::Error(Err::IN_PROGRESS, "Waiting for diagnostic read");
+      }
+      status = _checkCommandSpacing(nowMs);
+      if (!status.ok()) return status;
+      if (kind == OperationKind::DIAGNOSTIC_WRITE_WORD) {
+        status = _writeCommandWithWord(_active.request.command,
+                                       static_cast<uint16_t>(_active.request.value),
+                                       nowMs, callbacksRemaining, true);
+      } else {
+        status = _writeCommand(_active.request.command, TransferIntent::NORMAL,
+                               nowMs, callbacksRemaining, true);
+      }
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.effect = EffectState::ACKNOWLEDGED;
+      _markReconciliationRequired();
+      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
+
+    case OperationPhase::WAIT_EXECUTION:
+      if (!_timeReached(nowMs, _active.nextDueMs)) {
+        return Status::Error(Err::IN_PROGRESS, "Waiting for diagnostic read");
+      }
+      _active.phase = OperationPhase::READ_RESPONSE;
+      return Status::Error(Err::IN_PROGRESS, "Diagnostic response due");
+
+    case OperationPhase::READ_RESPONSE: {
+      uint16_t words[3] = {};
+      status = _readWords(words, _active.request.wordCount, nowMs,
+                          callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      std::memcpy(_workingValue.rawWords, words,
+                  _active.request.wordCount * sizeof(uint16_t));
+      _workingValue.wordCount = _active.request.wordCount;
+      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+              Status::Ok(), nowMs);
+      return Status::Ok();
+    }
+
+    default:
+      return Status::Error(Err::COMMAND_FAILED, "Invalid diagnostic phase");
+  }
+}
+
+Status SCD41::_writeCommand(uint16_t command, TransferIntent intent,
+                            uint32_t& nowMs, uint8_t& callbacksRemaining,
+                            bool effectful) {
+  const Status spacing = _checkCommandSpacing(nowMs);
+  if (!spacing.ok()) {
+    return spacing;
+  }
+  const uint8_t data[2] = {static_cast<uint8_t>(command >> 8),
+                           static_cast<uint8_t>(command & 0xFFU)};
+  return _attemptTransfer(data, sizeof(data), nullptr, 0, intent, nowMs,
+                          callbacksRemaining, effectful);
+}
+
+Status SCD41::_writeCommandWithWord(uint16_t command, uint16_t word,
+                                    uint32_t& nowMs,
+                                    uint8_t& callbacksRemaining,
+                                    bool effectful) {
+  const Status spacing = _checkCommandSpacing(nowMs);
+  if (!spacing.ok()) {
+    return spacing;
+  }
+  uint8_t data[5] = {static_cast<uint8_t>(command >> 8),
+                     static_cast<uint8_t>(command & 0xFFU),
+                     static_cast<uint8_t>(word >> 8),
+                     static_cast<uint8_t>(word & 0xFFU), 0U};
+  data[4] = _crc8(&data[2], 2);
+  return _attemptTransfer(data, sizeof(data), nullptr, 0,
+                          TransferIntent::NORMAL, nowMs, callbacksRemaining,
+                          effectful);
+}
+
+Status SCD41::_readWords(uint16_t* words, uint8_t count, uint32_t& nowMs,
+                         uint8_t& callbacksRemaining) {
+  if (words == nullptr || count == 0U || count > 3U) {
+    return Status::Error(Err::INVALID_PARAM, "Invalid word read");
+  }
+  const Status spacing = _checkCommandSpacing(nowMs);
+  if (!spacing.ok()) {
+    return spacing;
+  }
+
+  uint8_t bytes[cmd::MEASUREMENT_RESPONSE_LEN] = {};
+  const size_t length = static_cast<size_t>(count) * cmd::DATA_WORD_WITH_CRC;
+  Status status = _attemptTransfer(nullptr, 0, bytes, length,
+                                   TransferIntent::NORMAL, nowMs,
+                                   callbacksRemaining, false);
+  if (!status.ok()) {
+    return status;
+  }
+
+  uint16_t decoded[3] = {};
+  for (uint8_t i = 0; i < count; ++i) {
+    const uint8_t* wordBytes = &bytes[static_cast<size_t>(i) * 3U];
+    if (_crc8(wordBytes, 2) != wordBytes[2]) {
+      status = Status::Error(Err::CRC_MISMATCH, "CRC mismatch", i);
+      _recordProtocolFailure(status, nowMs);
+      return status;
+    }
+    decoded[i] = static_cast<uint16_t>(
+        (static_cast<uint16_t>(wordBytes[0]) << 8) | wordBytes[1]);
+  }
+  std::memcpy(words, decoded, static_cast<size_t>(count) * sizeof(uint16_t));
+  return Status::Ok();
+}
+
+Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
+                               uint8_t* readData, size_t readLength,
+                               TransferIntent intent, uint32_t& nowMs,
+                               uint8_t& callbacksRemaining,
+                               bool effectful) {
+  if (callbacksRemaining == 0U) {
+    return Status::Error(Err::IN_PROGRESS, "Poll callback budget exhausted");
+  }
+  if (_timeReached(nowMs, _active.deadlineMs)) {
+    return Status::Error(Err::TIMEOUT, "Operation deadline expired");
+  }
+
+  const uint32_t remainingMs = _active.deadlineMs - nowMs;
+  const uint32_t timeoutMs = remainingMs < _config.transferTimeoutMs
+                                 ? remainingMs
+                                 : _config.transferTimeoutMs;
+  if (timeoutMs == 0U) {
+    return Status::Error(Err::TIMEOUT, "No transfer time remaining");
+  }
+
+  TransferRequest request;
+  request.address = cmd::I2C_ADDRESS;
+  request.writeData = writeData;
+  request.writeLength = writeLength;
+  request.readData = readData;
+  request.readLength = readLength;
+  request.timeoutMs = timeoutMs;
+  request.intent = intent;
+
+  --callbacksRemaining;
+  incrementSaturating(_active.callbacksUsed);
+  const uint32_t attemptStartedMs = nowMs;
+  const TransferResult transfer = _config.transfer(request, _config.transferUser);
+  TransferResult normalized = transfer;
+  const bool completionClockValid =
+      (transfer.completedMs - attemptStartedMs) < 0x80000000UL;
+  if (!completionClockValid) {
+    normalized.code = TransferCode::FAILED;
+    if (normalized.disposition != TransferDisposition::NOT_STARTED) {
+      normalized.disposition = TransferDisposition::INDETERMINATE;
+    }
+  }
+  const size_t expectedBytes = writeLength + readLength;
+  if (normalized.code == TransferCode::OK &&
+      (normalized.disposition != TransferDisposition::COMPLETE ||
+       normalized.bytesTransferred != expectedBytes)) {
+    normalized.code = TransferCode::SHORT_TRANSFER;
+    normalized.disposition = TransferDisposition::INDETERMINATE;
+  }
+  if (normalized.code != TransferCode::OK &&
+      normalized.code != TransferCode::NACK &&
+      normalized.disposition == TransferDisposition::COMPLETE) {
+    normalized.disposition = TransferDisposition::INDETERMINATE;
+  }
+  _lastTransferDisposition = normalized.disposition;
+  _lastTransferCode = normalized.code;
+  _lastTransferWasEffectful = effectful;
+  if (effectful && normalized.disposition != TransferDisposition::NOT_STARTED) {
+    _active.effectfulWriteAttempted = true;
+    _active.effect = EffectState::ATTEMPTED;
+  }
+  const bool expectedNack =
+      intent == TransferIntent::EXPECTED_WRITE_NACK &&
+      normalized.code == TransferCode::NACK;
+  _recordTransfer(normalized, expectedNack);
+
+  nowMs = completionClockValid ? transfer.completedMs : attemptStartedMs;
+  if (completionClockValid) {
+    _lastOwnerNowMs = nowMs;
+    _lastOwnerNowValid = true;
+  }
+  if (normalized.disposition != TransferDisposition::NOT_STARTED) {
+    _lastAttemptCompletedMs = nowMs;
+    _lastAttemptValid = true;
+  }
+
+  if (!completionClockValid) {
+    return Status::Error(Err::I2C_ERROR,
+                         "Transport completion clock moved backwards");
+  }
+
+  if (expectedNack) {
+    if (_timeReached(nowMs, _active.deadlineMs)) {
+      return Status::Error(Err::TIMEOUT, "Transfer crossed operation deadline");
+    }
+    return Status::Ok();
+  }
+
+  Status status = transferStatus(normalized);
+  if (!status.ok()) {
+    return status;
+  }
+  if (_timeReached(nowMs, _active.deadlineMs)) {
+    return Status::Error(Err::TIMEOUT, "Transfer crossed operation deadline");
   }
   return Status::Ok();
 }
 
-Status SCD41::_ensureIdleForConfig(const char* opName) const {
-  if (_pendingCommand != PendingCommand::NONE || _measurementRequested) {
-    return Status::Error(Err::BUSY, "Operation in progress");
+Status SCD41::_checkCommandSpacing(uint32_t nowMs) {
+  if (!_lastAttemptValid) {
+    return Status::Ok();
   }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-  if (isPeriodicActive()) {
-    return Status::Error(Err::BUSY, opName);
+  const uint32_t due =
+      _lastAttemptCompletedMs + cmd::EXECUTION_TIME_SHORT_MS;
+  if (!_timeReached(nowMs, due)) {
+    _active.nextDueMs = due;
+    return Status::Error(Err::IN_PROGRESS, "Command spacing active");
   }
   return Status::Ok();
 }
 
-Status SCD41::_startSingleShot(SingleShotMode mode) {
-  if (!_initialized) {
-    return Status::Error(Err::NOT_INITIALIZED, "begin() not called");
-  }
-  if (!isValidSingleShotMode(mode)) {
-    return Status::Error(Err::INVALID_PARAM, "Invalid single-shot mode");
-  }
-  if (_pendingCommand != PendingCommand::NONE) {
-    return Status::Error(Err::BUSY, "Command in progress");
-  }
-  if (_measurementRequested || _measurementReady) {
-    return Status::Error(Err::BUSY, "Measurement already pending");
-  }
-  if (_operatingMode == OperatingMode::POWER_DOWN) {
-    return Status::Error(Err::BUSY, "Sensor is powered down");
-  }
-  if (_sensorVariant != SensorVariant::SCD41) {
-    return Status::Error(Err::UNSUPPORTED, "Single-shot commands require SCD41");
-  }
-
-  const uint16_t command =
-      (mode == SingleShotMode::T_RH_ONLY) ? cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY
-                                          : cmd::CMD_MEASURE_SINGLE_SHOT;
-  const uint32_t execMs =
-      (mode == SingleShotMode::T_RH_ONLY) ? cmd::EXECUTION_TIME_SINGLE_SHOT_RHT_MS
-                                          : cmd::EXECUTION_TIME_SINGLE_SHOT_MS;
-  const PendingCommand pending =
-      (mode == SingleShotMode::T_RH_ONLY) ? PendingCommand::SINGLE_SHOT_RHT_ONLY
-                                          : PendingCommand::SINGLE_SHOT;
-
-  Status st = _writeCommand(command, true);
-  if (!st.ok()) {
-    return st;
-  }
-
-  const uint32_t readyMs = _nowMs() + execMs;
-  _measurementRequested = true;
-  _measurementReady = false;
-  _measurementReadyMs = readyMs;
-  _pendingCommand = pending;
-  _commandReadyMs = readyMs;
-  return Status{Err::IN_PROGRESS, 0, "Command scheduled"};
-}
-
-Status SCD41::_schedulePendingCommand(PendingCommand command, uint32_t delayMs) {
-  _pendingCommand = command;
-  _commandReadyMs = _nowMs() + delayMs;
-  return Status{Err::IN_PROGRESS, 0, "Command scheduled"};
-}
-
-void SCD41::_clearMeasurementRequest() {
-  _measurementRequested = false;
-  _measurementReadyMs = 0;
-  if (_pollStep == PollStep::MEASUREMENT_DATA_READY_COMMAND ||
-      _pollStep == PollStep::MEASUREMENT_DATA_READY_READ ||
-      _pollStep == PollStep::MEASUREMENT_READ_COMMAND ||
-      _pollStep == PollStep::MEASUREMENT_READ_DATA) {
-    _pollStep = PollStep::NONE;
-  }
-}
-
-void SCD41::_clearPendingCommand() {
-  _pendingCommand = PendingCommand::NONE;
-  _commandReadyMs = 0;
-  if (_pollStep == PollStep::PENDING_RESULT_READ) {
-    _pollStep = PollStep::NONE;
-  }
-}
-
-void SCD41::_recordAsyncStatus(AsyncOperation operation, const Status& status) {
-  _lastAsyncOperation = operation;
-  _lastAsyncStatus = status.ok() ? Status::Ok() : status;
-}
-
-Status SCD41::_recordPollStatus(const Status& status) {
-  _lastPollStatus = status;
-  return status;
-}
-
-void SCD41::_setBusyError(Status& st) const {
-  st = Status::Error(Err::BUSY, "Command in progress",
-                     static_cast<int32_t>(static_cast<uint8_t>(_pendingCommand)));
-}
-
-void SCD41::_updatePeriodicMissedSamples(uint32_t nowMs) {
-  const uint32_t periodMs = _periodMsForMode();
-  if (_lastFetchMs == 0 || periodMs == 0) {
+void SCD41::_finish(OperationOutcome outcome, EffectState effect,
+                    const Status& status, uint32_t completedMs) {
+  if (!_activeValid || _terminalValid) {
     return;
   }
-  const uint32_t elapsed = nowMs - _lastFetchMs;
-  if (elapsed > periodMs) {
-    uint32_t missed = elapsed / periodMs;
-    if (missed > 0) {
-      missed -= 1;
-      _missedSamples = saturatingAddU32(_missedSamples, missed);
+  OperationResult result;
+  result.id = _active.id;
+  result.kind = _active.request.kind;
+  result.outcome = outcome;
+  result.effect = effect;
+  result.status = status;
+  result.finalPhase = _active.phase;
+  result.startedMs = _active.startedMs;
+  result.completedMs = completedMs;
+  result.deadlineMs = _active.deadlineMs;
+  result.sensorEpoch = _sensorEpoch;
+  result.completedFieldMask = _active.completedFieldMask;
+  result.callbacksUsed = _active.callbacksUsed;
+  result.reconciliationRequired = _reconciliationRequired;
+  result.value = _workingValue;
+  _terminal = result;
+  _terminalValid = true;
+  _active = {};
+  _activeValid = false;
+  _recordOperationOutcome(_terminal);
+}
+
+void SCD41::_finishTransferFailure(const Status& status, uint32_t completedMs) {
+  if (!_activeValid) {
+    return;
+  }
+  OperationOutcome outcome = status.code == Err::TIMEOUT
+                                 ? OperationOutcome::TIMED_OUT
+                                 : OperationOutcome::FAILED;
+  EffectState effect = _active.effect;
+  if (_lastTransferWasEffectful) {
+    if (_lastTransferDisposition == TransferDisposition::INDETERMINATE) {
+      effect = EffectState::UNKNOWN;
+      outcome = OperationOutcome::INDETERMINATE;
+      _markReconciliationRequired();
+    } else if (_lastTransferDisposition == TransferDisposition::NO_EFFECT) {
+      if (effect == EffectState::NOT_ATTEMPTED ||
+          effect == EffectState::ATTEMPTED) {
+        effect = EffectState::ATTEMPTED;
+      }
+    } else if (_lastTransferDisposition == TransferDisposition::NOT_STARTED) {
+      if (effect == EffectState::NOT_ATTEMPTED) {
+        effect = EffectState::NOT_ATTEMPTED;
+      }
+    } else if (status.code == Err::TIMEOUT) {
+      effect = EffectState::ACKNOWLEDGED;
+      _markReconciliationRequired();
     }
   }
+  if (_active.request.kind == OperationKind::PERSIST_SETTINGS &&
+      (effect == EffectState::UNKNOWN ||
+       (_lastTransferWasEffectful && status.code == Err::TIMEOUT &&
+        _lastTransferDisposition == TransferDisposition::COMPLETE))) {
+    _configuration.persistenceIndeterminate = true;
+  }
+  _finish(outcome, effect, status, completedMs);
+}
+
+void SCD41::_applyReadValue(OperationKind kind, uint16_t value,
+                            uint32_t nowMs) {
+  (void)nowMs;
+  const ConfigurationField field = _fieldFor(kind);
+  switch (field) {
+    case ConfigurationField::TEMPERATURE_OFFSET:
+      _configuration.temperatureOffsetMilliC =
+          decodeTemperatureOffsetMilliC(value);
+      _workingValue.signedValue = _configuration.temperatureOffsetMilliC;
+      break;
+    case ConfigurationField::SENSOR_ALTITUDE:
+      _configuration.sensorAltitudeM = value;
+      _workingValue.value = value;
+      break;
+    case ConfigurationField::AMBIENT_PRESSURE:
+      _configuration.ambientPressurePa = decodeAmbientPressurePa(value);
+      _workingValue.value = _configuration.ambientPressurePa;
+      break;
+    case ConfigurationField::ASC_ENABLED:
+      _configuration.ascEnabled = value != 0U;
+      _workingValue.boolValue = _configuration.ascEnabled;
+      break;
+    case ConfigurationField::ASC_TARGET:
+      _configuration.ascTargetPpm = value;
+      _workingValue.value = value;
+      break;
+    case ConfigurationField::ASC_INITIAL_PERIOD:
+      _configuration.ascInitialPeriodHours = value;
+      _workingValue.value = value;
+      break;
+    case ConfigurationField::ASC_STANDARD_PERIOD:
+      _configuration.ascStandardPeriodHours = value;
+      _workingValue.value = value;
+      break;
+    case ConfigurationField::NONE:
+      return;
+  }
+  _configuration.verifiedMask |= configurationFieldMask(field);
+  _configuration.sensorEpoch = _sensorEpoch;
+  _workingValue.configuration = _configuration;
+}
+
+void SCD41::_applyVerifiedSetting(OperationKind kind, uint16_t value) {
+  _applyReadValue(kind, value, 0);
+}
+
+void SCD41::_storeSample(const uint16_t words[3], bool co2Valid,
+                         uint32_t nowMs) {
+  incrementSaturating(_sampleSequence);
+  if (_sampleSequence == 0U) {
+    _sampleSequence = 1U;
+  }
+  _latestSample.co2Ppm = words[0];
+  _latestSample.temperatureMilliC = convertTemperatureMilliC(words[1]);
+  _latestSample.humidityMilliPercent = convertHumidityMilliPercent(words[2]);
+  _latestSample.capturedAtMs = nowMs;
+  _latestSample.sensorEpoch = _sensorEpoch;
+  _latestSample.sequence = _sampleSequence;
+  _latestSample.mode = _operatingMode;
+  _latestSample.flags = SAMPLE_TEMPERATURE_VALID | SAMPLE_HUMIDITY_VALID |
+                        SAMPLE_FRESH;
+  if (co2Valid) {
+    _latestSample.flags |= SAMPLE_CO2_VALID;
+  }
+  _latestSampleValid = true;
+}
+
+void SCD41::_setMode(OperatingMode mode, ModeEvidence evidence) {
+  _operatingMode = mode;
+  _modeEvidence = evidence;
+}
+
+void SCD41::_markReconciliationRequired() {
+  _attached = false;
+  _reconciliationRequired = true;
+  _setMode(OperatingMode::UNKNOWN, ModeEvidence::UNKNOWN);
+  _configuration.verifiedMask = 0;
+  _latestSampleValid = false;
 }
 
 void SCD41::_advanceSensorEpoch() {
-  if (_sensorEpoch == std::numeric_limits<uint32_t>::max()) {
-    _sensorEpoch = 1;
-    _sampleEpoch = 0;
+  incrementSaturating(_sensorEpoch);
+  if (_sensorEpoch == 0U) {
+    _sensorEpoch = 1U;
+  }
+  _latestSampleValid = false;
+}
+
+void SCD41::_recordTransfer(const TransferResult& result, bool expectedNack) {
+  if (expectedNack) {
+    incrementSaturating(_health.expectedNacks);
+    return;
+  }
+  if (result.code == TransferCode::OK &&
+      result.disposition == TransferDisposition::COMPLETE) {
+    _health.lastTransferOkMs = result.completedMs;
+    incrementSaturating(_health.totalTransferSuccess);
+    _health.consecutiveTransferFailures = 0;
+    _driverState = _bound ? DriverState::READY : DriverState::UNINIT;
+    _health.state = _driverState;
+    return;
+  }
+  if (result.disposition == TransferDisposition::NOT_STARTED) {
+    return;
+  }
+  _health.lastTransferErrorMs = result.completedMs;
+  _health.lastTransferError = transferStatus(result);
+  incrementSaturating(_health.totalTransferFailures);
+  incrementSaturating(_health.consecutiveTransferFailures);
+  if (_config.offlineThreshold != 0U &&
+      _health.consecutiveTransferFailures >= _config.offlineThreshold) {
+    _driverState = DriverState::OFFLINE;
   } else {
-    ++_sensorEpoch;
+    _driverState = DriverState::DEGRADED;
   }
-  _markSampleStale();
+  _health.state = _driverState;
 }
 
-void SCD41::_markSampleStale() {
-  _measurementReady = false;
-  _clearMeasurementRequest();
+void SCD41::_recordProtocolFailure(const Status& status, uint32_t nowMs) {
+  incrementSaturating(_health.totalProtocolFailures);
+  if (status.code == Err::CRC_MISMATCH) {
+    incrementSaturating(_health.totalCrcFailures);
+  }
+  _health.lastProtocolErrorMs = nowMs;
+  _health.lastProtocolError = status;
 }
 
-void SCD41::_storeSample(const RawSample& sample, bool co2Valid) {
-  const uint32_t now = _nowMs();
-  if (isPeriodicActive()) {
-    _updatePeriodicMissedSamples(now);
-    _lastFetchMs = now;
-  }
-
-  _rawSample = sample;
-  _compSample.co2Ppm = sample.rawCo2;
-  _compSample.tempC_x1000 = convertTemperatureC_x1000(sample.rawTemperature);
-  _compSample.humidityPct_x1000 = convertHumidityPct_x1000(sample.rawHumidity);
-  _lastSampleCo2Valid = co2Valid;
-  _compSample.co2Valid = co2Valid;
-  _sampleTimestampMs = now;
-  _hasSample = true;
-  _sampleEpoch = _sensorEpoch;
-  _measurementReady = true;
-  _clearMeasurementRequest();
-}
-
-Status SCD41::_handlePendingCommand(uint32_t nowMs) {
-  switch (_pendingCommand) {
-    case PendingCommand::NONE:
-      return Status::Ok();
-
-    case PendingCommand::STOP_PERIODIC:
-      _operatingMode = OperatingMode::IDLE;
-      _clearMeasurementRequest();
-      _measurementReady = false;
-      _clearPendingCommand();
-      return Status::Ok();
-
-    case PendingCommand::SINGLE_SHOT:
-    case PendingCommand::SINGLE_SHOT_RHT_ONLY: {
-      Status st = _completeMeasurement();
-      if (st.ok()) {
-        _clearPendingCommand();
-      } else if (st.code != Err::MEASUREMENT_NOT_READY) {
-        _clearPendingCommand();
-        _clearMeasurementRequest();
-      } else {
-        _commandReadyMs = nowMs + _config.dataReadyRetryMs;
-      }
-      return st;
-    }
-
-    case PendingCommand::POWER_DOWN:
-      _operatingMode = OperatingMode::POWER_DOWN;
-      _clearMeasurementRequest();
-      _measurementReady = false;
-      _clearPendingCommand();
-      return Status::Ok();
-
-    case PendingCommand::REINIT:
-    case PendingCommand::PERSIST_SETTINGS:
-    case PendingCommand::FACTORY_RESET:
-      _operatingMode = OperatingMode::IDLE;
-      _clearPendingCommand();
-      return Status::Ok();
-
-    case PendingCommand::WAKE_UP: {
-      _clearPendingCommand();
-      const Status st = _verifySensorAfterRecovery();
-      if (st.ok()) {
-        _operatingMode = OperatingMode::IDLE;
-      }
-      return st;
-    }
-
-    case PendingCommand::POWER_CYCLE:
-      _operatingMode = OperatingMode::IDLE;
-      _clearPendingCommand();
-      return _verifySensorAfterRecovery();
-
-    case PendingCommand::SELF_TEST: {
-      Status st = _completeSelfTest();
-      _clearPendingCommand();
-      return st;
-    }
-
-    case PendingCommand::FORCED_RECALIBRATION: {
-      Status st = _completeForcedRecalibration();
-      _clearPendingCommand();
-      return st;
-    }
-
-  }
-
-  return Status::Error(Err::COMMAND_FAILED, "Unknown pending command");
-}
-
-Status SCD41::_verifySensorAfterRecovery() {
-  ScopedOfflineI2cAllowance allowOfflineI2c(_allowOfflineI2c, true);
-  uint64_t serial = 0;
-  Status st = _readSerialNumberUnchecked(serial, true);
-  if (!st.ok()) {
-    return st;
-  }
-  if (_config.strictVariantCheck && _sensorVariant != SensorVariant::SCD41) {
-    _reassertOfflineLatch();
-    return Status::Error(Err::UNSUPPORTED, "Sensor is not SCD41",
-                         static_cast<int32_t>(static_cast<uint8_t>(_sensorVariant)));
-  }
-  return Status::Ok();
-}
-
-Status SCD41::_completeSelfTest() {
-  uint16_t value = 0;
-  Status st = _readWordsOnly(&value, 1, true, false);
-  _selfTestCompleted = true;
-  if (!st.ok()) {
-    _selfTestStatus = st;
-    return st;
-  }
-
-  _selfTestRaw = value;
-  _selfTestRawValid = true;
-  _selfTestStatus = (value == cmd::SELF_TEST_PASS)
-                        ? Status::Ok()
-                        : Status::Error(Err::COMMAND_FAILED, "Self-test failed", value);
-  return _selfTestStatus.ok() ? Status::Ok() : _selfTestStatus;
-}
-
-Status SCD41::_completeForcedRecalibration() {
-  uint16_t value = 0;
-  Status st = _readWordsOnly(&value, 1, true, false);
-  _forcedRecalibrationCompleted = true;
-  if (!st.ok()) {
-    _forcedRecalibrationStatus = st;
-    return st;
-  }
-
-  _forcedRecalibrationRaw = value;
-  _forcedRecalibrationRawValid = true;
-  if (value == cmd::FRC_FAILED) {
-    _forcedRecalibrationStatus = Status::Error(Err::COMMAND_FAILED, "Forced recalibration failed");
-    return _forcedRecalibrationStatus;
-  }
-
-  _forcedRecalibrationCorrectionPpm =
-      static_cast<int16_t>(static_cast<int32_t>(value) - cmd::FRC_OFFSET_BIAS);
-  _forcedRecalibrationStatus = Status::Ok();
-  return Status::Ok();
-}
-
-Status SCD41::_completeMeasurement() {
-  uint16_t readyWord = 0;
-  Status st = _readWord(cmd::CMD_GET_DATA_READY_STATUS, readyWord, true);
-  if (!st.ok()) {
-    return st;
-  }
-  if (!isDataReady(readyWord)) {
-    _measurementReadyMs = _nowMs() + _config.dataReadyRetryMs;
-    return Status::Error(Err::MEASUREMENT_NOT_READY, "Measurement not ready");
-  }
-
-  RawSample sample;
-  st = _readMeasurementRaw(sample, true, true);
-  if (!st.ok()) {
-    if (st.code == Err::MEASUREMENT_NOT_READY) {
-      _measurementReadyMs = _nowMs() + _config.dataReadyRetryMs;
-    }
-    return st;
-  }
-
-  _storeSample(sample, _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY);
-  return Status::Ok();
-}
-
-Status SCD41::_pollPendingCommand(uint32_t nowMs, uint8_t& instructionsRemaining) {
-  if (_pendingCommand == PendingCommand::NONE) {
-    return Status::Ok();
-  }
-
-  const AsyncOperation operation = _asyncOperationForPending(_pendingCommand);
-
-  switch (_pendingCommand) {
-    case PendingCommand::STOP_PERIODIC:
-      _operatingMode = OperatingMode::IDLE;
-      _clearMeasurementRequest();
-      _measurementReady = false;
-      _clearPendingCommand();
-      _recordAsyncStatus(operation, Status::Ok());
-      return Status::Ok();
-
-    case PendingCommand::POWER_DOWN:
-      _operatingMode = OperatingMode::POWER_DOWN;
-      _clearMeasurementRequest();
-      _measurementReady = false;
-      _clearPendingCommand();
-      _recordAsyncStatus(operation, Status::Ok());
-      return Status::Ok();
-
-    case PendingCommand::REINIT:
-    case PendingCommand::PERSIST_SETTINGS:
-    case PendingCommand::FACTORY_RESET:
-      _operatingMode = OperatingMode::IDLE;
-      _clearPendingCommand();
-      _recordAsyncStatus(operation, Status::Ok());
-      return Status::Ok();
-
-    case PendingCommand::WAKE_UP: {
-      _clearPendingCommand();
-      Status st = _verifySensorAfterRecovery();
-      if (st.ok()) {
-        _operatingMode = OperatingMode::IDLE;
-      }
-      _recordAsyncStatus(operation, st);
-      return st.ok() ? Status::Ok() : st;
-    }
-
-    case PendingCommand::POWER_CYCLE: {
-      _operatingMode = OperatingMode::IDLE;
-      _clearPendingCommand();
-      Status st = _verifySensorAfterRecovery();
-      _recordAsyncStatus(operation, st);
-      return st.ok() ? Status::Ok() : st;
-    }
-
-    case PendingCommand::SINGLE_SHOT:
-    case PendingCommand::SINGLE_SHOT_RHT_ONLY:
-      return _pollMeasurement(nowMs, instructionsRemaining);
-
-    case PendingCommand::SELF_TEST:
-    case PendingCommand::FORCED_RECALIBRATION:
-      if (_pollStep == PollStep::NONE) {
-        _pollStep = PollStep::PENDING_RESULT_READ;
-      }
+void SCD41::_recordOperationOutcome(const OperationResult& result) {
+  _health.lastOperationId = result.id;
+  _health.lastOperationKind = result.kind;
+  switch (result.outcome) {
+    case OperationOutcome::SUCCEEDED:
+    case OperationOutcome::NO_DATA:
+      incrementSaturating(_health.totalOperationSuccess);
       break;
-
-    case PendingCommand::NONE:
-      return Status::Ok();
+    case OperationOutcome::CANCELLED:
+      incrementSaturating(_health.totalOperationCancelled);
+      _health.lastOperationErrorMs = result.completedMs;
+      _health.lastOperationError = result.status;
+      break;
+    case OperationOutcome::FAILED:
+    case OperationOutcome::TIMED_OUT:
+    case OperationOutcome::PARTIAL:
+    case OperationOutcome::INDETERMINATE:
+      incrementSaturating(_health.totalOperationFailures);
+      _health.lastOperationErrorMs = result.completedMs;
+      _health.lastOperationError = result.status;
+      break;
   }
-
-  if (_pollStep != PollStep::PENDING_RESULT_READ) {
-    return Status::Error(Err::COMMAND_FAILED, "Invalid poll state");
-  }
-  if (instructionsRemaining == 0) {
-    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
-  }
-
-  uint16_t value = 0;
-  Status st = _readWordsOnlyPoll(&value, 1, true, false);
-  if (st.inProgress()) {
-    return st;
-  }
-  --instructionsRemaining;
-
-  if (_pendingCommand == PendingCommand::SELF_TEST) {
-    _selfTestCompleted = true;
-    if (st.ok()) {
-      _selfTestRaw = value;
-      _selfTestRawValid = true;
-      _selfTestStatus = (value == cmd::SELF_TEST_PASS)
-                            ? Status::Ok()
-                            : Status::Error(Err::COMMAND_FAILED, "Self-test failed", value);
-      st = _selfTestStatus.ok() ? Status::Ok() : _selfTestStatus;
-    } else {
-      _selfTestStatus = st;
-    }
-  } else {
-    _forcedRecalibrationCompleted = true;
-    if (st.ok()) {
-      _forcedRecalibrationRaw = value;
-      _forcedRecalibrationRawValid = true;
-      if (value == cmd::FRC_FAILED) {
-        _forcedRecalibrationStatus =
-            Status::Error(Err::COMMAND_FAILED, "Forced recalibration failed");
-        st = _forcedRecalibrationStatus;
-      } else {
-        _forcedRecalibrationCorrectionPpm =
-            static_cast<int16_t>(static_cast<int32_t>(value) - cmd::FRC_OFFSET_BIAS);
-        _forcedRecalibrationStatus = Status::Ok();
-      }
-    } else {
-      _forcedRecalibrationStatus = st;
-    }
-  }
-
-  _pollStep = PollStep::NONE;
-  _clearPendingCommand();
-  _recordAsyncStatus(operation, st);
-  return st.ok() ? Status::Ok() : st;
 }
 
-Status SCD41::_pollMeasurement(uint32_t nowMs, uint8_t& instructionsRemaining) {
-  const bool singleShotPending = _pendingCommand == PendingCommand::SINGLE_SHOT ||
-                                 _pendingCommand == PendingCommand::SINGLE_SHOT_RHT_ONLY;
-  const AsyncOperation operation =
-      singleShotPending ? _asyncOperationForPending(_pendingCommand)
-                        : AsyncOperation::PERIODIC_FETCH;
+bool SCD41::_timeReached(uint32_t nowMs, uint32_t targetMs) {
+  return static_cast<int32_t>(nowMs - targetMs) >= 0;
+}
 
-  if (_pollStep == PollStep::NONE) {
-    if (singleShotPending) {
-      if (!_timeElapsed(nowMs, _commandReadyMs)) {
-        return Status::Error(Err::IN_PROGRESS, "Measurement conversion pending");
-      }
-    } else if (!_measurementRequested || !_timeElapsed(nowMs, _measurementReadyMs)) {
-      return Status::Error(Err::IN_PROGRESS, "Measurement pending");
-    }
-    _pollStep = PollStep::MEASUREMENT_DATA_READY_COMMAND;
-  }
+bool SCD41::_deadlineValid(uint32_t nowMs, uint32_t deadlineMs) {
+  const uint32_t distance = deadlineMs - nowMs;
+  return distance != 0U && distance < 0x80000000UL;
+}
 
-  if (instructionsRemaining == 0) {
-    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
-  }
-
-  switch (_pollStep) {
-    case PollStep::MEASUREMENT_DATA_READY_COMMAND: {
-      Status st = _writeCommandPoll(cmd::CMD_GET_DATA_READY_STATUS, true);
-      if (st.inProgress()) {
-        return st;
-      }
-      --instructionsRemaining;
-      if (!st.ok()) {
-        _pollStep = PollStep::NONE;
-        _clearMeasurementRequest();
-        if (singleShotPending) {
-          _clearPendingCommand();
-        }
-        _recordAsyncStatus(operation, st);
-        return st;
-      }
-      _pollStep = PollStep::MEASUREMENT_DATA_READY_READ;
-      return Status::Ok();
-    }
-
-    case PollStep::MEASUREMENT_DATA_READY_READ: {
-      uint16_t readyWord = 0;
-      Status st = _readWordsOnlyPoll(&readyWord, 1, true, false);
-      if (st.inProgress()) {
-        return st;
-      }
-      --instructionsRemaining;
-      if (!st.ok()) {
-        _pollStep = PollStep::NONE;
-        _clearMeasurementRequest();
-        if (singleShotPending) {
-          _clearPendingCommand();
-        }
-        _recordAsyncStatus(operation, st);
-        return st;
-      }
-      if (!isDataReady(readyWord)) {
-        _pollStep = PollStep::NONE;
-        _measurementReadyMs = nowMs + _config.dataReadyRetryMs;
-        if (singleShotPending) {
-          _commandReadyMs = _measurementReadyMs;
-        }
-        return Status::Error(Err::IN_PROGRESS, "Measurement not ready");
-      }
-      _pollStep = PollStep::MEASUREMENT_READ_COMMAND;
-      return Status::Ok();
-    }
-
-    case PollStep::MEASUREMENT_READ_COMMAND: {
-      Status st = _writeCommandPoll(cmd::CMD_READ_MEASUREMENT, true);
-      if (st.inProgress()) {
-        return st;
-      }
-      --instructionsRemaining;
-      if (!st.ok()) {
-        _pollStep = PollStep::NONE;
-        _clearMeasurementRequest();
-        if (singleShotPending) {
-          _clearPendingCommand();
-        }
-        _recordAsyncStatus(operation, st);
-        return st;
-      }
-      _pollStep = PollStep::MEASUREMENT_READ_DATA;
-      return Status::Ok();
-    }
-
-    case PollStep::MEASUREMENT_READ_DATA: {
-      uint16_t words[3] = {};
-      Status st = _readWordsOnlyPoll(words, 3, true, true);
-      if (st.inProgress()) {
-        return st;
-      }
-      --instructionsRemaining;
-      if (!st.ok()) {
-        _pollStep = PollStep::NONE;
-        if (st.code == Err::MEASUREMENT_NOT_READY) {
-          _measurementReadyMs = nowMs + _config.dataReadyRetryMs;
-          if (singleShotPending) {
-            _commandReadyMs = _measurementReadyMs;
-          }
-          return Status::Error(Err::IN_PROGRESS, "Measurement not ready");
-        }
-        _clearMeasurementRequest();
-        if (singleShotPending) {
-          _clearPendingCommand();
-        }
-        _recordAsyncStatus(operation, st);
-        return st;
-      }
-
-      RawSample sample = {};
-      sample.rawCo2 = words[0];
-      sample.rawTemperature = words[1];
-      sample.rawHumidity = words[2];
-      _storeSample(sample, _pendingCommand != PendingCommand::SINGLE_SHOT_RHT_ONLY);
-      if (singleShotPending) {
-        _clearPendingCommand();
-      }
-      _pollStep = PollStep::NONE;
-      _recordAsyncStatus(operation, Status::Ok());
-      return Status::Ok();
-    }
-
+bool SCD41::_isSettingRead(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+    case OperationKind::READ_SENSOR_ALTITUDE:
+    case OperationKind::READ_AMBIENT_PRESSURE:
+    case OperationKind::READ_ASC_ENABLED:
+    case OperationKind::READ_ASC_TARGET:
+    case OperationKind::READ_ASC_INITIAL_PERIOD:
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+      return true;
     default:
-      return Status::Error(Err::COMMAND_FAILED, "Invalid measurement poll state");
+      return false;
   }
 }
 
-Status SCD41::_pollReadSettings(uint32_t nowMs, uint8_t& instructionsRemaining) {
-  (void)nowMs;
-
-  if (!_settingsReadActive) {
-    return Status::Ok();
+bool SCD41::_isSettingWrite(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+    case OperationKind::SET_SENSOR_ALTITUDE:
+    case OperationKind::SET_AMBIENT_PRESSURE:
+    case OperationKind::SET_ASC_ENABLED:
+    case OperationKind::SET_ASC_TARGET:
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      return true;
+    default:
+      return false;
   }
-
-  for (;;) {
-    if (_settingsField == SettingsReadField::DONE) {
-      _settingsReadActive = false;
-      _settingsReady = true;
-      _settingsLiveConfigValid = _settingsAllLiveFieldsRead;
-      _settingsField = SettingsReadField::NONE;
-      _pollStep = PollStep::NONE;
-      _recordAsyncStatus(AsyncOperation::READ_SETTINGS, Status::Ok());
-      return Status::Ok();
-    }
-
-    if (_sensorVariant != SensorVariant::SCD41 &&
-        (_settingsField == SettingsReadField::ASC_TARGET ||
-         _settingsField == SettingsReadField::ASC_INITIAL_PERIOD ||
-         _settingsField == SettingsReadField::ASC_STANDARD_PERIOD)) {
-      _settingsAllLiveFieldsRead = false;
-      if (_settingsField == SettingsReadField::ASC_TARGET) {
-        _settingsField = SettingsReadField::ASC_INITIAL_PERIOD;
-      } else if (_settingsField == SettingsReadField::ASC_INITIAL_PERIOD) {
-        _settingsField = SettingsReadField::ASC_STANDARD_PERIOD;
-      } else {
-        _settingsField = SettingsReadField::DONE;
-      }
-      continue;
-    }
-    break;
-  }
-
-  uint16_t command = 0;
-  switch (_settingsField) {
-    case SettingsReadField::TEMPERATURE_OFFSET:
-      command = cmd::CMD_GET_TEMPERATURE_OFFSET;
-      break;
-    case SettingsReadField::SENSOR_ALTITUDE:
-      command = cmd::CMD_GET_SENSOR_ALTITUDE;
-      break;
-    case SettingsReadField::AMBIENT_PRESSURE:
-      command = cmd::CMD_GET_AMBIENT_PRESSURE;
-      break;
-    case SettingsReadField::ASC_ENABLED:
-      command = cmd::CMD_GET_ASC_ENABLED;
-      break;
-    case SettingsReadField::ASC_TARGET:
-      command = cmd::CMD_GET_ASC_TARGET;
-      break;
-    case SettingsReadField::ASC_INITIAL_PERIOD:
-      command = cmd::CMD_GET_ASC_INITIAL_PERIOD;
-      break;
-    case SettingsReadField::ASC_STANDARD_PERIOD:
-      command = cmd::CMD_GET_ASC_STANDARD_PERIOD;
-      break;
-    case SettingsReadField::NONE:
-    case SettingsReadField::DONE:
-      return Status::Error(Err::COMMAND_FAILED, "Invalid settings poll field");
-  }
-
-  if (instructionsRemaining == 0) {
-    return Status::Error(Err::IN_PROGRESS, "Poll instruction budget exhausted");
-  }
-
-  if (_pollStep == PollStep::SETTINGS_COMMAND) {
-    Status st = _writeCommandPoll(command, true);
-    if (st.inProgress()) {
-      return st;
-    }
-    --instructionsRemaining;
-    if (!st.ok()) {
-      _settingsReadActive = false;
-      _pollStep = PollStep::NONE;
-      _recordAsyncStatus(AsyncOperation::READ_SETTINGS, st);
-      return st;
-    }
-    _pollStep = PollStep::SETTINGS_READ;
-    return Status::Ok();
-  }
-
-  if (_pollStep != PollStep::SETTINGS_READ) {
-    _pollStep = PollStep::SETTINGS_COMMAND;
-    return Status::Error(Err::IN_PROGRESS, "Poll work pending");
-  }
-
-  uint16_t value = 0;
-  Status st = _readWordsOnlyPoll(&value, 1, true, false);
-  if (st.inProgress()) {
-    return st;
-  }
-  --instructionsRemaining;
-  if (!st.ok()) {
-    _settingsReadActive = false;
-    _pollStep = PollStep::NONE;
-    _recordAsyncStatus(AsyncOperation::READ_SETTINGS, st);
-    return st;
-  }
-
-  switch (_settingsField) {
-    case SettingsReadField::TEMPERATURE_OFFSET:
-      _settingsTemperatureOffsetC_x1000 = decodeTemperatureOffsetC_x1000(value);
-      _settingsField = SettingsReadField::SENSOR_ALTITUDE;
-      break;
-    case SettingsReadField::SENSOR_ALTITUDE:
-      _settingsSensorAltitudeM = value;
-      _settingsField = SettingsReadField::AMBIENT_PRESSURE;
-      break;
-    case SettingsReadField::AMBIENT_PRESSURE:
-      _settingsAmbientPressurePa = decodeAmbientPressurePa(value);
-      _settingsField = isPeriodicActive() ? SettingsReadField::DONE
-                                          : SettingsReadField::ASC_ENABLED;
-      break;
-    case SettingsReadField::ASC_ENABLED:
-      _settingsAutomaticSelfCalibrationEnabled = value != 0;
-      _settingsField = SettingsReadField::ASC_TARGET;
-      break;
-    case SettingsReadField::ASC_TARGET:
-      _settingsAutomaticSelfCalibrationTargetPpm = value;
-      _settingsField = SettingsReadField::ASC_INITIAL_PERIOD;
-      break;
-    case SettingsReadField::ASC_INITIAL_PERIOD:
-      _settingsAutomaticSelfCalibrationInitialPeriodHours = value;
-      _settingsField = SettingsReadField::ASC_STANDARD_PERIOD;
-      break;
-    case SettingsReadField::ASC_STANDARD_PERIOD:
-      _settingsAutomaticSelfCalibrationStandardPeriodHours = value;
-      _settingsField = SettingsReadField::DONE;
-      break;
-    case SettingsReadField::NONE:
-    case SettingsReadField::DONE:
-      return Status::Error(Err::COMMAND_FAILED, "Invalid settings poll field");
-  }
-
-  _pollStep = (_settingsField == SettingsReadField::DONE) ? PollStep::NONE
-                                                          : PollStep::SETTINGS_COMMAND;
-  if (_settingsField == SettingsReadField::DONE) {
-    _settingsReadActive = false;
-    _settingsReady = true;
-    _settingsLiveConfigValid = _settingsAllLiveFieldsRead;
-    _settingsField = SettingsReadField::NONE;
-    _recordAsyncStatus(AsyncOperation::READ_SETTINGS, Status::Ok());
-  }
-  return Status::Ok();
 }
 
-bool SCD41::_timeElapsed(uint32_t now, uint32_t target) {
-  return static_cast<int32_t>(now - target) >= 0;
-}
-
-bool SCD41::_commandDelayReady() const {
-  if (!_lastCommandValid) {
-    return true;
+bool SCD41::_isMaintenance(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::REINIT:
+    case OperationKind::SELF_TEST:
+    case OperationKind::FORCED_RECALIBRATION:
+    case OperationKind::PERSIST_SETTINGS:
+    case OperationKind::FACTORY_RESET:
+      return true;
+    default:
+      return false;
   }
-  const uint32_t minDelayUs = static_cast<uint32_t>(_config.commandDelayMs) * 1000U;
-  return (_nowUs() - _lastCommandUs) >= minDelayUs;
 }
 
-bool SCD41::_isI2cFailure(Err code) {
-  return code == Err::I2C_ERROR || code == Err::I2C_NACK_ADDR ||
-         code == Err::I2C_NACK_DATA || code == Err::I2C_NACK_READ ||
-         code == Err::I2C_TIMEOUT || code == Err::I2C_BUS;
+bool SCD41::_isDiagnostic(OperationKind kind) {
+  return kind == OperationKind::DIAGNOSTIC_READ_WORDS ||
+         kind == OperationKind::DIAGNOSTIC_WRITE_COMMAND ||
+         kind == OperationKind::DIAGNOSTIC_WRITE_WORD;
 }
 
-uint8_t SCD41::_crc8(const uint8_t* data, size_t len) {
+bool SCD41::_isEffectful(OperationKind kind) {
+  return _isSettingWrite(kind) || _isMaintenance(kind) ||
+         kind == OperationKind::ATTACH ||
+         kind == OperationKind::START_PERIODIC ||
+         kind == OperationKind::START_LOW_POWER_PERIODIC ||
+         kind == OperationKind::STOP_PERIODIC ||
+         kind == OperationKind::SINGLE_SHOT ||
+         kind == OperationKind::SINGLE_SHOT_RHT_ONLY ||
+         kind == OperationKind::POWER_DOWN || kind == OperationKind::WAKE_UP ||
+         kind == OperationKind::DIAGNOSTIC_READ_WORDS ||
+         kind == OperationKind::DIAGNOSTIC_WRITE_COMMAND ||
+         kind == OperationKind::DIAGNOSTIC_WRITE_WORD;
+}
+
+bool SCD41::_periodicAllowed(OperationKind kind) {
+  return kind == OperationKind::READ_DATA_READY ||
+         kind == OperationKind::FETCH_SAMPLE ||
+         kind == OperationKind::READ_AMBIENT_PRESSURE ||
+         kind == OperationKind::SET_AMBIENT_PRESSURE ||
+         kind == OperationKind::STOP_PERIODIC;
+}
+
+uint16_t SCD41::_readCommandFor(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::READ_IDENTITY:
+      return cmd::CMD_GET_SERIAL_NUMBER;
+    case OperationKind::READ_DATA_READY:
+      return cmd::CMD_GET_DATA_READY_STATUS;
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+      return cmd::CMD_GET_TEMPERATURE_OFFSET;
+    case OperationKind::READ_SENSOR_ALTITUDE:
+    case OperationKind::SET_SENSOR_ALTITUDE:
+      return cmd::CMD_GET_SENSOR_ALTITUDE;
+    case OperationKind::READ_AMBIENT_PRESSURE:
+    case OperationKind::SET_AMBIENT_PRESSURE:
+      return cmd::CMD_GET_AMBIENT_PRESSURE;
+    case OperationKind::READ_ASC_ENABLED:
+    case OperationKind::SET_ASC_ENABLED:
+      return cmd::CMD_GET_ASC_ENABLED;
+    case OperationKind::READ_ASC_TARGET:
+    case OperationKind::SET_ASC_TARGET:
+      return cmd::CMD_GET_ASC_TARGET;
+    case OperationKind::READ_ASC_INITIAL_PERIOD:
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+      return cmd::CMD_GET_ASC_INITIAL_PERIOD;
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      return cmd::CMD_GET_ASC_STANDARD_PERIOD;
+    default:
+      return 0U;
+  }
+}
+
+uint16_t SCD41::_writeCommandFor(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::START_PERIODIC:
+      return cmd::CMD_START_PERIODIC_MEASUREMENT;
+    case OperationKind::START_LOW_POWER_PERIODIC:
+      return cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT;
+    case OperationKind::STOP_PERIODIC:
+      return cmd::CMD_STOP_PERIODIC_MEASUREMENT;
+    case OperationKind::SINGLE_SHOT:
+      return cmd::CMD_MEASURE_SINGLE_SHOT;
+    case OperationKind::SINGLE_SHOT_RHT_ONLY:
+      return cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY;
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+      return cmd::CMD_SET_TEMPERATURE_OFFSET;
+    case OperationKind::SET_SENSOR_ALTITUDE:
+      return cmd::CMD_SET_SENSOR_ALTITUDE;
+    case OperationKind::SET_AMBIENT_PRESSURE:
+      return cmd::CMD_SET_AMBIENT_PRESSURE;
+    case OperationKind::SET_ASC_ENABLED:
+      return cmd::CMD_SET_ASC_ENABLED;
+    case OperationKind::SET_ASC_TARGET:
+      return cmd::CMD_SET_ASC_TARGET;
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+      return cmd::CMD_SET_ASC_INITIAL_PERIOD;
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      return cmd::CMD_SET_ASC_STANDARD_PERIOD;
+    case OperationKind::POWER_DOWN:
+      return cmd::CMD_POWER_DOWN;
+    case OperationKind::WAKE_UP:
+      return cmd::CMD_WAKE_UP;
+    case OperationKind::REINIT:
+      return cmd::CMD_REINIT;
+    case OperationKind::SELF_TEST:
+      return cmd::CMD_PERFORM_SELF_TEST;
+    case OperationKind::PERSIST_SETTINGS:
+      return cmd::CMD_PERSIST_SETTINGS;
+    case OperationKind::FACTORY_RESET:
+      return cmd::CMD_PERFORM_FACTORY_RESET;
+    default:
+      return 0U;
+  }
+}
+
+ConfigurationField SCD41::_fieldFor(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+      return ConfigurationField::TEMPERATURE_OFFSET;
+    case OperationKind::READ_SENSOR_ALTITUDE:
+    case OperationKind::SET_SENSOR_ALTITUDE:
+      return ConfigurationField::SENSOR_ALTITUDE;
+    case OperationKind::READ_AMBIENT_PRESSURE:
+    case OperationKind::SET_AMBIENT_PRESSURE:
+      return ConfigurationField::AMBIENT_PRESSURE;
+    case OperationKind::READ_ASC_ENABLED:
+    case OperationKind::SET_ASC_ENABLED:
+      return ConfigurationField::ASC_ENABLED;
+    case OperationKind::READ_ASC_TARGET:
+    case OperationKind::SET_ASC_TARGET:
+      return ConfigurationField::ASC_TARGET;
+    case OperationKind::READ_ASC_INITIAL_PERIOD:
+    case OperationKind::SET_ASC_INITIAL_PERIOD:
+      return ConfigurationField::ASC_INITIAL_PERIOD;
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      return ConfigurationField::ASC_STANDARD_PERIOD;
+    default:
+      return ConfigurationField::NONE;
+  }
+}
+
+SensorVariant SCD41::_variantFromSerialWord(uint16_t word0) {
+  switch (static_cast<uint8_t>((word0 & cmd::SERIAL_VARIANT_MASK) >>
+                               cmd::SERIAL_VARIANT_SHIFT)) {
+    case cmd::SERIAL_VARIANT_SCD40:
+      return SensorVariant::SCD40;
+    case cmd::SERIAL_VARIANT_SCD41:
+      return SensorVariant::SCD41;
+    case cmd::SERIAL_VARIANT_SCD42:
+      return SensorVariant::SCD42;
+    case cmd::SERIAL_VARIANT_SCD43:
+      return SensorVariant::SCD43;
+    default:
+      return SensorVariant::UNKNOWN;
+  }
+}
+
+uint8_t SCD41::_crc8(const uint8_t* data, size_t length) {
   uint8_t crc = cmd::CRC_INIT;
-  for (size_t i = 0; i < len; ++i) {
+  for (size_t i = 0; i < length; ++i) {
     crc ^= data[i];
-    for (uint8_t bit = 0; bit < 8; ++bit) {
-      if ((crc & 0x80U) != 0U) {
-        crc = static_cast<uint8_t>((crc << 1U) ^ cmd::CRC_POLY);
-      } else {
-        crc <<= 1U;
-      }
+    for (uint8_t bit = 0; bit < 8U; ++bit) {
+      crc = (crc & 0x80U) != 0U
+                ? static_cast<uint8_t>((crc << 1U) ^ cmd::CRC_POLY)
+                : static_cast<uint8_t>(crc << 1U);
     }
   }
   return crc;
 }
 
-SensorVariant SCD41::_variantFromSerialWord(uint16_t word0) {
-  const uint8_t variant =
-      static_cast<uint8_t>((word0 & cmd::SERIAL_VARIANT_MASK) >> cmd::SERIAL_VARIANT_SHIFT);
-  switch (variant) {
-    case cmd::SERIAL_VARIANT_SCD40: return SensorVariant::SCD40;
-    case cmd::SERIAL_VARIANT_SCD41: return SensorVariant::SCD41;
-    case cmd::SERIAL_VARIANT_SCD42: return SensorVariant::SCD42;
-    case cmd::SERIAL_VARIANT_SCD43: return SensorVariant::SCD43;
-    default: return SensorVariant::UNKNOWN;
+uint32_t SCD41::_executionWaitMs(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::STOP_PERIODIC:
+      return cmd::EXECUTION_TIME_STOP_PERIODIC_MS;
+    case OperationKind::SINGLE_SHOT:
+      return cmd::EXECUTION_TIME_SINGLE_SHOT_MS;
+    case OperationKind::SINGLE_SHOT_RHT_ONLY:
+      return cmd::EXECUTION_TIME_SINGLE_SHOT_RHT_MS;
+    case OperationKind::WAKE_UP:
+      return cmd::EXECUTION_TIME_POWER_UP_MS;
+    case OperationKind::REINIT:
+      return cmd::EXECUTION_TIME_REINIT_MS;
+    case OperationKind::SELF_TEST:
+      return cmd::EXECUTION_TIME_SELF_TEST_MS;
+    case OperationKind::FORCED_RECALIBRATION:
+      return cmd::EXECUTION_TIME_FRC_MS;
+    case OperationKind::PERSIST_SETTINGS:
+      return cmd::EXECUTION_TIME_PERSIST_MS;
+    case OperationKind::FACTORY_RESET:
+      return cmd::EXECUTION_TIME_FACTORY_RESET_MS;
+    default:
+      return cmd::EXECUTION_TIME_SHORT_MS;
   }
 }
 
-AsyncOperation SCD41::_asyncOperationForPending(PendingCommand command) {
-  switch (command) {
-    case PendingCommand::NONE: return AsyncOperation::NONE;
-    case PendingCommand::STOP_PERIODIC: return AsyncOperation::STOP_PERIODIC;
-    case PendingCommand::SINGLE_SHOT: return AsyncOperation::SINGLE_SHOT;
-    case PendingCommand::SINGLE_SHOT_RHT_ONLY: return AsyncOperation::SINGLE_SHOT_RHT_ONLY;
-    case PendingCommand::POWER_DOWN: return AsyncOperation::POWER_DOWN;
-    case PendingCommand::WAKE_UP: return AsyncOperation::WAKE_UP;
-    case PendingCommand::PERSIST_SETTINGS: return AsyncOperation::PERSIST_SETTINGS;
-    case PendingCommand::REINIT: return AsyncOperation::REINIT;
-    case PendingCommand::FACTORY_RESET: return AsyncOperation::FACTORY_RESET;
-    case PendingCommand::SELF_TEST: return AsyncOperation::SELF_TEST;
-    case PendingCommand::FORCED_RECALIBRATION: return AsyncOperation::FORCED_RECALIBRATION;
-    case PendingCommand::POWER_CYCLE: return AsyncOperation::POWER_CYCLE;
-  }
-  return AsyncOperation::NONE;
-}
-
-uint32_t SCD41::_nowMs() const {
-  return (_config.nowMs != nullptr) ? _config.nowMs(_config.timeUser) : platform::nowMs();
-}
-
-uint32_t SCD41::_nowUs() const {
-  return (_config.nowUs != nullptr) ? _config.nowUs(_config.timeUser) : platform::nowUs();
-}
-
-void SCD41::_cooperativeYield() const {
-  if (_config.cooperativeYield != nullptr) {
-    _config.cooperativeYield(_config.timeUser);
-  } else {
-    platform::cooperativeYield();
-  }
-}
-
-uint32_t SCD41::_periodMsForMode() const {
-  switch (_operatingMode) {
-    case OperatingMode::PERIODIC: return cmd::PERIODIC_INTERVAL_MS;
-    case OperatingMode::LOW_POWER_PERIODIC: return cmd::LOW_POWER_PERIODIC_INTERVAL_MS;
-    default: return 0;
-  }
-}
-
-uint32_t SCD41::_periodicFetchMarginMs() const {
-  if (_config.periodicFetchMarginMs != 0) {
-    return _config.periodicFetchMarginMs;
-  }
-  const uint32_t period = _periodMsForMode();
-  if (period == 0) {
-    return 0;
-  }
-  const uint32_t autoMargin = period / 20U;
-  return (autoMargin < 100U) ? 100U : autoMargin;
-}
-
-uint32_t SCD41::_periodicReadyMs(uint32_t nowMs) const {
-  const uint32_t period = _periodMsForMode();
-  if (period == 0) {
-    return nowMs;
-  }
-  const uint32_t margin = _periodicFetchMarginMs();
-  const uint32_t base = (_lastFetchMs != 0) ? _lastFetchMs : _periodicStartMs;
-  const uint32_t target = base + ((period > margin) ? (period - margin) : 0U);
-  return _timeElapsed(nowMs, target) ? nowMs : target;
-}
-
-} // namespace SCD41
+}  // namespace SCD41

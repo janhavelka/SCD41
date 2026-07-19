@@ -1,3129 +1,1717 @@
 /// @file test_basic.cpp
-/// @brief Unit tests for the SCD41 driver and example transport
+/// @brief Public-contract tests for the bounded SCD41 operation engine.
 
 #include <unity.h>
-#include <math.h>
+
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <type_traits>
 
-#include "Arduino.h"
-#include "Wire.h"
-
-SerialClass Serial;
-TwoWire Wire;
-uint32_t gMillis = 0;
-uint32_t gMicros = 0;
-uint32_t gMillisStep = 0;
-uint32_t gMicrosStep = 0;
-
-#define private public
 #include "SCD41/SCD41.h"
-#undef private
-
-#include "examples/common/I2cTransport.h"
 
 using namespace SCD41;
-using SCD41Device = SCD41::SCD41;
+using Device = SCD41::SCD41;
 
-static_assert(!std::is_copy_constructible<SCD41Device>::value,
-              "SCD41 driver must not be copy constructible");
-static_assert(!std::is_copy_assignable<SCD41Device>::value,
-              "SCD41 driver must not be copy assignable");
-static_assert(!std::is_move_constructible<SCD41Device>::value,
-              "SCD41 driver must not be move constructible");
-static_assert(!std::is_move_assignable<SCD41Device>::value,
-              "SCD41 driver must not be move assignable");
+static_assert(!std::is_copy_constructible<Device>::value, "driver must not be copied");
+static_assert(!std::is_copy_assignable<Device>::value, "driver must not be copy assigned");
+static_assert(!std::is_move_constructible<Device>::value, "driver must not be moved");
+static_assert(!std::is_move_assignable<Device>::value, "driver must not be move assigned");
+static_assert(std::is_standard_layout<OperationId>::value, "operation IDs cross owner boundaries");
+static_assert(std::is_trivially_copyable<OperationId>::value, "operation IDs must be fixed values");
+static_assert(std::is_standard_layout<OperationRequest>::value, "requests must be fixed values");
+static_assert(std::is_trivially_copyable<OperationRequest>::value, "requests must be copyable values");
+static_assert(std::is_standard_layout<PollResult>::value, "poll results must be fixed values");
+static_assert(std::is_trivially_copyable<PollResult>::value, "poll results must be copyable values");
+static_assert(std::is_standard_layout<OperationResult>::value, "results must be fixed values");
+static_assert(std::is_trivially_copyable<OperationResult>::value, "results must be copyable values");
+static_assert(std::is_standard_layout<FixedSample>::value, "samples must be fixed values");
+static_assert(std::is_trivially_copyable<FixedSample>::value, "samples must be copyable values");
+static_assert(sizeof(OperationRequest) <= 24, "review operation request growth");
+static_assert(sizeof(PollResult) <= 40, "review poll result growth");
+static_assert(sizeof(FixedSample) <= 32, "review sample growth");
+static_assert(sizeof(OperationResult) <= 256, "review terminal result growth");
+static_assert(sizeof(Device) <= 1024, "review driver fixed-memory growth");
 
 namespace {
 
-struct ScriptedTransport {
-  Status writeStatus[32] = {};
-  size_t writeCalls = 0;
-  size_t writeCount = 0;
-  size_t writeIndex = 0;
+constexpr size_t MAX_TRACE = 128;
 
-  Status readStatus[32] = {};
-  uint8_t readData[32][9] = {};
-  size_t readLen[32] = {};
-  size_t readCalls = 0;
-  size_t readCount = 0;
-  size_t readIndex = 0;
+uint8_t crc8(const uint8_t* data, size_t length) {
+  uint8_t crc = cmd::CRC_INIT;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x80U) != 0U
+                ? static_cast<uint8_t>((crc << 1U) ^ cmd::CRC_POLY)
+                : static_cast<uint8_t>(crc << 1U);
+    }
+  }
+  return crc;
+}
 
-  uint8_t lastWrite[16] = {};
-  size_t lastWriteLen = 0;
+void packWord(uint16_t word, uint8_t* out) {
+  out[0] = static_cast<uint8_t>(word >> 8U);
+  out[1] = static_cast<uint8_t>(word & 0xFFU);
+  out[2] = crc8(out, 2);
+}
 
-  uint32_t nowMs = 0;
-  uint32_t nowUs = 0;
-  uint32_t nowMsStep = 0;
-  uint32_t nowUsStep = 0;
-  uint32_t yieldCount = 0;
-  bool advanceOnYield = true;
+uint16_t commandOf(const TransferRequest& request) {
+  if (request.writeLength < 2 || request.writeData == nullptr) {
+    return 0;
+  }
+  return static_cast<uint16_t>((static_cast<uint16_t>(request.writeData[0]) << 8U) |
+                               request.writeData[1]);
+}
 
-  Status controlStatus = Status::Ok();
-  uint32_t powerCycleCalls = 0;
+uint16_t payloadWordOf(const TransferRequest& request) {
+  if (request.writeLength < 5 || request.writeData == nullptr) {
+    return 0;
+  }
+  return static_cast<uint16_t>((static_cast<uint16_t>(request.writeData[2]) << 8U) |
+                               request.writeData[3]);
+}
+
+bool timeReached(uint32_t nowMs, uint32_t targetMs) {
+  return static_cast<int32_t>(nowMs - targetMs) >= 0;
+}
+
+enum class ModelMode : uint8_t {
+  IDLE,
+  PERIODIC,
+  LOW_POWER_PERIODIC,
+  POWER_DOWN
 };
 
-uint8_t packWord(uint16_t word, uint8_t* out) {
-  out[0] = static_cast<uint8_t>((word >> 8) & 0xFF);
-  out[1] = static_cast<uint8_t>(word & 0xFF);
-  out[2] = SCD41Device::_crc8(out, 2);
-  return out[2];
+struct TransferTrace {
+  uint16_t command = 0;
+  size_t writeLength = 0;
+  size_t readLength = 0;
+  uint32_t timeoutMs = 0;
+  TransferIntent intent = TransferIntent::NORMAL;
+};
+
+struct FaultRule {
+  bool enabled = false;
+  size_t relativeCall = 0;
+  TransferCode code = TransferCode::TIMEOUT;
+  TransferDisposition disposition = TransferDisposition::INDETERMINATE;
+  int32_t detail = 0;
+  bool applyHardwareEffect = false;
+  bool fillReadBuffer = false;
+  uint32_t completedMs = 0;
+};
+
+struct ModelTransport {
+  TransferTrace trace[MAX_TRACE] = {};
+  size_t calls = 0;
+  size_t operationCallBase = 0;
+  uint32_t callbackCompletedMs = 0;
+  bool present = true;
+  bool badCrc = false;
+  uint8_t badCrcWord = 0;
+  ModelMode mode = ModelMode::IDLE;
+  uint16_t pendingResponseCommand = 0;
+  uint16_t serialWords[3] = {0x1001, 0x2345, 0x6789};
+  uint16_t measurementWords[3] = {600, 20000, 30000};
+  uint16_t dataReadyWord = 1;
+  uint16_t temperatureOffsetRaw = 0;
+  uint16_t sensorAltitudeM = 0;
+  uint16_t ambientPressureRaw = 1013;
+  uint16_t ascEnabled = 1;
+  uint16_t ascTarget = 400;
+  uint16_t ascInitialPeriod = 44;
+  uint16_t ascStandardPeriod = 156;
+  uint16_t selfTestResult = 0;
+  uint16_t frcResult = 0x8005;
+  uint32_t persistWrites = 0;
+  uint32_t factoryResetWrites = 0;
+  FaultRule fault = {};
+};
+
+void resetOperationTrace(ModelTransport& bus) {
+  bus.operationCallBase = bus.calls;
+  bus.fault = FaultRule{};
 }
 
-void queueReadWord(ScriptedTransport& bus, uint16_t word) {
-  TEST_ASSERT_TRUE(bus.readCount < 32);
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = 3;
-  packWord(word, bus.readData[bus.readCount]);
-  ++bus.readCount;
+size_t operationCalls(const ModelTransport& bus) {
+  return bus.calls - bus.operationCallBase;
 }
 
-void queueReadBytes(ScriptedTransport& bus, const uint8_t* data, size_t len) {
-  TEST_ASSERT_TRUE(bus.readCount < 32);
-  TEST_ASSERT_TRUE(len <= sizeof(bus.readData[bus.readCount]));
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = len;
-  memcpy(bus.readData[bus.readCount], data, len);
-  ++bus.readCount;
+void faultRelativeCall(ModelTransport& bus, size_t relativeCall, TransferCode code,
+                       TransferDisposition disposition, bool applyHardwareEffect = false,
+                       bool fillReadBuffer = false, uint32_t completedMs = 0) {
+  bus.fault.enabled = true;
+  bus.fault.relativeCall = relativeCall;
+  bus.fault.code = code;
+  bus.fault.disposition = disposition;
+  bus.fault.detail = 77;
+  bus.fault.applyHardwareEffect = applyHardwareEffect;
+  bus.fault.fillReadBuffer = fillReadBuffer;
+  bus.fault.completedMs = completedMs;
 }
 
-void queueReadStatus(ScriptedTransport& bus, const Status& status, size_t len = 0) {
-  TEST_ASSERT_TRUE(bus.readCount < 32);
-  bus.readStatus[bus.readCount] = status;
-  bus.readLen[bus.readCount] = len;
-  ++bus.readCount;
-}
-
-void queueReadMeasurement(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
-                          uint16_t humidity) {
-  TEST_ASSERT_TRUE(bus.readCount < 32);
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = 9;
-  packWord(co2, &bus.readData[bus.readCount][0]);
-  packWord(temp, &bus.readData[bus.readCount][3]);
-  packWord(humidity, &bus.readData[bus.readCount][6]);
-  ++bus.readCount;
-}
-
-void queueReadMeasurementWithBadCrc(ScriptedTransport& bus, uint16_t co2, uint16_t temp,
-                                    uint16_t humidity) {
-  TEST_ASSERT_TRUE(bus.readCount < 32);
-  bus.readStatus[bus.readCount] = Status::Ok();
-  bus.readLen[bus.readCount] = 9;
-  packWord(co2, &bus.readData[bus.readCount][0]);
-  packWord(temp, &bus.readData[bus.readCount][3]);
-  packWord(humidity, &bus.readData[bus.readCount][6]);
-  bus.readData[bus.readCount][2] ^= 0xFFU;
-  ++bus.readCount;
-}
-
-void queueReadSerial(ScriptedTransport& bus, uint16_t word0, uint16_t word1, uint16_t word2) {
-  queueReadMeasurement(bus, word0, word1, word2);
-}
-
-Status scriptedWrite(uint8_t addr, const uint8_t* data, size_t len, uint32_t timeoutMs,
-                     void* user) {
-  (void)timeoutMs;
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
-  ++ctx->writeCalls;
-  ctx->lastWriteLen = len;
-  memset(ctx->lastWrite, 0, sizeof(ctx->lastWrite));
-  memcpy(ctx->lastWrite, data, len);
-  if (ctx->writeIndex < ctx->writeCount) {
-    return ctx->writeStatus[ctx->writeIndex++];
+bool isReadCommand(uint16_t command) {
+  switch (command) {
+    case cmd::CMD_GET_SERIAL_NUMBER:
+    case cmd::CMD_GET_DATA_READY_STATUS:
+    case cmd::CMD_READ_MEASUREMENT:
+    case cmd::CMD_GET_TEMPERATURE_OFFSET:
+    case cmd::CMD_GET_SENSOR_ALTITUDE:
+    case cmd::CMD_GET_AMBIENT_PRESSURE:
+    case cmd::CMD_GET_ASC_ENABLED:
+    case cmd::CMD_GET_ASC_TARGET:
+    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
+    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
+      return true;
+    default:
+      return false;
   }
-  return Status::Ok();
 }
 
-Status scriptedWriteRead(uint8_t addr, const uint8_t* txData, size_t txLen,
-                         uint8_t* rxData, size_t rxLen, uint32_t timeoutMs, void* user) {
-  (void)txData;
-  (void)timeoutMs;
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, addr);
-  TEST_ASSERT_EQUAL_UINT32(0u, txLen);
-  ++ctx->readCalls;
-  if (ctx->readIndex < ctx->readCount) {
-    const Status st = ctx->readStatus[ctx->readIndex];
-    if (st.ok()) {
-      TEST_ASSERT_EQUAL_UINT32(ctx->readLen[ctx->readIndex], rxLen);
-      memcpy(rxData, ctx->readData[ctx->readIndex], rxLen);
+void applyWrite(ModelTransport& bus, const TransferRequest& request) {
+  const uint16_t command = commandOf(request);
+  // Some SCD41 commands (notably ambient pressure) use the same command word
+  // for a two-byte read request and a five-byte write-with-payload request.
+  // Model the wire shape as well as the command value so a setter cannot be
+  // mistaken for a response-selection write.
+  if (request.writeLength == 2 && isReadCommand(command)) {
+    bus.pendingResponseCommand = command;
+    return;
+  }
+
+  switch (command) {
+    case cmd::CMD_WAKE_UP:
+      bus.mode = ModelMode::IDLE;
+      break;
+    case cmd::CMD_STOP_PERIODIC_MEASUREMENT:
+      bus.mode = ModelMode::IDLE;
+      break;
+    case cmd::CMD_START_PERIODIC_MEASUREMENT:
+      bus.mode = ModelMode::PERIODIC;
+      break;
+    case cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT:
+      bus.mode = ModelMode::LOW_POWER_PERIODIC;
+      break;
+    case cmd::CMD_POWER_DOWN:
+      bus.mode = ModelMode::POWER_DOWN;
+      break;
+    case cmd::CMD_SET_TEMPERATURE_OFFSET:
+      bus.temperatureOffsetRaw = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_SENSOR_ALTITUDE:
+      bus.sensorAltitudeM = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_AMBIENT_PRESSURE:
+      bus.ambientPressureRaw = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_ASC_ENABLED:
+      bus.ascEnabled = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_ASC_TARGET:
+      bus.ascTarget = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_ASC_INITIAL_PERIOD:
+      bus.ascInitialPeriod = payloadWordOf(request);
+      break;
+    case cmd::CMD_SET_ASC_STANDARD_PERIOD:
+      bus.ascStandardPeriod = payloadWordOf(request);
+      break;
+    case cmd::CMD_PERFORM_SELF_TEST:
+    case cmd::CMD_PERFORM_FORCED_RECALIBRATION:
+      bus.pendingResponseCommand = command;
+      break;
+    case cmd::CMD_PERSIST_SETTINGS:
+      ++bus.persistWrites;
+      break;
+    case cmd::CMD_PERFORM_FACTORY_RESET:
+      ++bus.factoryResetWrites;
+      bus.temperatureOffsetRaw = 0;
+      bus.sensorAltitudeM = 0;
+      bus.ambientPressureRaw = 1013;
+      bus.ascEnabled = 1;
+      bus.ascTarget = 400;
+      bus.ascInitialPeriod = 44;
+      bus.ascStandardPeriod = 156;
+      bus.mode = ModelMode::IDLE;
+      break;
+    case cmd::CMD_REINIT:
+      bus.mode = ModelMode::IDLE;
+      break;
+    default:
+      break;
+  }
+}
+
+uint8_t responseWordCount(uint16_t command) {
+  return (command == cmd::CMD_GET_SERIAL_NUMBER || command == cmd::CMD_READ_MEASUREMENT) ? 3 : 1;
+}
+
+void fillResponse(ModelTransport& bus, uint8_t* out, size_t length) {
+  TEST_ASSERT_NOT_NULL(out);
+  const uint8_t wordCount = responseWordCount(bus.pendingResponseCommand);
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(wordCount) * 3U, length);
+
+  uint16_t words[3] = {};
+  switch (bus.pendingResponseCommand) {
+    case cmd::CMD_GET_SERIAL_NUMBER:
+      std::memcpy(words, bus.serialWords, sizeof(words));
+      break;
+    case cmd::CMD_GET_DATA_READY_STATUS:
+      words[0] = bus.dataReadyWord;
+      break;
+    case cmd::CMD_READ_MEASUREMENT:
+      std::memcpy(words, bus.measurementWords, sizeof(words));
+      break;
+    case cmd::CMD_GET_TEMPERATURE_OFFSET:
+      words[0] = bus.temperatureOffsetRaw;
+      break;
+    case cmd::CMD_GET_SENSOR_ALTITUDE:
+      words[0] = bus.sensorAltitudeM;
+      break;
+    case cmd::CMD_GET_AMBIENT_PRESSURE:
+      words[0] = bus.ambientPressureRaw;
+      break;
+    case cmd::CMD_GET_ASC_ENABLED:
+      words[0] = bus.ascEnabled;
+      break;
+    case cmd::CMD_GET_ASC_TARGET:
+      words[0] = bus.ascTarget;
+      break;
+    case cmd::CMD_GET_ASC_INITIAL_PERIOD:
+      words[0] = bus.ascInitialPeriod;
+      break;
+    case cmd::CMD_GET_ASC_STANDARD_PERIOD:
+      words[0] = bus.ascStandardPeriod;
+      break;
+    case cmd::CMD_PERFORM_SELF_TEST:
+      words[0] = bus.selfTestResult;
+      break;
+    case cmd::CMD_PERFORM_FORCED_RECALIBRATION:
+      words[0] = bus.frcResult;
+      break;
+    default:
+      TEST_FAIL_MESSAGE("unexpected response phase");
+  }
+
+  for (uint8_t i = 0; i < wordCount; ++i) {
+    packWord(words[i], &out[static_cast<size_t>(i) * 3U]);
+  }
+  if (bus.badCrc && bus.badCrcWord < wordCount) {
+    out[static_cast<size_t>(bus.badCrcWord) * 3U + 2U] ^= 0x5AU;
+  }
+}
+
+TransferResult modelTransfer(const TransferRequest& request, void* user) {
+  auto& bus = *static_cast<ModelTransport*>(user);
+  TEST_ASSERT_TRUE(bus.calls < MAX_TRACE);
+  TEST_ASSERT_EQUAL_HEX8(cmd::I2C_ADDRESS, request.address);
+  TEST_ASSERT_TRUE(request.timeoutMs > 0);
+
+  TransferTrace& trace = bus.trace[bus.calls];
+  trace.command = commandOf(request);
+  trace.writeLength = request.writeLength;
+  trace.readLength = request.readLength;
+  trace.timeoutMs = request.timeoutMs;
+  trace.intent = request.intent;
+  ++bus.calls;
+
+  const size_t relativeCall = bus.calls - bus.operationCallBase;
+  const bool faulted = bus.fault.enabled && relativeCall == bus.fault.relativeCall;
+
+  if (!bus.present) {
+    return TransferResult{TransferCode::NACK, TransferDisposition::NO_EFFECT, 0, 0,
+                          bus.callbackCompletedMs};
+  }
+
+  if (faulted) {
+    if (bus.fault.applyHardwareEffect && request.writeLength != 0) {
+      applyWrite(bus, request);
     }
-    ++ctx->readIndex;
-    return st;
+    if (bus.fault.fillReadBuffer && request.readLength != 0) {
+      fillResponse(bus, request.readData, request.readLength);
+    }
+    const size_t transferred =
+        bus.fault.code == TransferCode::OK ? request.writeLength + request.readLength : 0U;
+    return TransferResult{bus.fault.code, bus.fault.disposition, bus.fault.detail, transferred,
+                          bus.fault.completedMs != 0 ? bus.fault.completedMs
+                                                    : bus.callbackCompletedMs};
   }
-  return Status::Ok();
-}
 
-uint32_t scriptedNowMs(void* user) {
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  const uint32_t value = ctx->nowMs;
-  ctx->nowMs += ctx->nowMsStep;
-  return value;
-}
-
-uint32_t scriptedNowUs(void* user) {
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  const uint32_t value = ctx->nowUs;
-  ctx->nowUs += ctx->nowUsStep;
-  return value;
-}
-
-void scriptedYield(void* user) {
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  ++ctx->yieldCount;
-  if (ctx->advanceOnYield) {
-    ++ctx->nowMs;
-    ctx->nowUs += 1000;
+  if (request.writeLength != 0) {
+    TEST_ASSERT_NOT_NULL(request.writeData);
+    TEST_ASSERT_TRUE(request.writeLength == 2 || request.writeLength == 5);
+    if (request.writeLength == 5) {
+      TEST_ASSERT_EQUAL_HEX8(crc8(&request.writeData[2], 2), request.writeData[4]);
+    }
+    applyWrite(bus, request);
+    if (commandOf(request) == cmd::CMD_WAKE_UP) {
+      TEST_ASSERT_EQUAL(static_cast<uint8_t>(TransferIntent::EXPECTED_WRITE_NACK),
+                        static_cast<uint8_t>(request.intent));
+      return TransferResult{TransferCode::NACK, TransferDisposition::NO_EFFECT, 0, 0,
+                            bus.callbackCompletedMs};
+    }
+    return TransferResult::Ok(request.writeLength, bus.callbackCompletedMs);
   }
+
+  TEST_ASSERT_EQUAL_UINT32(0U, request.writeLength);
+  TEST_ASSERT_TRUE(request.readLength != 0);
+  fillResponse(bus, request.readData, request.readLength);
+  return TransferResult::Ok(request.readLength, bus.callbackCompletedMs);
 }
 
-Status scriptedPowerCycle(void* user) {
-  auto* ctx = static_cast<ScriptedTransport*>(user);
-  ++ctx->powerCycleCalls;
-  return ctx->controlStatus;
+Config makeConfig(ModelTransport& bus) {
+  Config config;
+  config.transfer = modelTransfer;
+  config.transferUser = &bus;
+  config.transferTimeoutMs = 20;
+  config.powerUpDelayMs = cmd::EXECUTION_TIME_POWER_UP_MS;
+  config.offlineThreshold = 3;
+  return config;
 }
 
-uint32_t arduinoStyleNowMs(void*) {
-  return millis();
+void bindDevice(Device& device, ModelTransport& bus) {
+  TEST_ASSERT_TRUE(device.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(device.isBound());
+  TEST_ASSERT_FALSE(device.isAttached());
 }
 
-uint32_t arduinoStyleNowUs(void*) {
-  return micros();
+OperationId startJob(Device& device, const OperationRequest& request, uint32_t nowMs,
+                     uint32_t deadlineMs, uint32_t requestId = 1) {
+  OperationId id = {};
+  const Status status = device.start(request, OperationOptions{requestId, nowMs, deadlineMs}, id);
+  TEST_ASSERT_TRUE_MESSAGE(status.inProgress(), status.msg);
+  TEST_ASSERT_EQUAL_UINT32(requestId, id.requestId);
+  TEST_ASSERT_TRUE(id.generation != 0);
+  return id;
 }
 
-void arduinoStyleYield(void*) {
-  yield();
+PollResult pollChecked(Device& device, ModelTransport& bus, uint32_t nowMs,
+                       uint8_t budget = 1) {
+  bus.callbackCompletedMs = nowMs;
+  const size_t before = bus.calls;
+  const PollResult poll = device.poll(nowMs, budget);
+  const size_t used = bus.calls - before;
+  TEST_ASSERT_TRUE(used <= budget);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(used), poll.callbacksUsed);
+  return poll;
 }
 
-Config makeConfig(ScriptedTransport& bus) {
-  Config cfg;
-  cfg.i2cWrite = scriptedWrite;
-  cfg.i2cWriteRead = scriptedWriteRead;
-  cfg.i2cUser = &bus;
-  cfg.nowMs = scriptedNowMs;
-  cfg.nowUs = scriptedNowUs;
-  cfg.cooperativeYield = scriptedYield;
-  cfg.timeUser = &bus;
-  cfg.offlineThreshold = 3;
-  cfg.powerUpDelayMs = 0;
-  return cfg;
-}
-
-void queueBeginSuccess(ScriptedTransport& bus) {
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-}
-
-Status drivePollUntilSettled(SCD41Device& device, ScriptedTransport& bus,
-                             uint32_t nowMs, uint8_t maxSteps = 8);
-
-void cacheFreshSingleShotSample(SCD41Device& device, ScriptedTransport& bus,
-                                uint16_t co2 = 601) {
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, co2, 20000, 30000);
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  TEST_ASSERT_TRUE(drivePollUntilSettled(device, bus, bus.nowMs).ok());
-  TEST_ASSERT_TRUE(device.hasSample());
-  TEST_ASSERT_TRUE(device.hasFreshSample());
-  TEST_ASSERT_FALSE(device.sampleStale());
-  TEST_ASSERT_TRUE(device.measurementReady());
-}
-
-void assertCachedSampleIsStale(const SCD41Device& device, uint32_t oldEpoch) {
-  TEST_ASSERT_TRUE(device.hasSample());
-  TEST_ASSERT_FALSE(device.hasFreshSample());
-  TEST_ASSERT_TRUE(device.sampleStale());
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_TRUE(device.sensorEpoch() != oldEpoch);
-  TEST_ASSERT_EQUAL_UINT32(oldEpoch, device.sampleEpoch());
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-  TEST_ASSERT_TRUE(snap.hasSample);
-  TEST_ASSERT_FALSE(snap.hasFreshSample);
-  TEST_ASSERT_TRUE(snap.sampleStale);
-  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), snap.sensorEpoch);
-  TEST_ASSERT_EQUAL_UINT32(device.sampleEpoch(), snap.sampleEpoch);
-}
-
-uint16_t lastWriteCommand(const ScriptedTransport& bus) {
-  return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[0]) << 8) | bus.lastWrite[1]);
-}
-
-uint16_t lastWriteWord(const ScriptedTransport& bus) {
-  return static_cast<uint16_t>((static_cast<uint16_t>(bus.lastWrite[2]) << 8) | bus.lastWrite[3]);
-}
-
-void assertUnsupportedNoI2c(const Status& st, const ScriptedTransport& bus,
-                            size_t writeCalls, size_t readCalls) {
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(writeCalls, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readCalls, bus.readCalls);
-}
-
-bool isWithinInt32(int32_t actual, int32_t expected, int32_t tolerance) {
-  const int32_t delta = (actual >= expected) ? (actual - expected) : (expected - actual);
-  return delta <= tolerance;
-}
-
-Status drivePollUntilSettled(SCD41Device& device, ScriptedTransport& bus,
-                             uint32_t nowMs, uint8_t maxSteps) {
-  Status st = Status::Ok();
-  for (uint8_t i = 0; i < maxSteps; ++i) {
-    bus.nowMs = nowMs;
-    bus.nowUs += 1000U;
-    st = device.poll(nowMs, 1);
-    if (!st.inProgress() && (!st.ok() || !device.pollBusy())) {
-      return st;
+PollResult driveUntilTerminal(Device& device, ModelTransport& bus, uint32_t& nowMs,
+                              uint8_t budget = 1, uint16_t maxPolls = 128) {
+  PollResult poll = {};
+  for (uint16_t i = 0; i < maxPolls; ++i) {
+    poll = pollChecked(device, bus, nowMs, budget);
+    if (poll.state == OperationState::RESULT_PENDING) {
+      return poll;
+    }
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
+                      static_cast<uint8_t>(poll.state));
+    if (poll.nextDueMs != 0 && !timeReached(nowMs, poll.nextDueMs)) {
+      nowMs = poll.nextDueMs;
+    } else {
+      ++nowMs;
     }
   }
-  return st;
+  TEST_FAIL_MESSAGE("operation did not reach a terminal result");
+  return poll;
+}
+
+OperationResult takeTerminal(Device& device, const OperationId& id) {
+  OperationResult result = {};
+  const Status status = device.takeResult(id, result);
+  TEST_ASSERT_TRUE_MESSAGE(status.ok(), status.msg);
+  TEST_ASSERT_TRUE(result.id == id);
+  return result;
+}
+
+OperationResult completeJob(Device& device, ModelTransport& bus,
+                            const OperationRequest& request, uint32_t& nowMs,
+                            uint32_t durationMs = 30000, uint32_t requestId = 1,
+                            uint8_t budget = 1) {
+  resetOperationTrace(bus);
+  const OperationId id = startJob(device, request, nowMs, nowMs + durationMs, requestId);
+  driveUntilTerminal(device, bus, nowMs, budget);
+  return takeTerminal(device, id);
+}
+
+void attachDevice(Device& device, ModelTransport& bus, uint32_t& nowMs,
+                  uint32_t requestId = 1) {
+  const OperationResult result =
+      completeJob(device, bus, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000,
+                  requestId);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_TRUE(device.isAttached());
+  TEST_ASSERT_TRUE(device.identity().valid);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
+                    static_cast<uint8_t>(device.identity().variant));
+}
+
+size_t countCommand(const ModelTransport& bus, size_t firstCall, uint16_t command) {
+  size_t count = 0;
+  for (size_t i = firstCall; i < bus.calls; ++i) {
+    if (bus.trace[i].writeLength != 0 && bus.trace[i].command == command) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+void assertNoIoStatus(const Status& status, const ModelTransport& bus, size_t callsBefore,
+                      Err expected) {
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(expected), static_cast<uint8_t>(status.code));
+  TEST_ASSERT_EQUAL_UINT32(callsBefore, bus.calls);
 }
 
 }  // namespace
 
-void setUp() {
-  gMillis = 0;
-  gMicros = 0;
-  gMillisStep = 0;
-  gMicrosStep = 0;
-  Wire._clearRequestFromOverride();
-  Wire._clearReadCallCount();
-  Wire._clearClockSetCount();
-  Wire._clearBeginCallCount();
-  Wire._setBeginResult(true);
-  Wire._clearWriteResult();
-  Wire._clearEndTransmissionResult();
-}
-
+void setUp() {}
 void tearDown() {}
 
-void test_status_helpers() {
-  const Status ok = Status::Ok();
-  TEST_ASSERT_TRUE(ok.ok());
-  TEST_ASSERT_TRUE(ok.is(Err::OK));
-  TEST_ASSERT_TRUE(ok);
-
-  const Status pending{Err::IN_PROGRESS, 0, "pending"};
-  TEST_ASSERT_FALSE(pending.ok());
-  TEST_ASSERT_TRUE(pending.inProgress());
-
-  const Status err = Status::Error(Err::CRC_MISMATCH, "crc");
-  TEST_ASSERT_FALSE(err.ok());
-  TEST_ASSERT_TRUE(err.is(Err::CRC_MISMATCH));
+void test_status_and_public_type_contracts() {
+  TEST_ASSERT_TRUE(Status::Ok().ok());
+  TEST_ASSERT_TRUE(Status::Error(Err::IN_PROGRESS, "pending").inProgress());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationClass::STEADY_STATE),
+                    static_cast<uint8_t>(Device::limits(OperationKind::FETCH_SAMPLE).operationClass));
+  TEST_ASSERT_EQUAL_UINT8(0U, Device::limits(OperationKind::FETCH_SAMPLE).maxRetries);
+  TEST_ASSERT_TRUE(Device::limits(OperationKind::SELF_TEST).maxWaitMs >=
+                   cmd::EXECUTION_TIME_SELF_TEST_MS);
+  TEST_ASSERT_TRUE(Device::limits(OperationKind::PERSIST_SETTINGS).writesNonvolatile);
+  TEST_ASSERT_TRUE(Device::limits(OperationKind::FORCED_RECALIBRATION).writesNonvolatile);
+  TEST_ASSERT_TRUE(Device::limits(OperationKind::FACTORY_RESET).destructive);
+  TEST_ASSERT_EQUAL_UINT32(1531U, Device::limits(OperationKind::ATTACH).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(3U, Device::limits(OperationKind::FETCH_SAMPLE).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(5003U, Device::limits(OperationKind::SINGLE_SHOT).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(53U,
+                           Device::limits(OperationKind::SINGLE_SHOT_RHT_ONLY).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(4U,
+                           Device::limits(OperationKind::SET_AMBIENT_PRESSURE).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(13U,
+                           Device::limits(OperationKind::READ_CONFIGURATION).maxWaitMs);
 }
 
-void test_config_defaults() {
-  Config cfg;
-  TEST_ASSERT_EQUAL(nullptr, cfg.i2cWrite);
-  TEST_ASSERT_EQUAL(nullptr, cfg.i2cWriteRead);
-  TEST_ASSERT_EQUAL(nullptr, cfg.nowMs);
-  TEST_ASSERT_EQUAL(nullptr, cfg.nowUs);
-  TEST_ASSERT_EQUAL(nullptr, cfg.cooperativeYield);
-  TEST_ASSERT_EQUAL(nullptr, cfg.timeUser);
-  TEST_ASSERT_EQUAL_HEX8(0x62, cfg.i2cAddress);
-  TEST_ASSERT_EQUAL_UINT32(50u, cfg.i2cTimeoutMs);
-  TEST_ASSERT_EQUAL_UINT32(1u, cfg.commandDelayMs);
-  TEST_ASSERT_EQUAL_UINT32(30u, cfg.powerUpDelayMs);
-  TEST_ASSERT_EQUAL_UINT32(250u, cfg.dataReadyRetryMs);
-  TEST_ASSERT_EQUAL_UINT32(100u, cfg.recoverBackoffMs);
-  TEST_ASSERT_EQUAL_UINT8(5u, cfg.offlineThreshold);
-  TEST_ASSERT_TRUE(cfg.strictVariantCheck);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SingleShotMode::CO2_T_RH),
-                    static_cast<uint8_t>(cfg.singleShotMode));
+void test_begin_is_zero_io_and_validates_before_rebinding() {
+  ModelTransport busA;
+  Device device;
+  Config configA = makeConfig(busA);
+  TEST_ASSERT_TRUE(device.begin(configA).ok());
+  TEST_ASSERT_EQUAL_UINT32(0U, busA.calls);
+
+  ModelTransport busB;
+  Config invalid = makeConfig(busB);
+  invalid.transfer = nullptr;
+  const Status invalidStatus = device.begin(invalid);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                    static_cast<uint8_t>(invalidStatus.code));
+  TEST_ASSERT_TRUE(device.isBound());
+  TEST_ASSERT_EQUAL_UINT32(0U, busA.calls);
+  TEST_ASSERT_EQUAL_UINT32(0U, busB.calls);
+
+  OperationId id = {};
+  TEST_ASSERT_TRUE(device.start(OperationRequest::make(OperationKind::ATTACH),
+                                OperationOptions{7, 10, 5000}, id)
+                       .inProgress());
+  pollChecked(device, busA, 10, 1);
+  TEST_ASSERT_TRUE(busA.calls <= 1U);
+  TEST_ASSERT_EQUAL_UINT32(0U, busB.calls);
 }
 
-void test_begin_requires_now_ms_before_i2c() {
-  ScriptedTransport bus;
-  Config cfg;
-  cfg.i2cWrite = scriptedWrite;
-  cfg.i2cWriteRead = scriptedWriteRead;
-  cfg.i2cUser = &bus;
-  cfg.nowUs = scriptedNowUs;
-  cfg.timeUser = &bus;
+void test_config_validation_boundaries_are_zero_io() {
+  ModelTransport bus;
+  Config config = makeConfig(bus);
+  Device device;
 
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+  config.transferTimeoutMs = 0;
+  assertNoIoStatus(device.begin(config), bus, 0, Err::INVALID_CONFIG);
+  config = makeConfig(bus);
+  config.transferTimeoutMs = 1001;
+  assertNoIoStatus(device.begin(config), bus, 0, Err::INVALID_CONFIG);
+  config = makeConfig(bus);
+  config.powerUpDelayMs = cmd::EXECUTION_TIME_POWER_UP_MS - 1U;
+  assertNoIoStatus(device.begin(config), bus, 0, Err::INVALID_CONFIG);
+  config = makeConfig(bus);
+  config.powerUpDelayMs = 1001;
+  assertNoIoStatus(device.begin(config), bus, 0, Err::INVALID_CONFIG);
+
+  config = makeConfig(bus);
+  config.transferTimeoutMs = 1000;
+  config.powerUpDelayMs = 1000;
+  TEST_ASSERT_TRUE(device.begin(config).ok());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.calls);
 }
 
-void test_begin_requires_now_us_before_i2c() {
-  ScriptedTransport bus;
-  Config cfg;
-  cfg.i2cWrite = scriptedWrite;
-  cfg.i2cWriteRead = scriptedWriteRead;
-  cfg.i2cUser = &bus;
-  cfg.nowMs = scriptedNowMs;
-  cfg.timeUser = &bus;
+void test_start_is_zero_io_and_result_backpressure_is_exact() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  resetOperationTrace(bus);
 
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.readCalls);
+  const OperationId first =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000, 41);
+  TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+
+  OperationId rejected = {99, 99};
+  const size_t beforeRejected = bus.calls;
+  assertNoIoStatus(device.start(OperationRequest::make(OperationKind::READ_IDENTITY),
+                                OperationOptions{42, nowMs, 5000}, rejected),
+                   bus, beforeRejected, Err::BUSY);
+
+  driveUntilTerminal(device, bus, nowMs);
+  const size_t beforePending = bus.calls;
+  assertNoIoStatus(device.start(OperationRequest::make(OperationKind::READ_IDENTITY),
+                                OperationOptions{43, nowMs, nowMs + 100}, rejected),
+                   bus, beforePending, Err::BUSY);
+
+  const OperationResult terminal = takeTerminal(device, first);
+  TEST_ASSERT_EQUAL_UINT32(41U, terminal.id.requestId);
+
+  const OperationId second =
+      startJob(device, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+               nowMs + 100, 43);
+  TEST_ASSERT_TRUE(second.generation != first.generation);
 }
 
-void test_cooperative_yield_is_optional_when_clock_advances() {
-  ScriptedTransport bus;
-  bus.nowMsStep = 1;
-  bus.nowUsStep = 1000;
-  Config cfg = makeConfig(bus);
-  cfg.cooperativeYield = nullptr;
-  cfg.powerUpDelayMs = 3;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(device.isInitialized());
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.yieldCount);
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
-}
-
-void test_begin_with_arduino_style_timing_hooks_succeeds() {
-  ScriptedTransport bus;
-  Config cfg;
-  cfg.i2cWrite = scriptedWrite;
-  cfg.i2cWriteRead = scriptedWriteRead;
-  cfg.i2cUser = &bus;
-  cfg.nowMs = arduinoStyleNowMs;
-  cfg.nowUs = arduinoStyleNowUs;
-  cfg.cooperativeYield = arduinoStyleYield;
-  gMillisStep = 1;
-  gMicrosStep = 1000;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(device.isInitialized());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
-}
-
-void test_time_elapsed_handles_u32_wraparound() {
-  TEST_ASSERT_TRUE(SCD41Device::_timeElapsed(1u, 0xFFFFFFFEu));
-  TEST_ASSERT_FALSE(SCD41Device::_timeElapsed(0xFFFFFFFEu, 1u));
-}
-
-void test_crc_and_conversion_helpers() {
-  const uint8_t data[2] = {0xBE, 0xEF};
-  TEST_ASSERT_EQUAL_HEX8(0x92, SCD41Device::_crc8(data, 2));
-
-  TEST_ASSERT_EQUAL_INT(-45000, SCD41Device::convertTemperatureC_x1000(0));
-  TEST_ASSERT_EQUAL_UINT32(0u, SCD41Device::convertHumidityPct_x1000(0));
-  TEST_ASSERT_EQUAL_INT(129997, SCD41Device::convertTemperatureC_x1000(65535));
-  TEST_ASSERT_EQUAL_UINT32(99998u, SCD41Device::convertHumidityPct_x1000(65535));
-
-  const uint16_t rawOffset = SCD41Device::encodeTemperatureOffsetC_x1000(4000);
-  TEST_ASSERT_EQUAL_INT(4000, SCD41Device::decodeTemperatureOffsetC_x1000(rawOffset));
-  TEST_ASSERT_EQUAL_UINT16(1013u, SCD41Device::encodeAmbientPressurePa(101300));
-  TEST_ASSERT_EQUAL_UINT32(101300u, SCD41Device::decodeAmbientPressurePa(1013));
-}
-
-void test_temperature_offset_static_vectors_match_datasheet_scale() {
-  TEST_ASSERT_EQUAL_HEX16(0x0000, SCD41Device::encodeTemperatureOffsetC_x1000(0));
-  TEST_ASSERT_EQUAL_HEX16(0x05DA, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
-  TEST_ASSERT_EQUAL_HEX16(0x07E6, SCD41Device::encodeTemperatureOffsetC_x1000(5400));
-  TEST_ASSERT_EQUAL_HEX16(0x0912, SCD41Device::encodeTemperatureOffsetC_x1000(6200));
-  TEST_ASSERT_EQUAL_HEX16(0x1D42, SCD41Device::encodeTemperatureOffsetC_x1000(20000));
-  TEST_ASSERT_EQUAL_HEX16(0x05B4, SCD41Device::encodeTemperatureOffsetC_x1000(3900));
-
-  TEST_ASSERT_EQUAL_INT(0, SCD41Device::decodeTemperatureOffsetC_x1000(0x0000));
-  TEST_ASSERT_EQUAL_INT(4000, SCD41Device::decodeTemperatureOffsetC_x1000(0x05DA));
-  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x07E6),
-                                 5400, 1));
-  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x0912),
-                                 6200, 1));
-  TEST_ASSERT_TRUE(isWithinInt32(SCD41Device::decodeTemperatureOffsetC_x1000(0x1D42),
-                                 20000, 1));
-}
-
-void test_begin_waits_power_up_delay_and_does_not_track_startup_io() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.powerUpDelayMs = 3;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(bus.yieldCount >= 3u);
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.driverState()));
-}
-
-void test_update_health_ignores_in_progress() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  bus.nowMs = 123;
-
-  const Status st = device._updateHealth(Status{Err::IN_PROGRESS, 0, "pending"});
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OK),
-                    static_cast<uint8_t>(device.lastError().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_begin_wait_guard_times_out_if_time_source_stalls() {
-  ScriptedTransport bus;
-  bus.advanceOnYield = false;
-  Config cfg = makeConfig(bus);
-  cfg.powerUpDelayMs = 1;
-  cfg.i2cTimeoutMs = 1;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_TRUE(bus.yieldCount > 0u);
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.writeIndex);
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.readIndex);
-}
-
-void test_failed_begin_after_success_clears_health_snapshot() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  (void)device._updateHealth(Status::Error(Err::I2C_TIMEOUT, "forced stale error"));
-  TEST_ASSERT_GREATER_THAN_UINT32(0u, device.totalFailures());
-
-  ScriptedTransport stalledBus;
-  stalledBus.advanceOnYield = false;
-  Config stalledCfg = makeConfig(stalledBus);
-  stalledCfg.powerUpDelayMs = 1;
-  stalledCfg.i2cTimeoutMs = 1;
-
-  const Status st = device.begin(stalledCfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.lastErrorMs());
-}
-
-void test_begin_reads_serial_and_variant() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-  SensorVariant variant = SensorVariant::UNKNOWN;
-  TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
-                    static_cast<uint8_t>(variant));
-
-  Identity identity = {};
-  TEST_ASSERT_TRUE(device.getIdentity(identity).ok());
-  TEST_ASSERT_EQUAL_UINT64(0x100123456789ULL, identity.serialNumber);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
-                    static_cast<uint8_t>(identity.variant));
-}
-
-void test_begin_rejects_non_scd41_variant() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.lastOkMs());
-}
-
-void test_identity_queries_after_failed_begin_require_initialized_driver() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
-
-  SCD41Device device;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(device.begin(cfg).code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  uint64_t serial = 0;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::NOT_INITIALIZED),
-                    static_cast<uint8_t>(device.readSerialNumber(serial).code));
-
-  Identity identity = {};
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::NOT_INITIALIZED),
-                    static_cast<uint8_t>(device.getIdentity(identity).code));
-
-  SensorVariant variant = SensorVariant::UNKNOWN;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::NOT_INITIALIZED),
-                    static_cast<uint8_t>(device.readSensorVariant(variant).code));
-
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_probe_works_after_variant_mismatch_begin() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(device.begin(cfg).code));
-  TEST_ASSERT_TRUE(device.probe().ok());
-}
-
-void test_probe_does_not_update_health_or_command_spacing_state() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-
-  device._lastCommandValid = true;
-  device._lastCommandUs = 100000;
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  bus.yieldCount = 0;
-  const uint32_t probeStartUs = bus.nowUs;
-
-  TEST_ASSERT_TRUE(device.probe().ok());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_TRUE(device._lastCommandValid);
-  TEST_ASSERT_EQUAL_UINT32(100000u, device._lastCommandUs);
-  TEST_ASSERT_TRUE(bus.yieldCount > 0);
-  TEST_ASSERT_TRUE((bus.nowUs - probeStartUs) >= 3000u);
-
-  queueReadWord(bus, 0x0001);
-  bool ready = false;
-  TEST_ASSERT_TRUE(device.readDataReadyStatus(ready).ok());
-  TEST_ASSERT_TRUE(ready);
-}
-
-void test_probe_failure_does_not_update_health_or_command_spacing_state() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  (void)device._updateHealth(Status::Error(Err::I2C_TIMEOUT, "seed health"));
-  const DriverState stateBefore = device.state();
-  const uint32_t totalSuccessBefore = device.totalSuccess();
-  const uint32_t totalFailuresBefore = device.totalFailures();
-  const uint8_t consecutiveFailuresBefore = device.consecutiveFailures();
-  const uint32_t lastOkMsBefore = device.lastOkMs();
-  const uint32_t lastErrorMsBefore = device.lastErrorMs();
-  const Err lastErrorBefore = device.lastError().code;
-
-  device._lastCommandValid = true;
-  device._lastCommandUs = 200000;
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "probe timeout"));
-  bus.nowMs = 200;
-  bus.nowUs = 200000;
-
-  const Status st = device.probe();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(stateBefore), static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_EQUAL_UINT32(totalSuccessBefore, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(totalFailuresBefore, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT8(consecutiveFailuresBefore, device.consecutiveFailures());
-  TEST_ASSERT_EQUAL_UINT32(lastOkMsBefore, device.lastOkMs());
-  TEST_ASSERT_EQUAL_UINT32(lastErrorMsBefore, device.lastErrorMs());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(lastErrorBefore),
-                    static_cast<uint8_t>(device.lastError().code));
-  TEST_ASSERT_TRUE(device._lastCommandValid);
-  TEST_ASSERT_EQUAL_UINT32(200000u, device._lastCommandUs);
-}
-
-void test_begin_preserves_detailed_i2c_failures() {
-  const Err errors[] = {Err::I2C_TIMEOUT, Err::I2C_BUS, Err::I2C_NACK_ADDR,
-                        Err::I2C_NACK_DATA, Err::I2C_NACK_READ, Err::I2C_ERROR};
-  for (Err err : errors) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    queueReadStatus(bus, Status::Error(err, "begin read failure", 17));
-
-    SCD41Device device;
-    const Status st = device.begin(cfg);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(err), static_cast<uint8_t>(st.code));
-    TEST_ASSERT_EQUAL_INT32(17, st.detail);
-    TEST_ASSERT_FALSE(device.isInitialized());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
-                      static_cast<uint8_t>(device.state()));
-  }
-}
-
-void test_begin_preserves_serial_crc_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueReadMeasurementWithBadCrc(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  const Status st = device.begin(cfg);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.isInitialized());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::UNINIT),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_single_shot_measurement_flow() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 500, 20000, 32768);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  const Status st = device.requestMeasurement();
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  TEST_ASSERT_TRUE(drivePollUntilSettled(device, bus, bus.nowMs).ok());
-
-  TEST_ASSERT_TRUE(device.measurementReady());
-  Measurement sample;
-  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
-  TEST_ASSERT_EQUAL_UINT16(500u, sample.co2Ppm);
-  TEST_ASSERT_TRUE(sample.co2Valid);
-}
-
-void test_tick_no_due_returns_ok_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  const Status st = device.tick(0);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_tick_before_begin_returns_ok_noop() {
-  SCD41Device device;
-  const Status st = device.tick(0);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-}
-
-void test_poll_command_delay_gate_returns_in_progress_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  const size_t writesBeforeCommand = bus.writeCalls;
-  const size_t readsBeforeCommand = bus.readCalls;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBeforeCommand + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBeforeCommand, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  const size_t writesBeforeGate = bus.writeCalls;
-  const size_t readsBeforeGate = bus.readCalls;
-  const uint32_t yieldsBeforeGate = bus.yieldCount;
-  const Status pending = device.poll(bus.nowMs, 1);
-  TEST_ASSERT_TRUE(pending.inProgress());
-  TEST_ASSERT_EQUAL_STRING("Command delay pending", pending.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBeforeGate, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBeforeGate, bus.readCalls);
-  TEST_ASSERT_EQUAL_UINT32(yieldsBeforeGate, bus.yieldCount);
-
-  queueReadWord(bus, 0x0001);
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBeforeGate, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBeforeGate + 1u, bus.readCalls);
-}
-
-void test_poll_command_delay_gate_handles_u32_wraparound_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 0xFFFF0000UL;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 0xFFFFFF00UL;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  const size_t writesBeforeGate = bus.writeCalls;
-  const size_t readsBeforeGate = bus.readCalls;
-  bus.nowUs = 500;
-  Status pending = device.poll(bus.nowMs, 1);
-  TEST_ASSERT_TRUE(pending.inProgress());
-  TEST_ASSERT_EQUAL_STRING("Command delay pending", pending.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBeforeGate, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBeforeGate, bus.readCalls);
-
-  queueReadWord(bus, 0x0001);
-  bus.nowUs = 800;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBeforeGate, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBeforeGate + 1u, bus.readCalls);
-}
-
-void test_poll_uses_config_clock_for_millisecond_gates() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.startSingleShotMeasurement().inProgress());
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  bus.nowUs = 5200000;
-
-  const Status st = device.poll(5100, 1);
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_TRUE(device.lastPollStatus().inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  bus.nowMs = 5100;
-  const Status due = device.poll(0, 1);
-  TEST_ASSERT_TRUE(due.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-}
-
-void test_poll_measurement_budget_one_splits_ready_and_measurement_phases() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 701, 20000, 30000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5000;
-  bus.nowUs = 5000000;
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1u, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 2u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1u, bus.readCalls);
-  TEST_ASSERT_TRUE(device.pollBusy());
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).ok());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 2u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2u, bus.readCalls);
-  TEST_ASSERT_FALSE(device.pollBusy());
-  TEST_ASSERT_TRUE(device.measurementReady());
-}
-
-void test_poll_measurement_budget_two_respects_command_delay_gates() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 702, 20000, 30000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5000;
-  bus.nowUs = 5000000;
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  Status st = device.poll(bus.nowMs, 2);
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_STRING("Command delay pending", st.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  st = device.poll(bus.nowMs, 2);
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_STRING("Command delay pending", st.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1u, bus.readCalls);
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  st = device.poll(bus.nowMs, 2);
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_STRING("Command delay pending", st.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 2u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1u, bus.readCalls);
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 2).ok());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 2u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 2u, bus.readCalls);
-  TEST_ASSERT_TRUE(device.measurementReady());
-}
-
-void test_poll_read_settings_periodic_refresh_is_chunked() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 1013);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_TRUE(device.startReadSettings().inProgress());
-  TEST_ASSERT_FALSE(device.settingsReady());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).inProgress());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-
-  bus.nowUs += static_cast<uint32_t>(cfg.commandDelayMs) * 1000U;
-  TEST_ASSERT_TRUE(device.poll(bus.nowMs, 1).ok());
-  TEST_ASSERT_TRUE(device.settingsReady());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::READ_SETTINGS),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore + 1u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore + 1u, bus.readCalls);
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-  TEST_ASSERT_FALSE(snap.liveConfigValid);
-  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
-}
-
-void test_poll_self_test_read_failure_is_visible_and_clears_pending_command() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "self-test timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startSelfTest().inProgress());
-
-  bus.nowMs = 11000;
-  bus.nowUs = 11000000;
-  const Status st = device.poll(bus.nowMs, 1);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_TRUE(device.selfTestReady());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SELF_TEST),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-}
-
-void test_single_shot_async_timeout_is_visible() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  const Status st = drivePollUntilSettled(device, bus, bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_single_shot_async_crc_mismatch_is_visible() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurementWithBadCrc(bus, 500, 20000, 32768);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  const Status st = drivePollUntilSettled(device, bus, bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_FALSE(device.hasSample());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalProtocolFailures());
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalCrcFailures());
-  TEST_ASSERT_EQUAL_UINT8(1u, device.consecutiveProtocolFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(device.lastProtocolError().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  device.clearLastAsyncStatus();
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::NONE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-}
-
-void test_periodic_async_fetch_failure_preserves_cached_sample() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 700, 18000, 40000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-  Measurement sample = {};
-  TEST_ASSERT_TRUE(device.readMeasurement(sample).ok());
-  TEST_ASSERT_EQUAL_UINT16(700u, sample.co2Ppm);
-  TEST_ASSERT_FALSE(device.measurementReady());
-
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "periodic timeout"));
-
-  bus.nowMs = 5000;
-  bus.nowUs = 5000000;
-  const Status st = drivePollUntilSettled(device, bus, bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERIODIC_FETCH),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_TRUE(device.hasFreshSample());
-  TEST_ASSERT_FALSE(device.sampleStale());
-
-  Measurement last = {};
-  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
-  TEST_ASSERT_EQUAL_UINT16(700u, last.co2Ppm);
-  TEST_ASSERT_TRUE(last.co2Valid);
-}
-
-void test_direct_periodic_read_failure_clears_pending_request() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "periodic timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5000;
-  bus.nowUs = 5000000;
-  Measurement sample = {};
-  const Status st = device.readMeasurement(sample);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_FALSE(device.measurementReady());
-}
-
-void test_managed_measurement_no_data_maps_to_not_ready_without_health_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.transportCapabilities = TransportCapability::READ_HEADER_NACK;
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadStatus(bus, Status::Error(Err::I2C_NACK_READ, "not ready"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  const Status st = device.tick(bus.nowMs);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_TRUE(device.measurementPending());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_async_success_supersedes_previous_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurementWithBadCrc(bus, 500, 20000, 32768);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(drivePollUntilSettled(device, bus, bus.nowMs).code));
-
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 600, 21000, 33000);
-  bus.nowMs = 5300;
-  bus.nowUs = 5300000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  bus.nowMs = 10300;
-  bus.nowUs = 10300000;
-  const Status st = drivePollUntilSettled(device, bus, bus.nowMs);
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalCrcFailures());
-  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveProtocolFailures());
-  TEST_ASSERT_TRUE(device.measurementReady());
-}
-
-void test_single_shot_deadlines_are_scheduled_from_config_clock() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 1234;
-  bus.nowUs = 1234000;
-  const Status st = device.requestMeasurement();
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(6234u, device.commandReadyMs());
-  TEST_ASSERT_EQUAL_UINT32(6234u, device.measurementReadyMs());
-}
-
-void test_tick_uses_config_clock_when_tick_argument_diverges() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 500, 20000, 32768);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
-
-  device.tick(5100);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.readCalls);
-
-  bus.nowMs = 5100;
-  bus.nowUs = 5100000;
-  device.tick(0);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_TRUE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT32(3u, bus.readCalls);
-}
-
-void test_single_shot_deadline_wraparound_completes_at_wrapped_due_time() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 500, 20000, 32768);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 0xFFFFFF00u;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  TEST_ASSERT_EQUAL_UINT32(0x00001288u, device.commandReadyMs());
-  TEST_ASSERT_EQUAL_UINT32(0x00001288u, device.measurementReadyMs());
-
-  bus.nowMs = 0x00001287u;
-  bus.nowUs = 200000;
-  device.tick(0);
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::SINGLE_SHOT),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = 0x00001288u;
-  bus.nowUs = 300000;
-  device.tick(0);
-  TEST_ASSERT_TRUE(device.measurementReady());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-}
-
-void test_single_shot_rht_only_marks_co2_invalid() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 0, 25000, 30000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.setSingleShotMode(SingleShotMode::T_RH_ONLY).ok());
-
-  bus.nowMs = 50;
-  bus.nowUs = 50000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  bus.nowMs = 200;
-  bus.nowUs = 200000;
-  TEST_ASSERT_TRUE(drivePollUntilSettled(device, bus, bus.nowMs).ok());
-
-  Measurement sample;
-  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
-  TEST_ASSERT_FALSE(sample.co2Valid);
-  TEST_ASSERT_EQUAL_UINT16(0u, sample.co2Ppm);
-}
-
-void test_named_single_shot_helpers_schedule_correct_commands() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_TRUE(device.startSingleShotMeasurement().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_MEASURE_SINGLE_SHOT, lastWriteCommand(bus));
-  device._clearPendingCommand();
-  device._clearMeasurementRequest();
-  device._measurementReady = false;
-
-  TEST_ASSERT_TRUE(device.startSingleShotRhtOnlyMeasurement().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_MEASURE_SINGLE_SHOT_RHT_ONLY, lastWriteCommand(bus));
-}
-
-void test_direct_read_measurement_completes_pending_single_shot() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 0, 25000, 30000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startSingleShotRhtOnlyMeasurement().inProgress());
-
-  bus.nowMs = 200;
-  bus.nowUs = 200000;
-
-  Measurement sample;
-  TEST_ASSERT_TRUE(device.readMeasurement(sample).ok());
-  TEST_ASSERT_FALSE(sample.co2Valid);
-  TEST_ASSERT_EQUAL_UINT16(0u, sample.co2Ppm);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-}
-
-void test_periodic_start_request_and_stop() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 700, 18000, 40000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 0;
-  bus.nowUs = 0;
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::PERIODIC),
-                    static_cast<uint8_t>(device.operatingMode()));
-
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  bus.nowMs = 5000;
-  bus.nowUs = 5000000;
-  TEST_ASSERT_TRUE(drivePollUntilSettled(device, bus, bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERIODIC_FETCH),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_TRUE(device.measurementReady());
-
-  const Status st = device.stopPeriodicMeasurement();
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::STOP_PERIODIC),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = 5600;
-  bus.nowUs = 5600000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::STOP_PERIODIC),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
-                    static_cast<uint8_t>(device.operatingMode()));
-}
-
-void test_direct_read_measurement_reads_periodic_sample() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 700, 18000, 40000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-  Measurement sample;
-  TEST_ASSERT_TRUE(device.readMeasurement(sample).ok());
-  TEST_ASSERT_EQUAL_UINT16(700u, sample.co2Ppm);
-  TEST_ASSERT_TRUE(sample.co2Valid);
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_READ_MEASUREMENT, lastWriteCommand(bus));
-}
-
-void test_measurement_helpers_track_pending_and_preserve_last_sample() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 550, 21000, 33000);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  TEST_ASSERT_TRUE(device.measurementPending());
-  TEST_ASSERT_EQUAL_UINT32(5100u, device.measurementReadyMs());
-
-  bus.nowMs = 5200;
-  bus.nowUs = 5200000;
-  TEST_ASSERT_TRUE(drivePollUntilSettled(device, bus, bus.nowMs).ok());
-
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_TRUE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-  TEST_ASSERT_TRUE(snap.hasSample);
-  TEST_ASSERT_TRUE(snap.hasFreshSample);
-  TEST_ASSERT_FALSE(snap.sampleStale);
-  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), snap.sensorEpoch);
-  TEST_ASSERT_EQUAL_UINT32(device.sampleEpoch(), snap.sampleEpoch);
-
-  Measurement last = {};
-  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
-  TEST_ASSERT_TRUE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT16(550u, last.co2Ppm);
-  TEST_ASSERT_TRUE(last.co2Valid);
-
-  Measurement sample = {};
-  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
-  TEST_ASSERT_FALSE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT16(last.co2Ppm, sample.co2Ppm);
-  TEST_ASSERT_EQUAL(last.co2Valid, sample.co2Valid);
-
-  Measurement retained = {};
-  TEST_ASSERT_TRUE(device.getLastMeasurement(retained).ok());
-  TEST_ASSERT_EQUAL_UINT16(sample.co2Ppm, retained.co2Ppm);
-  TEST_ASSERT_EQUAL(sample.co2Valid, retained.co2Valid);
-}
-
-void test_zero_timestamp_sample_is_still_available() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 0;
-  RawSample injected = {601, 20000, 30000};
-  device._storeSample(injected, true);
-  TEST_ASSERT_EQUAL_UINT32(0u, device.sampleTimestampMs());
-  TEST_ASSERT_TRUE(device.hasSample());
-  TEST_ASSERT_TRUE(device.hasFreshSample());
-  TEST_ASSERT_FALSE(device.sampleStale());
-
-  Measurement last = {};
-  TEST_ASSERT_TRUE(device.getLastMeasurement(last).ok());
-  TEST_ASSERT_EQUAL_UINT16(601u, last.co2Ppm);
-
-  RawSample raw = {};
-  TEST_ASSERT_TRUE(device.getRawSample(raw).ok());
-  TEST_ASSERT_EQUAL_UINT16(601u, raw.rawCo2);
-
-  CompensatedSample comp = {};
-  TEST_ASSERT_TRUE(device.getCompensatedSample(comp).ok());
-  TEST_ASSERT_TRUE(comp.co2Valid);
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-  TEST_ASSERT_TRUE(snap.hasSample);
-  TEST_ASSERT_TRUE(snap.hasFreshSample);
-  TEST_ASSERT_FALSE(snap.sampleStale);
-}
-
-void test_reinit_marks_cached_sample_stale_across_epoch() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  cacheFreshSingleShotSample(device, bus, 610);
-  const uint32_t oldEpoch = device.sampleEpoch();
-
-  TEST_ASSERT_TRUE(device.startReinit().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_REINIT, lastWriteCommand(bus));
-  assertCachedSampleIsStale(device, oldEpoch);
-
-  bus.nowMs = 5300;
-  bus.nowUs = 5300000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::REINIT),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  assertCachedSampleIsStale(device, oldEpoch);
-}
-
-void test_factory_reset_marks_cached_sample_stale_across_epoch() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  cacheFreshSingleShotSample(device, bus, 611);
-  const uint32_t oldEpoch = device.sampleEpoch();
-
-  TEST_ASSERT_TRUE(device.startFactoryReset().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FACTORY_RESET, lastWriteCommand(bus));
-  assertCachedSampleIsStale(device, oldEpoch);
-
-  bus.nowMs = 6500;
-  bus.nowUs = 6500000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FACTORY_RESET),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  assertCachedSampleIsStale(device, oldEpoch);
-}
-
-void test_power_cycle_recover_marks_cached_sample_stale_across_epoch() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.powerCycle = scriptedPowerCycle;
-  cfg.controlUser = &bus;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  cacheFreshSingleShotSample(device, bus, 612);
-  const uint32_t oldEpoch = device.sampleEpoch();
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  const Status recoverSt = device.recover();
-  TEST_ASSERT_TRUE(recoverSt.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.powerCycleCalls);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  assertCachedSampleIsStale(device, oldEpoch);
-
-  bus.nowMs = 5300 + cfg.powerUpDelayMs;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-  assertCachedSampleIsStale(device, oldEpoch);
-}
-
-void test_periodic_read_after_epoch_change_produces_fresh_sample() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  cacheFreshSingleShotSample(device, bus, 613);
-  const uint32_t oldEpoch = device.sampleEpoch();
-
-  TEST_ASSERT_TRUE(device.startReinit().inProgress());
-  assertCachedSampleIsStale(device, oldEpoch);
-  bus.nowMs = 5300;
-  bus.nowUs = 5300000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-
-  bus.nowMs = 6000;
-  bus.nowUs = 6000000;
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  TEST_ASSERT_TRUE(device.requestMeasurement().inProgress());
-  queueReadWord(bus, 0x0001);
-  queueReadMeasurement(bus, 700, 18000, 40000);
-  bus.nowMs = 11000;
-  bus.nowUs = 11000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-
-  TEST_ASSERT_TRUE(device.hasSample());
-  TEST_ASSERT_TRUE(device.hasFreshSample());
-  TEST_ASSERT_FALSE(device.sampleStale());
-  TEST_ASSERT_TRUE(device.measurementReady());
-  TEST_ASSERT_EQUAL_UINT32(device.sensorEpoch(), device.sampleEpoch());
-  Measurement sample = {};
-  TEST_ASSERT_TRUE(device.getMeasurement(sample).ok());
-  TEST_ASSERT_EQUAL_UINT16(700u, sample.co2Ppm);
-}
-
-void test_offline_request_measurement_does_not_schedule_or_touch_bus() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-  device._driverState = DriverState::OFFLINE;
-
-  const size_t writeCalls = bus.writeCalls;
-  const size_t readCalls = bus.readCalls;
-  const Status st = device.requestMeasurement();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OFFLINE), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.measurementPending());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.measurementReadyMs());
-  TEST_ASSERT_EQUAL_UINT32(writeCalls, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readCalls, bus.readCalls);
-}
-
-void test_get_identity_uses_cached_serial_and_variant() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  bus.lastWriteLen = 0;
-  memset(bus.lastWrite, 0, sizeof(bus.lastWrite));
-
-  Identity identity = {};
-  TEST_ASSERT_TRUE(device.getIdentity(identity).ok());
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
-  TEST_ASSERT_EQUAL_UINT64(0x100123456789ULL, identity.serialNumber);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
-                    static_cast<uint8_t>(identity.variant));
-}
-
-void test_low_power_periodic_start_and_variant_guard() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startLowPowerPeriodicMeasurement().ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_START_LOW_POWER_PERIODIC_MEASUREMENT, lastWriteCommand(bus));
-
-  ScriptedTransport otherBus;
-  Config otherCfg = makeConfig(otherBus);
-  otherCfg.strictVariantCheck = false;
-  queueReadSerial(otherBus, 0x0001, 0x2222, 0x3333);
-
-  SCD41Device otherDevice;
-  TEST_ASSERT_TRUE(otherDevice.begin(otherCfg).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(otherDevice.startLowPowerPeriodicMeasurement().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(otherDevice.startSingleShotMeasurement().code));
-}
-
-void test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.strictVariantCheck = false;
-  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  SensorVariant variant = SensorVariant::UNKNOWN;
-  TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD40),
-                    static_cast<uint8_t>(variant));
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  assertUnsupportedNoI2c(device.setSingleShotMode(SingleShotMode::T_RH_ONLY), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.requestMeasurement(), bus, writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.startSingleShotMeasurement(), bus, writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.startSingleShotRhtOnlyMeasurement(), bus, writesBefore,
-                         readsBefore);
-  assertUnsupportedNoI2c(device.startLowPowerPeriodicMeasurement(), bus, writesBefore,
-                         readsBefore);
-  assertUnsupportedNoI2c(device.powerDown(), bus, writesBefore, readsBefore);
-
-  device._operatingMode = OperatingMode::POWER_DOWN;
-  assertUnsupportedNoI2c(device.wakeUp(), bus, writesBefore, readsBefore);
-  device._operatingMode = OperatingMode::IDLE;
-
-  uint16_t word = 0;
-  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationTargetPpm(400), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationTargetPpm(word), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationInitialPeriodHours(44), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationInitialPeriodHours(word), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationStandardPeriodHours(156), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.getAutomaticSelfCalibrationStandardPeriodHours(word), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.writeCommandWithData(cmd::CMD_SET_ASC_INITIAL_PERIOD, 44), bus,
-                         writesBefore, readsBefore);
-  assertUnsupportedNoI2c(device.readWordCommand(cmd::CMD_GET_ASC_STANDARD_PERIOD, word), bus,
-                         writesBefore, readsBefore);
-
-  uint8_t raw[cmd::WORD_RESPONSE_LEN] = {};
-  assertUnsupportedNoI2c(device.readCommandUnsafe(cmd::CMD_GET_ASC_INITIAL_PERIOD, raw,
-                                                  sizeof(raw)),
-                         bus, writesBefore, readsBefore);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_strict_disabled_blocks_other_known_non_scd41_variants() {
-  const uint16_t variantWords[] = {0x2001, 0x5001, 0xF001};
-  const SensorVariant expectedVariants[] = {
-      SensorVariant::SCD42,
-      SensorVariant::SCD43,
-      SensorVariant::UNKNOWN,
-  };
-
-  for (size_t i = 0; i < (sizeof(variantWords) / sizeof(variantWords[0])); ++i) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    cfg.strictVariantCheck = false;
-    queueReadSerial(bus, variantWords[i], 0x2222, 0x3333);
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    SensorVariant variant = SensorVariant::UNKNOWN;
-    TEST_ASSERT_TRUE(device.readSensorVariant(variant).ok());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(expectedVariants[i]),
-                      static_cast<uint8_t>(variant));
-    const size_t writesBefore = bus.writeCalls;
-    const size_t readsBefore = bus.readCalls;
-
-    assertUnsupportedNoI2c(device.startSingleShotMeasurement(), bus, writesBefore, readsBefore);
-    assertUnsupportedNoI2c(device.powerDown(), bus, writesBefore, readsBefore);
-    assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationTargetPpm(400), bus,
-                           writesBefore, readsBefore);
-    assertUnsupportedNoI2c(device.setAutomaticSelfCalibrationInitialPeriodHours(44), bus,
-                           writesBefore, readsBefore);
-  }
-}
-
-void test_get_settings_is_cache_only_and_does_not_touch_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-
-  TEST_ASSERT_TRUE(snap.initialized);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(snap.state));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_read_settings_on_non_scd41_skips_scd41_only_live_fields() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.strictVariantCheck = false;
-  queueReadSerial(bus, 0x0001, 0x2222, 0x3333);
-  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
-  queueReadWord(bus, 123);
-  queueReadWord(bus, 1013);
-  queueReadWord(bus, 1);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
-  TEST_ASSERT_FALSE(snap.liveConfigValid);
-  TEST_ASSERT_EQUAL_INT(4000, snap.temperatureOffsetC_x1000);
-  TEST_ASSERT_EQUAL_UINT16(123u, snap.sensorAltitudeM);
-  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
-  TEST_ASSERT_TRUE(snap.automaticSelfCalibrationEnabled);
-  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationTargetPpm);
-  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationInitialPeriodHours);
-  TEST_ASSERT_EQUAL_UINT16(0u, snap.automaticSelfCalibrationStandardPeriodHours);
-  TEST_ASSERT_EQUAL_UINT32(5u, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(5u, bus.readCalls);
-}
-
-void test_periodic_mode_allows_ambient_pressure_override() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 1013);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-  TEST_ASSERT_TRUE(device.setAmbientPressurePa(101300).ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_AMBIENT_PRESSURE, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_UINT16(1013u, lastWriteWord(bus));
-  TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
-
-  uint32_t pressurePa = 0;
-  TEST_ASSERT_TRUE(device.getAmbientPressurePa(pressurePa).ok());
-  TEST_ASSERT_EQUAL_UINT32(101300u, pressurePa);
-}
-
-void test_temperature_offset_roundtrip() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4000));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(4000).ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_TEMPERATURE_OFFSET, lastWriteCommand(bus));
-
-  int32_t offsetC_x1000 = 0;
-  TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
-  TEST_ASSERT_EQUAL_INT(4000, offsetC_x1000);
-}
-
-void test_set_temperature_offset_writes_vector_payloads() {
-  const int32_t offsets[] = {0, 4000, 20000};
-  const uint16_t expectedRaw[] = {0x0000, 0x05DA, 0x1D42};
-
-  for (size_t i = 0; i < (sizeof(offsets) / sizeof(offsets[0])); ++i) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    queueBeginSuccess(bus);
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(offsets[i]).ok());
-    TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_TEMPERATURE_OFFSET, lastWriteCommand(bus));
-    TEST_ASSERT_EQUAL_HEX16(expectedRaw[i], lastWriteWord(bus));
-    TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
+void test_attach_budget_waiting_and_expected_wake_nack() {
+  ModelTransport bus;
+  bus.mode = ModelMode::POWER_DOWN;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 100;
+  resetOperationTrace(bus);
+  const OperationId id =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, nowMs + 5000, 2);
+
+  PollResult poll = pollChecked(device, bus, nowMs, 1);
+  TEST_ASSERT_EQUAL_UINT8(0U, poll.callbacksUsed);
+  TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+  TEST_ASSERT_TRUE(poll.nextDueMs != 0);
+
+  if (!timeReached(nowMs, poll.nextDueMs)) {
+    nowMs = poll.nextDueMs - 1U;
+    poll = pollChecked(device, bus, nowMs, 1);
+    TEST_ASSERT_EQUAL_UINT8(0U, poll.callbacksUsed);
   }
 
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
+  driveUntilTerminal(device, bus, nowMs, 1);
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::VERIFIED),
+                    static_cast<uint8_t>(result.effect));
 
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
+  bool sawExpectedNackIntent = false;
+  for (size_t i = bus.operationCallBase; i < bus.calls; ++i) {
+    if (bus.trace[i].command == cmd::CMD_WAKE_UP) {
+      sawExpectedNackIntent =
+          bus.trace[i].intent == TransferIntent::EXPECTED_WRITE_NACK;
+    }
+  }
+  TEST_ASSERT_TRUE(sawExpectedNackIntent);
+  TEST_ASSERT_EQUAL_UINT32(1U, device.healthSnapshot().expectedNacks);
+}
 
+void test_poll_budget_zero_never_touches_transport() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  OperationId id = {};
+  TEST_ASSERT_TRUE(device.start(OperationRequest::make(OperationKind::ATTACH),
+                                OperationOptions{1, 10, 5000}, id)
+                       .inProgress());
+  const size_t before = bus.calls;
+  const PollResult poll = device.poll(5000, 0);
+  TEST_ASSERT_EQUAL_UINT8(0U, poll.callbacksUsed);
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+}
+
+void test_exactly_once_and_stale_result_do_not_modify_output() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  resetOperationTrace(bus);
+  const OperationId id =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000, 9);
+  driveUntilTerminal(device, bus, nowMs);
+
+  OperationResult sentinel;
+  std::memset(&sentinel, 0xA5, sizeof(sentinel));
+  uint8_t before[sizeof(sentinel)] = {};
+  std::memcpy(before, &sentinel, sizeof(sentinel));
+  const Status stale = device.takeResult(OperationId{id.requestId + 1U, id.generation}, sentinel);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::STALE_RESULT), static_cast<uint8_t>(stale.code));
+  TEST_ASSERT_EQUAL_MEMORY(before, &sentinel, sizeof(sentinel));
+
+  TEST_ASSERT_TRUE(device.takeResult(id, sentinel).ok());
+  TEST_ASSERT_TRUE(sentinel.id == id);
+  std::memcpy(before, &sentinel, sizeof(sentinel));
+  const Status secondTake = device.takeResult(id, sentinel);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::RESULT_NOT_READY),
+                    static_cast<uint8_t>(secondTake.code));
+  TEST_ASSERT_EQUAL_MEMORY(before, &sentinel, sizeof(sentinel));
+}
+
+void test_deadline_before_first_transfer_and_exact_boundary() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  OperationId id = {};
+  const size_t before = bus.calls;
+  const Status expired = device.start(OperationRequest::make(OperationKind::ATTACH),
+                                      OperationOptions{1, 100, 100}, id);
+  TEST_ASSERT_TRUE(expired.code == Err::TIMEOUT || expired.code == Err::INVALID_PARAM);
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+
+  const Status past = device.start(OperationRequest::make(OperationKind::ATTACH),
+                                   OperationOptions{2, 100, 99}, id);
+  TEST_ASSERT_TRUE(past.code == Err::TIMEOUT || past.code == Err::INVALID_PARAM);
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+}
+
+void test_deadline_after_callback_reports_timeout_without_retry() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1, TransferCode::OK, TransferDisposition::COMPLETE, true, false, 1000);
+  const OperationId id =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 100, 5);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::TIMED_OUT),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(result.status.code));
+  TEST_ASSERT_EQUAL_UINT32(1U, operationCalls(bus));
+}
+
+void test_deadline_and_waits_handle_u32_wrap() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 0xFFFFFFF0U;
+  resetOperationTrace(bus);
+  const OperationId id = startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs,
+                                  nowMs + 5000U, 7);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_TRUE(nowMs < 0xFFFFFFF0U);
+}
+
+void test_owner_clock_cannot_move_backwards() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  const OperationId id =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), 100,
+               5000, 8);
+  const size_t before = bus.calls;
+  const PollResult invalidPoll = device.poll(99, 1);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(device.setTemperatureOffsetC_x1000(-1).code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+                    static_cast<uint8_t>(invalidPoll.status.code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
+                    static_cast<uint8_t>(invalidPoll.state));
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(device.setTemperatureOffsetC_x1000(20001).code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+                    static_cast<uint8_t>(device.cancel(id, 99).code));
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+  TEST_ASSERT_TRUE(device.cancel(id, 100).ok());
 }
 
-void test_get_temperature_offset_decodes_datasheet_vectors() {
-  const uint16_t rawWords[] = {0x0000, 0x05DA, 0x0912, 0x1D42};
-  const int32_t expectedMdegC[] = {0, 4000, 6200, 20000};
+void test_cancel_before_io_is_exact_and_prevents_stale_completion() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  const OperationId cancelled =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), 10, 5000, 10);
+  const size_t before = bus.calls;
+  TEST_ASSERT_TRUE(device.cancel(cancelled, 11).ok());
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+  const OperationResult cancelledResult = takeTerminal(device, cancelled);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::CANCELLED),
+                    static_cast<uint8_t>(cancelledResult.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::NOT_ATTEMPTED),
+                    static_cast<uint8_t>(cancelledResult.effect));
 
-  for (size_t i = 0; i < (sizeof(rawWords) / sizeof(rawWords[0])); ++i) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    queueBeginSuccess(bus);
-    queueReadWord(bus, rawWords[i]);
+  uint32_t nowMs = 12;
+  resetOperationTrace(bus);
+  const OperationId next =
+      startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000, 11);
+  driveUntilTerminal(device, bus, nowMs);
+  TEST_ASSERT_TRUE(takeTerminal(device, next).id == next);
+  TEST_ASSERT_TRUE(next.generation != cancelled.generation);
+}
 
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    int32_t offsetC_x1000 = 0;
-    TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
-    TEST_ASSERT_TRUE(isWithinInt32(offsetC_x1000, expectedMdegC[i], 1));
+void test_cancel_after_effectful_write_requires_reconciliation_and_no_retry() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  resetOperationTrace(bus);
+  const OperationId id = startJob(device, OperationRequest::make(OperationKind::SINGLE_SHOT),
+                                  nowMs, nowMs + 6000, 20);
+  PollResult poll = pollChecked(device, bus, nowMs, 1);
+  while (operationCalls(bus) == 0) {
+    nowMs = poll.nextDueMs != 0 ? poll.nextDueMs : nowMs + 1U;
+    poll = pollChecked(device, bus, nowMs, 1);
+  }
+  TEST_ASSERT_EQUAL_UINT32(1U,
+                           countCommand(bus, bus.operationCallBase, cmd::CMD_MEASURE_SINGLE_SHOT));
+  TEST_ASSERT_TRUE(device.cancel(id, nowMs + 1U).ok());
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::CANCELLED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_TRUE(result.effect == EffectState::ATTEMPTED ||
+                   result.effect == EffectState::ACKNOWLEDGED ||
+                   result.effect == EffectState::UNKNOWN);
+  TEST_ASSERT_TRUE(result.reconciliationRequired);
+  TEST_ASSERT_TRUE(device.runtimeSnapshot().reconciliationRequired);
+
+  const size_t before = bus.calls;
+  OperationId rejected = {};
+  const Status blocked = device.start(OperationRequest::make(OperationKind::READ_IDENTITY),
+                                      OperationOptions{21, nowMs + 2U, nowMs + 100U}, rejected);
+  TEST_ASSERT_TRUE(blocked.code == Err::RECONCILIATION_REQUIRED || blocked.code == Err::BUSY);
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+}
+
+void test_attach_failure_at_each_transfer_is_terminal_and_bounded() {
+  ModelTransport baselineBus;
+  Device baselineDevice;
+  bindDevice(baselineDevice, baselineBus);
+  uint32_t baselineNow = 10;
+  attachDevice(baselineDevice, baselineBus, baselineNow);
+  const size_t attachTransfers = operationCalls(baselineBus);
+  TEST_ASSERT_TRUE(attachTransfers > 1U);
+  TEST_ASSERT_TRUE(attachTransfers <= Device::limits(OperationKind::ATTACH).maxCallbacks);
+
+  for (size_t failedStage = 1; failedStage <= attachTransfers; ++failedStage) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, failedStage, TransferCode::TIMEOUT,
+                      TransferDisposition::NO_EFFECT);
+    const OperationId id =
+        startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000,
+                 static_cast<uint32_t>(100 + failedStage));
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_TRUE(result.outcome == OperationOutcome::FAILED ||
+                     result.outcome == OperationOutcome::INDETERMINATE);
+    TEST_ASSERT_TRUE(operationCalls(bus) <= failedStage);
+    TEST_ASSERT_FALSE(device.isAttached());
   }
 }
 
-void test_temperature_offset_readback_roundtrip_vector_matrix() {
-  const int32_t offsets[] = {0, 4000, 5400, 6200, 20000};
-  const uint16_t rawWords[] = {0x0000, 0x05DA, 0x07E6, 0x0912, 0x1D42};
-
-  for (size_t i = 0; i < (sizeof(offsets) / sizeof(offsets[0])); ++i) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    queueBeginSuccess(bus);
-    queueReadWord(bus, rawWords[i]);
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    TEST_ASSERT_TRUE(device.setTemperatureOffsetC_x1000(offsets[i]).ok());
-    TEST_ASSERT_EQUAL_HEX16(rawWords[i], lastWriteWord(bus));
-
-    int32_t offsetC_x1000 = 0;
-    TEST_ASSERT_TRUE(device.getTemperatureOffsetC_x1000(offsetC_x1000).ok());
-    TEST_ASSERT_TRUE(isWithinInt32(offsetC_x1000, offsets[i], 1));
+void test_attach_converges_from_known_modes_and_hotplug() {
+  const ModelMode startingModes[] = {ModelMode::IDLE, ModelMode::PERIODIC,
+                                     ModelMode::LOW_POWER_PERIODIC, ModelMode::POWER_DOWN};
+  for (ModelMode mode : startingModes) {
+    ModelTransport bus;
+    bus.mode = mode;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs, static_cast<uint32_t>(200 + static_cast<uint8_t>(mode)));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(ModelMode::IDLE),
+                      static_cast<uint8_t>(bus.mode));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
+                      static_cast<uint8_t>(device.runtimeSnapshot().operatingMode));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(ModeEvidence::VERIFIED),
+                      static_cast<uint8_t>(device.runtimeSnapshot().modeEvidence));
   }
+
+  ModelTransport bus;
+  bus.present = false;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  const OperationResult absent =
+      completeJob(device, bus, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000, 210);
+  TEST_ASSERT_TRUE(absent.outcome != OperationOutcome::SUCCEEDED);
+  TEST_ASSERT_FALSE(device.isAttached());
+
+  bus.present = true;
+  attachDevice(device, bus, nowMs, 211);
+  TEST_ASSERT_TRUE(device.isAttached());
 }
 
-void test_temperature_offset_rejects_non_finite_values() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
+void test_hotplug_attach_starts_a_new_cache_epoch() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs, 220);
+  completeJob(device, bus, OperationRequest::setTemperatureOffsetMilliC(4000),
+              nowMs, 1000, 221);
+  TEST_ASSERT_TRUE(device.configurationSnapshot().dirtyMask != 0U);
+  const uint32_t previousEpoch = device.runtimeSnapshot().sensorEpoch;
 
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  bus.lastWriteLen = 0;
-
-  Status st = device.setTemperatureOffsetC(NAN);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
-
-  st = device.setTemperatureOffsetC(INFINITY);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
+  ++bus.serialWords[2];
+  attachDevice(device, bus, nowMs, 222);
+  TEST_ASSERT_TRUE(device.runtimeSnapshot().sensorEpoch > previousEpoch);
+  TEST_ASSERT_EQUAL_HEX16(0U, device.configurationSnapshot().verifiedMask);
+  TEST_ASSERT_EQUAL_HEX16(0U, device.configurationSnapshot().dirtyMask);
 }
 
-void test_low_level_command_helpers_work() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  const uint8_t rawResponse[3] = {0x12, 0x34, 0x56};
-  queueReadBytes(bus, rawResponse, sizeof(rawResponse));
-  queueReadWord(bus, 0x3456);
-  queueReadMeasurement(bus, 0x1001, 0x2002, 0x3003);
+void test_read_identity_response_fault_and_crc_are_atomic() {
+  const TransferCode failureCodes[] = {TransferCode::NACK, TransferCode::TIMEOUT,
+                                       TransferCode::BUS_ERROR, TransferCode::SHORT_TRANSFER,
+                                       TransferCode::FAILED};
+  for (TransferCode code : failureCodes) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs);
+    const Identity beforeIdentity = device.identity();
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, 2, code, TransferDisposition::NO_EFFECT, false, true);
+    const OperationId id = startJob(device, OperationRequest::make(OperationKind::READ_IDENTITY),
+                                    nowMs, nowMs + 100, 30);
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_TRUE(result.outcome != OperationOutcome::SUCCEEDED);
+    const Identity afterIdentity = device.identity();
+    TEST_ASSERT_EQUAL_MEMORY(&beforeIdentity, &afterIdentity, sizeof(beforeIdentity));
+  }
 
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_TRUE(device.writeCommand(0xABCD).ok());
-  TEST_ASSERT_EQUAL_HEX16(0xABCD, lastWriteCommand(bus));
-
-  TEST_ASSERT_TRUE(device.writeCommandWithData(0x2222, 0x1234).ok());
-  TEST_ASSERT_EQUAL_HEX16(0x2222, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_UINT16(0x1234, lastWriteWord(bus));
-  TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
-
-  uint8_t out[3] = {};
-  TEST_ASSERT_TRUE(device.readCommand(0x3333, out, sizeof(out)).ok());
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(rawResponse, out, sizeof(out));
-
-  uint16_t word = 0;
-  TEST_ASSERT_TRUE(device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word).ok());
-  TEST_ASSERT_EQUAL_UINT16(0x3456u, word);
-
-  uint16_t words[3] = {};
-  TEST_ASSERT_TRUE(device.readWordsCommand(cmd::CMD_GET_SERIAL_NUMBER, words, 3).ok());
-  TEST_ASSERT_EQUAL_UINT16(0x1001u, words[0]);
-  TEST_ASSERT_EQUAL_UINT16(0x2002u, words[1]);
-  TEST_ASSERT_EQUAL_UINT16(0x3003u, words[2]);
-}
-
-void test_low_level_raw_read_rejects_oversized_buffer_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  bus.lastWriteLen = 0;
-
-  uint8_t oversized[10] = {};
-  const Status st = device.readCommand(cmd::CMD_GET_SERIAL_NUMBER,
-                                       oversized, sizeof(oversized));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(0u, bus.lastWriteLen);
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-}
-
-void test_low_level_raw_write_rejects_known_wrong_command_shapes() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  const size_t writesBefore = bus.writeCalls;
-
-  Status st = device.writeCommand(cmd::CMD_SET_SENSOR_ALTITUDE);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-
-  st = device.writeCommand(cmd::CMD_GET_SENSOR_ALTITUDE);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-
-  st = device.writeCommandWithData(cmd::CMD_GET_SENSOR_ALTITUDE, 123);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-
-  TEST_ASSERT_TRUE(device.writeCommandWithData(cmd::CMD_SET_SENSOR_ALTITUDE, 123).ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_SENSOR_ALTITUDE, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_UINT16(123u, lastWriteWord(bus));
-}
-
-void test_unvalidated_raw_byte_read_rejects_word_command_without_unsafe_opt_in() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-
-  uint8_t raw[cmd::SERIAL_RESPONSE_LEN] = {};
-  const Status st = device.readCommand(cmd::CMD_GET_SERIAL_NUMBER, raw, sizeof(raw));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_unsafe_raw_byte_read_allows_bad_crc_without_protocol_telemetry() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  uint8_t raw[cmd::WORD_RESPONSE_LEN] = {0x12, 0x34, 0x00};
-  queueReadBytes(bus, raw, sizeof(raw));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint8_t out[cmd::WORD_RESPONSE_LEN] = {};
-  const Status st = device.readCommandUnsafe(cmd::CMD_GET_SENSOR_ALTITUDE, out, sizeof(out));
-  TEST_ASSERT_TRUE(st.ok());
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(raw, out, sizeof(raw));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalCrcFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalProtocolFailures());
-}
-
-void test_raw_word_read_catches_bad_crc_and_records_protocol_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  uint8_t raw[cmd::WORD_RESPONSE_LEN] = {0x12, 0x34, 0x00};
-  queueReadBytes(bus, raw, sizeof(raw));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0xFFFF;
-  const Status st = device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT16(0xFFFFu, word);
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalCrcFailures());
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalProtocolFailures());
-  TEST_ASSERT_EQUAL_UINT8(1u, device.consecutiveProtocolFailures());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_crc_checked_success_resets_consecutive_protocol_failures() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  uint8_t bad[cmd::WORD_RESPONSE_LEN] = {0x12, 0x34, 0x00};
-  queueReadBytes(bus, bad, sizeof(bad));
-  queueReadWord(bus, 0x3456);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  const Identity beforeIdentity = device.identity();
+  bus.badCrc = true;
+  bus.badCrcWord = 2;
+  const OperationResult crcResult =
+      completeJob(device, bus, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs, 100,
+                  31);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word).code));
-  TEST_ASSERT_EQUAL_UINT8(1u, device.consecutiveProtocolFailures());
-  TEST_ASSERT_TRUE(device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word).ok());
-  TEST_ASSERT_EQUAL_UINT16(0x3456u, word);
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalCrcFailures());
-  TEST_ASSERT_EQUAL_UINT8(0u, device.consecutiveProtocolFailures());
+                    static_cast<uint8_t>(crcResult.status.code));
+  const Identity afterIdentity = device.identity();
+  TEST_ASSERT_EQUAL_MEMORY(&beforeIdentity, &afterIdentity, sizeof(beforeIdentity));
 }
 
-void test_settings_snapshot_exposes_protocol_health() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  uint8_t bad[cmd::WORD_RESPONSE_LEN] = {0x12, 0x34, 0x00};
-  queueReadBytes(bus, bad, sizeof(bad));
+void test_periodic_fetch_phase_faults_preserve_last_sample() {
+  ModelTransport baselineBus;
+  Device baselineDevice;
+  bindDevice(baselineDevice, baselineBus);
+  uint32_t baselineNow = 10;
+  attachDevice(baselineDevice, baselineBus, baselineNow);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(completeJob(
+                        baselineDevice, baselineBus,
+                        OperationRequest::make(OperationKind::START_PERIODIC), baselineNow, 100,
+                        40)
+                                             .outcome));
+  completeJob(baselineDevice, baselineBus,
+              OperationRequest::make(OperationKind::FETCH_SAMPLE), baselineNow, 1000, 41);
+  const size_t fetchTransfers = operationCalls(baselineBus);
+  TEST_ASSERT_EQUAL_UINT32(4U, fetchTransfers);
 
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
+  for (size_t failedStage = 1; failedStage <= fetchTransfers; ++failedStage) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs);
+    completeJob(device, bus, OperationRequest::make(OperationKind::START_PERIODIC), nowMs, 100,
+                42);
+    const OperationResult first =
+        completeJob(device, bus, OperationRequest::make(OperationKind::FETCH_SAMPLE), nowMs, 1000,
+                    43);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                      static_cast<uint8_t>(first.outcome));
+    const FixedSample retained = first.value.sample;
 
-  uint16_t word = 0;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word).code));
-
-  SettingsSnapshot snap = {};
-  TEST_ASSERT_TRUE(device.getSettings(snap).ok());
-  TEST_ASSERT_EQUAL_UINT32(device.totalProtocolFailures(), snap.totalProtocolFailures);
-  TEST_ASSERT_EQUAL_UINT32(device.totalCrcFailures(), snap.totalCrcFailures);
-  TEST_ASSERT_EQUAL_UINT8(device.consecutiveProtocolFailures(),
-                          snap.consecutiveProtocolFailures);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
-                    static_cast<uint8_t>(snap.lastProtocolError.code));
-}
-
-void test_command_delay_guard_times_out_if_time_source_stalls() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.i2cTimeoutMs = 1;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  bus.advanceOnYield = false;
-  bus.yieldCount = 0;
-
-  bool ready = false;
-  const Status st = device.readDataReadyStatus(ready);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_TRUE(bus.yieldCount > 0u);
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-}
-
-void test_low_level_command_helpers_handle_expected_nack_and_no_data() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.transportCapabilities = TransportCapability::READ_HEADER_NACK;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  const Status nackSt = device.writeCommand(0xABCD, true);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(nackSt.code));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-
-  queueReadStatus(bus, Status::Error(Err::I2C_NACK_READ, "no data"));
-  uint8_t out[3] = {};
-  const Status st = device.readCommand(0x3333, out, sizeof(out), true);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_NACK_READ),
-                    static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_low_level_command_helper_failures_update_health() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  const Status st = device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(1u, device.totalFailures());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastError().code));
-}
-
-void test_offline_set_temperature_offset_returns_offline_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 1;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  Status st = device.setTemperatureOffsetC(1.5f);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OFFLINE), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_STRING("Driver is offline; call recover()", st.msg);
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_offline_start_read_settings_returns_offline_without_scheduling() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 1;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  const Status st = device.startReadSettings();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OFFLINE), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_FALSE(device.settingsReady());
-  TEST_ASSERT_FALSE(device.pollBusy());
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_offline_matching_periodic_start_returns_offline_not_idempotent_ok() {
-  {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    cfg.offlineThreshold = 1;
-    queueBeginSuccess(bus);
-    queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-    uint16_t raw = 0;
-    (void)device.readWordCommand(cmd::CMD_GET_DATA_READY_STATUS, raw);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                      static_cast<uint8_t>(device.state()));
-
-    const size_t writesBefore = bus.writeCalls;
-    const size_t readsBefore = bus.readCalls;
-    const Status st = device.startPeriodicMeasurement();
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OFFLINE), static_cast<uint8_t>(st.code));
-    TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-    TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-  }
-
-  {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    cfg.offlineThreshold = 1;
-    queueBeginSuccess(bus);
-    queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "timeout"));
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    TEST_ASSERT_TRUE(device.startLowPowerPeriodicMeasurement().ok());
-
-    uint16_t raw = 0;
-    (void)device.readWordCommand(cmd::CMD_GET_DATA_READY_STATUS, raw);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                      static_cast<uint8_t>(device.state()));
-
-    const size_t writesBefore = bus.writeCalls;
-    const size_t readsBefore = bus.readCalls;
-    const Status st = device.startLowPowerPeriodicMeasurement();
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::OFFLINE), static_cast<uint8_t>(st.code));
-    TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-    TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, failedStage, TransferCode::TIMEOUT,
+                      TransferDisposition::NO_EFFECT);
+    const OperationId id = startJob(device, OperationRequest::make(OperationKind::FETCH_SAMPLE),
+                                    nowMs, nowMs + 1000, 44);
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult failed = takeTerminal(device, id);
+    TEST_ASSERT_TRUE(failed.outcome != OperationOutcome::SUCCEEDED);
+    FixedSample cached = {};
+    TEST_ASSERT_TRUE(device.peekLatestSample(cached).ok());
+    TEST_ASSERT_EQUAL_MEMORY(&retained, &cached, sizeof(cached));
   }
 }
 
-void test_failed_recover_from_offline_keeps_latch_after_intermediate_success() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 3;
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.writeCount = cfg.offlineThreshold;
-  bus.writeIndex = 0;
-  for (uint8_t i = 0; i < cfg.offlineThreshold; ++i) {
-    bus.writeStatus[i] = Status::Error(Err::I2C_TIMEOUT, "forced write timeout");
-    TEST_ASSERT_FALSE(device.writeCommand(0xABCD).ok());
-  }
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
-  const Status st = device.recover();
-  TEST_ASSERT_FALSE(st.ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_TRUE(device.consecutiveFailures() >= cfg.offlineThreshold);
-}
-
-void test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(
-                        device.writeCommand(cmd::CMD_START_PERIODIC_MEASUREMENT).code));
-
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-  uint16_t raw = 0;
-  TEST_ASSERT_TRUE(device.readWordCommand(cmd::CMD_GET_DATA_READY_STATUS, raw).ok());
-  TEST_ASSERT_EQUAL_UINT16(0x0001u, raw);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::BUSY),
-                    static_cast<uint8_t>(
-                        device.readWordCommand(cmd::CMD_GET_TEMPERATURE_OFFSET, raw).code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(
-                        device.writeCommand(cmd::CMD_STOP_PERIODIC_MEASUREMENT).code));
-}
-
-void test_raw_helpers_reject_destructive_managed_commands_without_i2c() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  const size_t writesBefore = bus.writeCalls;
-  const size_t readsBefore = bus.readCalls;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(device.writeCommand(cmd::CMD_PERSIST_SETTINGS).code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(
-                        device.writeCommand(cmd::CMD_PERFORM_FACTORY_RESET).code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(
-                        device.writeCommandWithData(cmd::CMD_PERFORM_FORCED_RECALIBRATION,
-                                                    400).code));
-  TEST_ASSERT_EQUAL_UINT32(writesBefore, bus.writeCalls);
-  TEST_ASSERT_EQUAL_UINT32(readsBefore, bus.readCalls);
-}
-
-void test_read_settings_reads_live_device_configuration() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, SCD41Device::encodeTemperatureOffsetC_x1000(4250));
-  queueReadWord(bus, 321);
-  queueReadWord(bus, 1013);
-  queueReadWord(bus, 1);
-  queueReadWord(bus, 400);
-  queueReadWord(bus, 44);
-  queueReadWord(bus, 156);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  SettingsSnapshot snap;
-  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
-  TEST_ASSERT_TRUE(snap.liveConfigValid);
-  TEST_ASSERT_EQUAL_INT(
-      SCD41Device::decodeTemperatureOffsetC_x1000(
-          SCD41Device::encodeTemperatureOffsetC_x1000(4250)),
-      snap.temperatureOffsetC_x1000);
-  TEST_ASSERT_EQUAL_UINT16(321u, snap.sensorAltitudeM);
-  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
-  TEST_ASSERT_TRUE(snap.automaticSelfCalibrationEnabled);
-  TEST_ASSERT_EQUAL_UINT16(400u, snap.automaticSelfCalibrationTargetPpm);
-  TEST_ASSERT_EQUAL_UINT16(44u, snap.automaticSelfCalibrationInitialPeriodHours);
-  TEST_ASSERT_EQUAL_UINT16(156u, snap.automaticSelfCalibrationStandardPeriodHours);
-}
-
-void test_read_settings_reads_periodic_ambient_pressure_only() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 1013);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startPeriodicMeasurement().ok());
-
-  SettingsSnapshot snap;
-  TEST_ASSERT_TRUE(device.readSettings(snap).ok());
-  TEST_ASSERT_FALSE(snap.liveConfigValid);
-  TEST_ASSERT_EQUAL_UINT32(101300u, snap.ambientPressurePa);
-}
-
-void test_asc_period_validation() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 44);
-  queueReadWord(bus, 156);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.setAutomaticSelfCalibrationInitialPeriodHours(44).ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_ASC_INITIAL_PERIOD, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_UINT16(44u, lastWriteWord(bus));
-
-  TEST_ASSERT_TRUE(device.setAutomaticSelfCalibrationStandardPeriodHours(156).ok());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_SET_ASC_STANDARD_PERIOD, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_UINT16(156u, lastWriteWord(bus));
-
-  uint16_t hours = 0;
-  TEST_ASSERT_TRUE(device.getAutomaticSelfCalibrationInitialPeriodHours(hours).ok());
-  TEST_ASSERT_EQUAL_UINT16(44u, hours);
-
-  TEST_ASSERT_TRUE(device.getAutomaticSelfCalibrationStandardPeriodHours(hours).ok());
-  TEST_ASSERT_EQUAL_UINT16(156u, hours);
-
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(
-                        device.setAutomaticSelfCalibrationInitialPeriodHours(2).code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(
-                        device.setAutomaticSelfCalibrationStandardPeriodHours(0).code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(
-                        device.setAutomaticSelfCalibrationStandardPeriodHours(6).code));
-}
-
-void test_simulated_persist_reinit_factory_reset_schedule() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_TRUE(device.startPersistSettings().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERSIST_SETTINGS, lastWriteCommand(bus));
-  bus.nowMs = 1000;
-  bus.nowUs = 1000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::PERSIST_SETTINGS),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  TEST_ASSERT_TRUE(device.startReinit().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_REINIT, lastWriteCommand(bus));
-  bus.nowMs = 2000;
-  bus.nowUs = 2000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::REINIT),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-
-  TEST_ASSERT_TRUE(device.startFactoryReset().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FACTORY_RESET, lastWriteCommand(bus));
-  bus.nowMs = 4000;
-  bus.nowUs = 4000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FACTORY_RESET),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-}
-
-void test_wake_up_accepts_expected_nack() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  device._operatingMode = OperatingMode::POWER_DOWN;
-  bus.writeStatus[0] = Status::Error(Err::I2C_NACK_ADDR, "expected wake nack");
-  bus.writeCount = 1;
-
-  const Status st = device.wakeUp();
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::WAKE_UP),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::WAKE_UP),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
-                    static_cast<uint8_t>(device.operatingMode()));
-}
-
-void test_wake_up_accepts_precise_data_nack() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  device._operatingMode = OperatingMode::POWER_DOWN;
-  bus.writeStatus[0] = Status::Error(Err::I2C_NACK_DATA, "expected wake data nack");
-  bus.writeCount = 1;
-
-  const Status st = device.wakeUp();
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::WAKE_UP),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalSuccess());
-  TEST_ASSERT_EQUAL_UINT32(0u, device.totalFailures());
-}
-
-void test_wake_up_post_settle_verification_failure_is_async_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "post-wake timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  device._operatingMode = OperatingMode::POWER_DOWN;
-  bus.writeStatus[0] = Status::Error(Err::I2C_NACK_ADDR, "expected wake nack");
-  bus.writeCount = 1;
-
-  TEST_ASSERT_TRUE(device.wakeUp().inProgress());
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  const Status tickSt = device.tick(bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(tickSt.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::WAKE_UP),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::POWER_DOWN),
-                    static_cast<uint8_t>(device.operatingMode()));
-}
-
-void test_wake_up_generic_timeout_bus_and_read_nack_errors_fail_and_track_health() {
-  const Err errors[] = {Err::I2C_TIMEOUT, Err::I2C_BUS, Err::I2C_ERROR, Err::I2C_NACK_READ};
-  for (Err err : errors) {
-    ScriptedTransport bus;
-    Config cfg = makeConfig(bus);
-    queueBeginSuccess(bus);
-
-    SCD41Device device;
-    TEST_ASSERT_TRUE(device.begin(cfg).ok());
-    device._operatingMode = OperatingMode::POWER_DOWN;
-    bus.writeStatus[0] = Status::Error(err, "wake failure");
-    bus.writeCount = 1;
-
-    const Status st = device.wakeUp();
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(err), static_cast<uint8_t>(st.code));
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                      static_cast<uint8_t>(device.pendingCommand()));
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::POWER_DOWN),
-                      static_cast<uint8_t>(device.operatingMode()));
-    TEST_ASSERT_EQUAL_UINT32(1u, device.totalFailures());
-    TEST_ASSERT_EQUAL_UINT8(1u, device.consecutiveFailures());
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(err),
-                      static_cast<uint8_t>(device.lastError().code));
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
-                      static_cast<uint8_t>(device.state()));
-  }
-}
-
-void test_offline_wake_recovery_verifies_sensor_before_ready() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 1;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "offline timeout"));
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  device._operatingMode = OperatingMode::POWER_DOWN;
-  bus.writeStatus[0] = Status::Error(Err::I2C_NACK_ADDR, "expected wake nack");
-  bus.writeCount = 1;
-
-  const Status recoverSt = device.recover();
-  TEST_ASSERT_TRUE(recoverSt.inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::WAKE_UP),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::WAKE_UP),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_recover_power_cycle_completion_reports_async_success() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.powerCycle = scriptedPowerCycle;
-  cfg.controlUser = &bus;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "probe timeout"));
-  queueReadSerial(bus, 0x1001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  const Status recoverSt = device.recover();
-  TEST_ASSERT_TRUE(recoverSt.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.powerCycleCalls);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_TRUE(device.lastAsyncStatus().ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-}
-
-void test_recover_power_cycle_validation_failure_is_async_failure() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 1;
-  cfg.powerCycle = scriptedPowerCycle;
-  cfg.controlUser = &bus;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "offline timeout"));
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover probe timeout"));
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "post-cycle timeout"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  const Status recoverSt = device.recover();
-  TEST_ASSERT_TRUE(recoverSt.inProgress());
-  TEST_ASSERT_EQUAL_UINT32(1u, bus.powerCycleCalls);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  const Status tickSt = device.tick(bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(tickSt.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::NONE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_recover_rejects_non_scd41_serial_and_keeps_offline() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.offlineThreshold = 1;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "offline timeout"));
-  queueReadSerial(bus, 0x0001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  uint16_t word = 0;
-  (void)device.readWordCommand(cmd::CMD_GET_SENSOR_ALTITUDE, word);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-
-  const Status st = device.recover();
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-  TEST_ASSERT_TRUE(device.consecutiveFailures() >= cfg.offlineThreshold);
-}
-
-void test_recover_power_cycle_rejects_non_scd41_after_settle() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.powerCycle = scriptedPowerCycle;
-  cfg.controlUser = &bus;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_TIMEOUT, "recover read timeout"));
-  queueReadSerial(bus, 0x0001, 0x2345, 0x6789);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_TRUE(device.recover().inProgress());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(PendingCommand::POWER_CYCLE),
-                    static_cast<uint8_t>(device.pendingCommand()));
-
-  bus.nowMs = cfg.powerUpDelayMs + 10;
-  bus.nowUs = static_cast<uint32_t>(bus.nowMs) * 1000U;
-  const Status tickSt = device.tick(bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
-                    static_cast<uint8_t>(tickSt.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_CYCLE),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
-                    static_cast<uint8_t>(device.state()));
-}
-
-void test_self_test_completion_reads_pass_code() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, cmd::SELF_TEST_PASS);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startSelfTest().inProgress());
-
-  bus.nowMs = 11000;
-  bus.nowUs = 11000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SELF_TEST),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-
-  uint16_t raw = 0xFFFF;
-  TEST_ASSERT_TRUE(device.getSelfTestResult(raw).ok());
-  TEST_ASSERT_EQUAL_UINT16(cmd::SELF_TEST_PASS, raw);
-}
-
-void test_self_test_raw_accessor_preserves_failure_word() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0007);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startSelfTest().inProgress());
-
-  bus.nowMs = 11000;
-  bus.nowUs = 11000000;
-  const Status tickSt = device.tick(bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(tickSt.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::SELF_TEST),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-
-  uint16_t raw = 0;
-  TEST_ASSERT_TRUE(device.getSelfTestRawResult(raw).ok());
-  TEST_ASSERT_EQUAL_UINT16(0x0007u, raw);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(device.getSelfTestResult(raw).code));
-}
-
-void test_forced_recalibration_reads_signed_correction() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x800A);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-  const Status st = device.startForcedRecalibration(400);
-  TEST_ASSERT_TRUE(st.inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_PERFORM_FORCED_RECALIBRATION, lastWriteCommand(bus));
-  TEST_ASSERT_EQUAL_HEX8(SCD41Device::_crc8(&bus.lastWrite[2], 2), bus.lastWrite[4]);
-
-  bus.nowMs = 600;
-  bus.nowUs = 600000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FORCED_RECALIBRATION),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-
-  int16_t correction = 0;
-  TEST_ASSERT_TRUE(device.getForcedRecalibrationCorrectionPpm(correction).ok());
-  TEST_ASSERT_EQUAL_INT(10, correction);
-}
-
-void test_forced_recalibration_raw_accessor_preserves_failure_sentinel() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, cmd::FRC_FAILED);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  TEST_ASSERT_TRUE(device.startForcedRecalibration(400).inProgress());
-
-  bus.nowMs = 600;
-  bus.nowUs = 600000;
-  const Status tickSt = device.tick(bus.nowMs);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(tickSt.code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(device.lastAsyncStatus().code));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::FORCED_RECALIBRATION),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-
-  uint16_t raw = 0;
-  TEST_ASSERT_TRUE(device.getForcedRecalibrationRawResult(raw).ok());
-  TEST_ASSERT_EQUAL_UINT16(cmd::FRC_FAILED, raw);
-
-  int16_t correction = 0;
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
-                    static_cast<uint8_t>(
-                        device.getForcedRecalibrationCorrectionPpm(correction).code));
-}
-
-void test_end_clears_maintenance_readiness_flags() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, cmd::SELF_TEST_PASS);
-  queueReadWord(bus, static_cast<uint16_t>(cmd::FRC_OFFSET_BIAS + 5));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  TEST_ASSERT_TRUE(device.startSelfTest().inProgress());
-  bus.nowMs = 11000;
-  bus.nowUs = 11000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_TRUE(device.selfTestReady());
-
-  TEST_ASSERT_TRUE(device.startForcedRecalibration(400).inProgress());
-  bus.nowMs = 12000;
-  bus.nowUs = 12000000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_TRUE(device.forcedRecalibrationReady());
-
-  device.end();
-  TEST_ASSERT_FALSE(device.selfTestReady());
-  TEST_ASSERT_FALSE(device.forcedRecalibrationReady());
-}
-
-void test_data_ready_read_requires_init() {
-  SCD41Device device;
-  bool ready = false;
-  const Status st = device.readDataReadyStatus(ready);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::NOT_INITIALIZED), static_cast<uint8_t>(st.code));
-}
-
-void test_data_ready_positive_and_power_down_schedule() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  queueBeginSuccess(bus);
-  queueReadWord(bus, 0x0001);
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-
-  bool ready = false;
-  TEST_ASSERT_TRUE(device.readDataReadyStatus(ready).ok());
-  TEST_ASSERT_TRUE(ready);
-
-  TEST_ASSERT_TRUE(device.powerDown().inProgress());
-  TEST_ASSERT_EQUAL_HEX16(cmd::CMD_POWER_DOWN, lastWriteCommand(bus));
-  bus.nowMs = 10;
-  bus.nowUs = 10000;
-  TEST_ASSERT_TRUE(device.tick(bus.nowMs).ok());
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(AsyncOperation::POWER_DOWN),
-                    static_cast<uint8_t>(device.lastAsyncOperation()));
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::POWER_DOWN),
-                    static_cast<uint8_t>(device.operatingMode()));
-}
-
-void test_direct_no_data_read_updates_command_spacing() {
-  ScriptedTransport bus;
-  Config cfg = makeConfig(bus);
-  cfg.transportCapabilities = TransportCapability::READ_HEADER_NACK;
-  queueBeginSuccess(bus);
-  queueReadStatus(bus, Status::Error(Err::I2C_NACK_READ, "no data"));
-
-  SCD41Device device;
-  TEST_ASSERT_TRUE(device.begin(cfg).ok());
-  device._lastCommandValid = false;
-  device._operatingMode = OperatingMode::PERIODIC;
-  bus.nowMs = 100;
-  bus.nowUs = 100000;
-
-  RawSample raw = {};
-  const Status st = device._readMeasurementRaw(raw, true, true);
+void test_not_ready_fetch_is_terminal_no_data_without_hidden_retry() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  completeJob(device, bus, OperationRequest::make(OperationKind::START_PERIODIC), nowMs, 100,
+              45);
+  bus.dataReadyWord = 0;
+  const OperationResult result =
+      completeJob(device, bus, OperationRequest::make(OperationKind::FETCH_SAMPLE), nowMs, 1000,
+                  46);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::NO_DATA),
+                    static_cast<uint8_t>(result.outcome));
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
-                    static_cast<uint8_t>(st.code));
-  TEST_ASSERT_TRUE(device._lastCommandValid);
-  TEST_ASSERT_EQUAL_UINT32(101000u, device._lastCommandUs);
+                    static_cast<uint8_t>(result.status.code));
+  TEST_ASSERT_EQUAL_UINT32(2U, operationCalls(bus));
 }
 
-void test_example_transport_maps_zero_byte_read_to_i2c_error() {
-  uint8_t rx[3] = {};
-  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
-  TEST_ASSERT_EQUAL_UINT32(400000u, Wire.getClock());
-  TEST_ASSERT_EQUAL_UINT32(50u, Wire.getTimeOut());
+void test_fixed_point_sample_take_and_peek_contract() {
+  ModelTransport bus;
+  bus.measurementWords[0] = 777;
+  bus.measurementWords[1] = 32768;
+  bus.measurementWords[2] = 49152;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  completeJob(device, bus, OperationRequest::make(OperationKind::START_PERIODIC), nowMs, 100, 50);
+  const OperationResult result =
+      completeJob(device, bus, OperationRequest::make(OperationKind::FETCH_SAMPLE), nowMs, 1000,
+                  51);
+  TEST_ASSERT_EQUAL_UINT16(777U, result.value.sample.co2Ppm);
+  TEST_ASSERT_EQUAL_INT32(Device::convertTemperatureMilliC(32768),
+                          result.value.sample.temperatureMilliC);
+  TEST_ASSERT_EQUAL_UINT32(Device::convertHumidityMilliPercent(49152),
+                           result.value.sample.humidityMilliPercent);
+  TEST_ASSERT_TRUE((result.value.sample.flags & SAMPLE_CO2_VALID) != 0U);
+  TEST_ASSERT_TRUE((result.value.sample.flags & SAMPLE_TEMPERATURE_VALID) != 0U);
+  TEST_ASSERT_TRUE((result.value.sample.flags & SAMPLE_HUMIDITY_VALID) != 0U);
+  TEST_ASSERT_TRUE((result.value.sample.flags & SAMPLE_FRESH) != 0U);
 
-  Wire._setRequestFromResult(0);
-  const Status st = transport::wireWriteRead(cmd::I2C_ADDRESS, nullptr, 0, rx, sizeof(rx), 50,
-                                             &Wire);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_UINT32(0u, Wire._readCallCount());
+  FixedSample peekA = {};
+  FixedSample peekB = {};
+  TEST_ASSERT_TRUE(device.peekLatestSample(peekA).ok());
+  TEST_ASSERT_TRUE(device.peekLatestSample(peekB).ok());
+  TEST_ASSERT_EQUAL_MEMORY(&peekA, &peekB, sizeof(peekA));
 }
 
-void test_example_transport_reports_wire_begin_failure() {
-  Wire._setBeginResult(false);
+void test_configuration_read_marks_fields_only_after_complete_crc() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  const OperationResult baseline =
+      completeJob(device, bus, OperationRequest::make(OperationKind::READ_CONFIGURATION), nowMs,
+                  1000, 60);
+  TEST_ASSERT_EQUAL_UINT16(ALL_CONFIGURATION_FIELDS,
+                           baseline.value.configuration.verifiedMask);
+  const size_t transfers = operationCalls(bus);
+  TEST_ASSERT_EQUAL_UINT32(14U, transfers);
 
-  TEST_ASSERT_FALSE(transport::initWire(8, 9, 400000, 50));
-  TEST_ASSERT_EQUAL_UINT32(1u, Wire._beginCallCount());
-  TEST_ASSERT_EQUAL_UINT32(0u, Wire._clockSetCount());
-  TEST_ASSERT_EQUAL_UINT32(0u, Wire.getTimeOut());
-}
-
-void test_example_transport_maps_short_read_to_i2c_error() {
-  const uint8_t data[2] = {0x12, 0x34};
-  uint8_t rx[3] = {};
-  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
-
-  Wire._setReadData(data, sizeof(data));
-  Wire._setRequestFromResult(sizeof(data));
-  const Status st = transport::wireWriteRead(cmd::I2C_ADDRESS, nullptr, 0, rx, sizeof(rx), 50,
-                                             &Wire);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_INT32(static_cast<int32_t>(sizeof(data)), st.detail);
-  TEST_ASSERT_EQUAL_UINT32(sizeof(data), Wire._readCallCount());
-}
-
-void test_example_transport_applies_per_transaction_timeout() {
-  const uint8_t tx[2] = {0x12, 0x34};
-  uint8_t rx[3] = {};
-  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
-
-  TEST_ASSERT_TRUE(transport::wireWrite(cmd::I2C_ADDRESS, tx, sizeof(tx), 77, &Wire).ok());
-  TEST_ASSERT_EQUAL_UINT32(77u, Wire.getTimeOut());
-
-  Wire._setReadData(rx, sizeof(rx));
-  Wire._clearRequestFromOverride();
-  TEST_ASSERT_TRUE(transport::wireWriteRead(cmd::I2C_ADDRESS, nullptr, 0, rx, sizeof(rx),
-                                            88, &Wire).ok());
-  TEST_ASSERT_EQUAL_UINT32(88u, Wire.getTimeOut());
-}
-
-void test_example_transport_maps_write_failures() {
-  const uint8_t tx[2] = {0x12, 0x34};
-  struct Case {
-    uint8_t result;
-    Err expected;
-  };
-  const Case cases[] = {
-      {2, Err::I2C_NACK_ADDR},
-      {3, Err::I2C_NACK_DATA},
-      {4, Err::I2C_BUS},
-      {5, Err::I2C_TIMEOUT},
-  };
-
-  for (const Case& item : cases) {
-    TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
-    Wire._setEndTransmissionResult(item.result);
-    const Status st = transport::wireWrite(cmd::I2C_ADDRESS, tx, sizeof(tx), 50, &Wire);
-    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.expected), static_cast<uint8_t>(st.code));
-    TEST_ASSERT_EQUAL_INT32(item.result, st.detail);
-    Wire._clearEndTransmissionResult();
+  for (size_t failedStage = 1; failedStage <= transfers; ++failedStage) {
+    ModelTransport stageBus;
+    Device stageDevice;
+    bindDevice(stageDevice, stageBus);
+    uint32_t stageNow = 10;
+    attachDevice(stageDevice, stageBus, stageNow);
+    resetOperationTrace(stageBus);
+    faultRelativeCall(stageBus, failedStage, TransferCode::TIMEOUT,
+                      TransferDisposition::NO_EFFECT);
+    const OperationId id =
+        startJob(stageDevice, OperationRequest::make(OperationKind::READ_CONFIGURATION), stageNow,
+                 stageNow + 1000, static_cast<uint32_t>(1000 + failedStage));
+    driveUntilTerminal(stageDevice, stageBus, stageNow);
+    const OperationResult result = takeTerminal(stageDevice, id);
+    TEST_ASSERT_TRUE(result.outcome != OperationOutcome::SUCCEEDED);
+    const size_t completeFields = (failedStage - 1U) / 2U;
+    uint16_t expectedMask = 0;
+    const ConfigurationField orderedFields[] = {
+        ConfigurationField::TEMPERATURE_OFFSET, ConfigurationField::SENSOR_ALTITUDE,
+        ConfigurationField::AMBIENT_PRESSURE, ConfigurationField::ASC_ENABLED,
+        ConfigurationField::ASC_TARGET, ConfigurationField::ASC_INITIAL_PERIOD,
+        ConfigurationField::ASC_STANDARD_PERIOD};
+    for (size_t i = 0; i < completeFields; ++i) {
+      expectedMask |= configurationFieldMask(orderedFields[i]);
+    }
+    TEST_ASSERT_EQUAL_HEX16(expectedMask, result.completedFieldMask);
+    TEST_ASSERT_EQUAL_HEX16(expectedMask,
+                            stageDevice.configurationSnapshot().verifiedMask & expectedMask);
   }
 }
 
-void test_example_transport_maps_short_write_to_i2c_error() {
-  const uint8_t tx[2] = {0x12, 0x34};
-  TEST_ASSERT_TRUE(transport::initWire(8, 9, 400000, 50));
+void test_setting_write_readback_dirty_and_no_unchanged_rewrite() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  completeJob(device, bus, OperationRequest::make(OperationKind::READ_CONFIGURATION), nowMs, 1000,
+              70);
 
-  Wire._setWriteResult(1);
-  const Status st = transport::wireWrite(cmd::I2C_ADDRESS, tx, sizeof(tx), 50, &Wire);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR), static_cast<uint8_t>(st.code));
-  TEST_ASSERT_EQUAL_INT32(1, st.detail);
+  resetOperationTrace(bus);
+  const OperationResult changed = completeJob(device, bus,
+                                              OperationRequest::setTemperatureOffsetMilliC(4000),
+                                              nowMs, 1000, 71);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(changed.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::VERIFIED),
+                    static_cast<uint8_t>(changed.effect));
+  const ConfigurationSnapshot changedConfig = device.configurationSnapshot();
+  const uint16_t offsetMask = configurationFieldMask(ConfigurationField::TEMPERATURE_OFFSET);
+  TEST_ASSERT_EQUAL_INT32(4000, changedConfig.temperatureOffsetMilliC);
+  TEST_ASSERT_TRUE((changedConfig.verifiedMask & offsetMask) != 0U);
+  TEST_ASSERT_TRUE((changedConfig.dirtyMask & offsetMask) != 0U);
+
+  const OperationResult pressure = completeJob(
+      device, bus, OperationRequest::setAmbientPressurePa(100000), nowMs, 1000,
+      73);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(pressure.outcome));
+  TEST_ASSERT_EQUAL_UINT32(100000U, pressure.value.value);
+  TEST_ASSERT_EQUAL_UINT32(100000U,
+                           pressure.value.configuration.ambientPressurePa);
+
+  const size_t beforeSame = bus.calls;
+  const OperationResult same = completeJob(device, bus,
+                                           OperationRequest::setTemperatureOffsetMilliC(4000),
+                                           nowMs, 1000, 72);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(same.outcome));
+  TEST_ASSERT_EQUAL_UINT32(0U,
+                           countCommand(bus, beforeSame, cmd::CMD_SET_TEMPERATURE_OFFSET));
 }
 
-void runConfigStatusLifecycleTests() {
-  RUN_TEST(test_status_helpers);
-  RUN_TEST(test_config_defaults);
-  RUN_TEST(test_begin_requires_now_ms_before_i2c);
-  RUN_TEST(test_begin_requires_now_us_before_i2c);
-  RUN_TEST(test_cooperative_yield_is_optional_when_clock_advances);
-  RUN_TEST(test_begin_with_arduino_style_timing_hooks_succeeds);
-  RUN_TEST(test_time_elapsed_handles_u32_wraparound);
-  RUN_TEST(test_crc_and_conversion_helpers);
-  RUN_TEST(test_temperature_offset_static_vectors_match_datasheet_scale);
-  RUN_TEST(test_begin_waits_power_up_delay_and_does_not_track_startup_io);
-  RUN_TEST(test_update_health_ignores_in_progress);
-  RUN_TEST(test_begin_wait_guard_times_out_if_time_source_stalls);
-  RUN_TEST(test_failed_begin_after_success_clears_health_snapshot);
-  RUN_TEST(test_begin_reads_serial_and_variant);
-  RUN_TEST(test_begin_rejects_non_scd41_variant);
-  RUN_TEST(test_identity_queries_after_failed_begin_require_initialized_driver);
-  RUN_TEST(test_probe_works_after_variant_mismatch_begin);
-  RUN_TEST(test_probe_does_not_update_health_or_command_spacing_state);
-  RUN_TEST(test_probe_failure_does_not_update_health_or_command_spacing_state);
-  RUN_TEST(test_begin_preserves_detailed_i2c_failures);
-  RUN_TEST(test_begin_preserves_serial_crc_failure);
+void test_ambiguous_setting_write_is_not_retried_and_cache_is_invalid() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  completeJob(device, bus, OperationRequest::make(OperationKind::READ_CONFIGURATION), nowMs, 1000,
+              80);
+
+  resetOperationTrace(bus);
+  // A verified setting change first reads the current value (callbacks 1-2).
+  // Callback 3 is the first effectful write and is the ambiguity boundary.
+  faultRelativeCall(bus, 3, TransferCode::TIMEOUT, TransferDisposition::INDETERMINATE, true);
+  const OperationId id = startJob(device, OperationRequest::setTemperatureOffsetMilliC(5000),
+                                  nowMs, nowMs + 1000, 81);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::INDETERMINATE),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::UNKNOWN),
+                    static_cast<uint8_t>(result.effect));
+  TEST_ASSERT_TRUE(result.reconciliationRequired);
+  TEST_ASSERT_EQUAL_UINT32(1U,
+                           countCommand(bus, bus.operationCallBase,
+                                        cmd::CMD_SET_TEMPERATURE_OFFSET));
+  const uint16_t mask = configurationFieldMask(ConfigurationField::TEMPERATURE_OFFSET);
+  TEST_ASSERT_EQUAL_HEX16(0U, device.configurationSnapshot().verifiedMask & mask);
+  TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                             device.configurationSnapshot().dirtyMask & mask);
+
+  attachDevice(device, bus, nowMs, 82);
+  const size_t beforePersist = bus.calls;
+  OperationId persistId = {};
+  assertNoIoStatus(
+      device.start(OperationRequest::persistSettings(),
+                   OperationOptions{83, nowMs, nowMs + 2000}, persistId),
+      bus, beforePersist, Err::RECONCILIATION_REQUIRED);
+
+  completeJob(device, bus,
+              OperationRequest::make(OperationKind::READ_TEMPERATURE_OFFSET),
+              nowMs, 100, 84);
+  TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                             device.configurationSnapshot().verifiedMask & mask);
+  resetOperationTrace(bus);
+  const OperationResult persisted = completeJob(
+      device, bus, OperationRequest::persistSettings(), nowMs, 2000, 85);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(persisted.outcome));
+  TEST_ASSERT_EQUAL_UINT32(
+      1U, countCommand(bus, bus.operationCallBase, cmd::CMD_PERSIST_SETTINGS));
 }
 
-void runMeasurementAndTimingTests() {
-  RUN_TEST(test_single_shot_measurement_flow);
-  RUN_TEST(test_tick_no_due_returns_ok_without_i2c);
-  RUN_TEST(test_tick_before_begin_returns_ok_noop);
-  RUN_TEST(test_poll_command_delay_gate_returns_in_progress_without_i2c);
-  RUN_TEST(test_poll_command_delay_gate_handles_u32_wraparound_without_i2c);
-  RUN_TEST(test_poll_uses_config_clock_for_millisecond_gates);
-  RUN_TEST(test_poll_measurement_budget_one_splits_ready_and_measurement_phases);
-  RUN_TEST(test_poll_measurement_budget_two_respects_command_delay_gates);
-  RUN_TEST(test_poll_read_settings_periodic_refresh_is_chunked);
-  RUN_TEST(test_poll_self_test_read_failure_is_visible_and_clears_pending_command);
-  RUN_TEST(test_single_shot_async_timeout_is_visible);
-  RUN_TEST(test_single_shot_async_crc_mismatch_is_visible);
-  RUN_TEST(test_periodic_async_fetch_failure_preserves_cached_sample);
-  RUN_TEST(test_direct_periodic_read_failure_clears_pending_request);
-  RUN_TEST(test_managed_measurement_no_data_maps_to_not_ready_without_health_failure);
-  RUN_TEST(test_async_success_supersedes_previous_failure);
-  RUN_TEST(test_single_shot_deadlines_are_scheduled_from_config_clock);
-  RUN_TEST(test_tick_uses_config_clock_when_tick_argument_diverges);
-  RUN_TEST(test_single_shot_deadline_wraparound_completes_at_wrapped_due_time);
-  RUN_TEST(test_single_shot_rht_only_marks_co2_invalid);
-  RUN_TEST(test_named_single_shot_helpers_schedule_correct_commands);
-  RUN_TEST(test_direct_read_measurement_completes_pending_single_shot);
-  RUN_TEST(test_periodic_start_request_and_stop);
-  RUN_TEST(test_direct_read_measurement_reads_periodic_sample);
-  RUN_TEST(test_measurement_helpers_track_pending_and_preserve_last_sample);
-  RUN_TEST(test_zero_timestamp_sample_is_still_available);
-  RUN_TEST(test_reinit_marks_cached_sample_stale_across_epoch);
-  RUN_TEST(test_factory_reset_marks_cached_sample_stale_across_epoch);
-  RUN_TEST(test_power_cycle_recover_marks_cached_sample_stale_across_epoch);
-  RUN_TEST(test_periodic_read_after_epoch_change_produces_fresh_sample);
-  RUN_TEST(test_offline_request_measurement_does_not_schedule_or_touch_bus);
+void test_setting_verification_fault_does_not_reclassify_the_mutation() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 4, TransferCode::TIMEOUT,
+                    TransferDisposition::INDETERMINATE, true);
+  const OperationId id =
+      startJob(device, OperationRequest::setTemperatureOffsetMilliC(5000),
+               nowMs, nowMs + 1000, 82);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::ACKNOWLEDGED),
+                    static_cast<uint8_t>(result.effect));
+  TEST_ASSERT_FALSE(result.reconciliationRequired);
+  TEST_ASSERT_TRUE(device.isAttached());
+  TEST_ASSERT_EQUAL_UINT32(
+      1U, countCommand(bus, bus.operationCallBase,
+                       cmd::CMD_SET_TEMPERATURE_OFFSET));
+  const uint16_t mask =
+      configurationFieldMask(ConfigurationField::TEMPERATURE_OFFSET);
+  TEST_ASSERT_EQUAL_HEX16(0U,
+                          device.configurationSnapshot().verifiedMask & mask);
+  TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                             device.configurationSnapshot().dirtyMask & mask);
+
+  resetOperationTrace(bus);
+  const OperationResult retry = completeJob(
+      device, bus, OperationRequest::setTemperatureOffsetMilliC(5000), nowMs,
+      1000, 83);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(retry.outcome));
+  TEST_ASSERT_EQUAL_UINT32(
+      0U, countCommand(bus, bus.operationCallBase,
+                       cmd::CMD_SET_TEMPERATURE_OFFSET));
+  TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                             device.configurationSnapshot().dirtyMask & mask);
+
+  resetOperationTrace(bus);
+  const OperationResult persisted = completeJob(
+      device, bus, OperationRequest::persistSettings(), nowMs, 2000, 84);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(persisted.outcome));
+  TEST_ASSERT_EQUAL_UINT32(
+      1U, countCommand(bus, bus.operationCallBase, cmd::CMD_PERSIST_SETTINGS));
+  TEST_ASSERT_EQUAL_HEX16(0U, device.configurationSnapshot().dirtyMask & mask);
 }
 
-void runVariantAndSettingsTests() {
-  RUN_TEST(test_get_identity_uses_cached_serial_and_variant);
-  RUN_TEST(test_low_power_periodic_start_and_variant_guard);
-  RUN_TEST(test_non_scd41_strict_disabled_gates_scd41_only_apis_without_i2c);
-  RUN_TEST(test_strict_disabled_blocks_other_known_non_scd41_variants);
-  RUN_TEST(test_get_settings_is_cache_only_and_does_not_touch_i2c);
-  RUN_TEST(test_read_settings_on_non_scd41_skips_scd41_only_live_fields);
-  RUN_TEST(test_periodic_mode_allows_ambient_pressure_override);
+void test_setting_write_crossing_deadline_retains_dirty_evidence() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  resetOperationTrace(bus);
+  const uint32_t deadlineMs = nowMs + 100U;
+  faultRelativeCall(bus, 3, TransferCode::OK, TransferDisposition::COMPLETE,
+                    true, false, deadlineMs);
+  const OperationId id = startJob(
+      device, OperationRequest::setTemperatureOffsetMilliC(5000), nowMs,
+      deadlineMs, 85);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult result = takeTerminal(device, id);
+  const uint16_t mask =
+      configurationFieldMask(ConfigurationField::TEMPERATURE_OFFSET);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::TIMED_OUT),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::ACKNOWLEDGED),
+                    static_cast<uint8_t>(result.effect));
+  TEST_ASSERT_TRUE(result.reconciliationRequired);
+  TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                             device.configurationSnapshot().dirtyMask & mask);
+  TEST_ASSERT_EQUAL_HEX16(0U,
+                          device.configurationSnapshot().verifiedMask & mask);
 }
 
-void runCompensationAndSettingsTests() {
-  RUN_TEST(test_temperature_offset_roundtrip);
-  RUN_TEST(test_set_temperature_offset_writes_vector_payloads);
-  RUN_TEST(test_get_temperature_offset_decodes_datasheet_vectors);
-  RUN_TEST(test_temperature_offset_readback_roundtrip_vector_matrix);
-  RUN_TEST(test_temperature_offset_rejects_non_finite_values);
-  RUN_TEST(test_read_settings_reads_live_device_configuration);
-  RUN_TEST(test_read_settings_reads_periodic_ambient_pressure_only);
-  RUN_TEST(test_asc_period_validation);
+void test_periodic_admission_rejects_idle_only_work_without_io() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+  completeJob(device, bus, OperationRequest::make(OperationKind::START_PERIODIC), nowMs, 100, 90);
+
+  const OperationRequest rejected[] = {
+      OperationRequest::make(OperationKind::SINGLE_SHOT),
+      OperationRequest::setTemperatureOffsetMilliC(3000),
+      OperationRequest::make(OperationKind::READ_CONFIGURATION),
+      OperationRequest::make(OperationKind::SELF_TEST),
+      OperationRequest::factoryReset()};
+  for (const OperationRequest& request : rejected) {
+    const size_t before = bus.calls;
+    OperationId id = {};
+    const Status status =
+        device.start(request, OperationOptions{91, nowMs, nowMs + 20000}, id);
+    TEST_ASSERT_TRUE(status.code == Err::BUSY || status.code == Err::UNSUPPORTED);
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+  }
+
+  OperationId pressureId = {};
+  TEST_ASSERT_TRUE(device.start(OperationRequest::setAmbientPressurePa(100000),
+                                OperationOptions{92, nowMs, nowMs + 1000}, pressureId)
+                       .inProgress());
 }
 
-void runRawProtocolHealthTests() {
-  RUN_TEST(test_low_level_command_helpers_work);
-  RUN_TEST(test_low_level_raw_read_rejects_oversized_buffer_without_i2c);
-  RUN_TEST(test_low_level_raw_write_rejects_known_wrong_command_shapes);
-  RUN_TEST(test_unvalidated_raw_byte_read_rejects_word_command_without_unsafe_opt_in);
-  RUN_TEST(test_unsafe_raw_byte_read_allows_bad_crc_without_protocol_telemetry);
-  RUN_TEST(test_raw_word_read_catches_bad_crc_and_records_protocol_failure);
-  RUN_TEST(test_crc_checked_success_resets_consecutive_protocol_failures);
-  RUN_TEST(test_settings_snapshot_exposes_protocol_health);
-  RUN_TEST(test_command_delay_guard_times_out_if_time_source_stalls);
-  RUN_TEST(test_low_level_command_helpers_handle_expected_nack_and_no_data);
-  RUN_TEST(test_low_level_command_helper_failures_update_health);
-  RUN_TEST(test_offline_set_temperature_offset_returns_offline_without_i2c);
-  RUN_TEST(test_offline_start_read_settings_returns_offline_without_scheduling);
-  RUN_TEST(test_offline_matching_periodic_start_returns_offline_not_idempotent_ok);
-  RUN_TEST(test_failed_recover_from_offline_keeps_latch_after_intermediate_success);
-  RUN_TEST(test_low_level_command_helpers_reject_managed_and_periodic_restricted_commands);
-  RUN_TEST(test_raw_helpers_reject_destructive_managed_commands_without_i2c);
+void test_maintenance_confirmation_limits_and_no_retry() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  OperationId id = {};
+  const size_t before = bus.calls;
+  assertNoIoStatus(device.start(OperationRequest::make(OperationKind::PERSIST_SETTINGS),
+                                OperationOptions{100, nowMs, nowMs + 2000}, id),
+                   bus, before, Err::CONFIRMATION_REQUIRED);
+  assertNoIoStatus(device.start(OperationRequest::make(OperationKind::FACTORY_RESET),
+                                OperationOptions{101, nowMs, nowMs + 5000}, id),
+                   bus, before, Err::CONFIRMATION_REQUIRED);
+
+  const OperationResult noChangePersist =
+      completeJob(device, bus, OperationRequest::persistSettings(), nowMs, 2000, 101);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(noChangePersist.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::VERIFIED),
+                    static_cast<uint8_t>(noChangePersist.effect));
+  TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.persistWrites);
+
+  completeJob(device, bus, OperationRequest::setTemperatureOffsetMilliC(4000), nowMs, 1000, 102);
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1, TransferCode::TIMEOUT, TransferDisposition::INDETERMINATE, true);
+  id = startJob(device, OperationRequest::persistSettings(), nowMs, nowMs + 2000, 103);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult ambiguous = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::INDETERMINATE),
+                    static_cast<uint8_t>(ambiguous.outcome));
+  TEST_ASSERT_EQUAL_UINT32(1U,
+                           countCommand(bus, bus.operationCallBase, cmd::CMD_PERSIST_SETTINGS));
+  TEST_ASSERT_TRUE(device.configurationSnapshot().persistenceIndeterminate);
+  TEST_ASSERT_TRUE(device.configurationSnapshot().dirtyMask != 0U);
+
+  attachDevice(device, bus, nowMs, 104);
+  TEST_ASSERT_TRUE(device.configurationSnapshot().persistenceIndeterminate);
+  const OperationResult blockedRetry =
+      completeJob(device, bus, OperationRequest::persistSettings(), nowMs, 2000,
+                  105);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::INDETERMINATE),
+                    static_cast<uint8_t>(blockedRetry.outcome));
+  TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
 }
 
-void runMaintenanceTests() {
-  RUN_TEST(test_simulated_persist_reinit_factory_reset_schedule);
-  RUN_TEST(test_wake_up_accepts_expected_nack);
-  RUN_TEST(test_wake_up_accepts_precise_data_nack);
-  RUN_TEST(test_wake_up_post_settle_verification_failure_is_async_failure);
-  RUN_TEST(test_wake_up_generic_timeout_bus_and_read_nack_errors_fail_and_track_health);
-  RUN_TEST(test_offline_wake_recovery_verifies_sensor_before_ready);
-  RUN_TEST(test_recover_power_cycle_completion_reports_async_success);
-  RUN_TEST(test_recover_power_cycle_validation_failure_is_async_failure);
-  RUN_TEST(test_recover_rejects_non_scd41_serial_and_keeps_offline);
-  RUN_TEST(test_recover_power_cycle_rejects_non_scd41_after_settle);
-  RUN_TEST(test_self_test_completion_reads_pass_code);
-  RUN_TEST(test_self_test_raw_accessor_preserves_failure_word);
-  RUN_TEST(test_forced_recalibration_reads_signed_correction);
-  RUN_TEST(test_forced_recalibration_raw_accessor_preserves_failure_sentinel);
-  RUN_TEST(test_end_clears_maintenance_readiness_flags);
-  RUN_TEST(test_direct_no_data_read_updates_command_spacing);
-  RUN_TEST(test_data_ready_read_requires_init);
-  RUN_TEST(test_data_ready_positive_and_power_down_schedule);
+void test_transport_contract_failures_are_observable_and_passive() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 100;
+  attachDevice(device, bus, nowMs);
+
+  const HealthSnapshot beforeShort = device.healthSnapshot();
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1, TransferCode::OK,
+                    TransferDisposition::INDETERMINATE);
+  OperationId id = startJob(
+      device, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+      nowMs + 100, 120);
+  driveUntilTerminal(device, bus, nowMs);
+  OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_SHORT_TRANSFER),
+                    static_cast<uint8_t>(result.status.code));
+  TEST_ASSERT_EQUAL_UINT32(beforeShort.totalTransferFailures + 1U,
+                           device.healthSnapshot().totalTransferFailures);
+  TEST_ASSERT_EQUAL_UINT32(beforeShort.totalTransferSuccess,
+                           device.healthSnapshot().totalTransferSuccess);
+
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1, TransferCode::OK, TransferDisposition::COMPLETE,
+                    false, false, nowMs - 1U);
+  id = startJob(device, OperationRequest::make(OperationKind::READ_IDENTITY),
+                nowMs, nowMs + 100, 121);
+  driveUntilTerminal(device, bus, nowMs);
+  result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_ERROR),
+                    static_cast<uint8_t>(result.status.code));
 }
 
-void runExampleTransportTests() {
-  RUN_TEST(test_example_transport_reports_wire_begin_failure);
-  RUN_TEST(test_example_transport_maps_zero_byte_read_to_i2c_error);
-  RUN_TEST(test_example_transport_maps_short_read_to_i2c_error);
-  RUN_TEST(test_example_transport_applies_per_transaction_timeout);
-  RUN_TEST(test_example_transport_maps_write_failures);
-  RUN_TEST(test_example_transport_maps_short_write_to_i2c_error);
+void test_diagnostic_commands_are_explicit_and_invalidate_managed_state() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  OperationId id = {};
+  const size_t before = bus.calls;
+  assertNoIoStatus(
+      device.start(OperationRequest::diagnosticReadWords(
+                       cmd::CMD_GET_SERIAL_NUMBER, 3),
+                   OperationOptions{122, nowMs, nowMs + 100}, id),
+      bus, before, Err::UNSUPPORTED);
+
+  OperationRequest oversized =
+      OperationRequest::make(OperationKind::DIAGNOSTIC_WRITE_WORD);
+  oversized.command = 0x1234U;
+  oversized.value = 65536U;
+  assertNoIoStatus(device.start(oversized,
+                                OperationOptions{123, nowMs, nowMs + 100}, id),
+                   bus, before, Err::INVALID_PARAM);
+
+  const OperationResult diagnostic = completeJob(
+      device, bus, OperationRequest::diagnosticWriteCommand(0x1234), nowMs,
+      100, 124);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(diagnostic.outcome));
+  TEST_ASSERT_TRUE(diagnostic.reconciliationRequired);
+  TEST_ASSERT_FALSE(device.isAttached());
+}
+
+void test_reset_verify_failure_invalidates_runtime_cache() {
+  const OperationRequest requests[] = {
+      OperationRequest::make(OperationKind::REINIT),
+      OperationRequest::factoryReset()};
+  uint32_t requestId = 180;
+  for (const OperationRequest& request : requests) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs, requestId++);
+    completeJob(device, bus,
+                OperationRequest::make(OperationKind::START_PERIODIC), nowMs,
+                100, requestId++);
+    completeJob(device, bus, OperationRequest::make(OperationKind::FETCH_SAMPLE),
+                nowMs, 100, requestId++);
+    completeJob(device, bus,
+                OperationRequest::make(OperationKind::STOP_PERIODIC), nowMs,
+                1000, requestId++);
+    completeJob(device, bus,
+                OperationRequest::make(OperationKind::READ_CONFIGURATION), nowMs,
+                1000, requestId++);
+    FixedSample sample = {};
+    TEST_ASSERT_TRUE(device.peekLatestSample(sample).ok());
+    TEST_ASSERT_NOT_EQUAL_HEX16(0U,
+                               device.configurationSnapshot().verifiedMask);
+
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, 2, TransferCode::TIMEOUT,
+                      TransferDisposition::NO_EFFECT);
+    const OperationId id =
+        startJob(device, request, nowMs, nowMs + 20000U, requestId++);
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                      static_cast<uint8_t>(result.outcome));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::ACKNOWLEDGED),
+                      static_cast<uint8_t>(result.effect));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(device.isAttached());
+    TEST_ASSERT_EQUAL_HEX16(0U,
+                            device.configurationSnapshot().verifiedMask);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::MEASUREMENT_NOT_READY),
+                      static_cast<uint8_t>(device.peekLatestSample(sample).code));
+  }
+}
+
+void test_identity_changes_and_wrong_variants_require_attach() {
+  {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs);
+    bus.serialWords[2] ^= 0x0001U;
+    resetOperationTrace(bus);
+    const OperationId id = startJob(
+        device, OperationRequest::make(OperationKind::REINIT), nowMs,
+        nowMs + 20000U, 190);
+    ++nowMs;
+    bus.callbackCompletedMs = nowMs;
+    const PollResult started = device.poll(nowMs, 1);
+    TEST_ASSERT_EQUAL_UINT8(1U, started.callbacksUsed);
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::INDETERMINATE),
+                      static_cast<uint8_t>(result.outcome));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(device.isAttached());
+  }
+
+  {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs);
+    bus.serialWords[0] = 0x0001U;
+    const OperationResult result = completeJob(
+        device, bus, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+        100, 191);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(device.isAttached());
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD40),
+                      static_cast<uint8_t>(device.identity().variant));
+  }
+
+  {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10;
+    attachDevice(device, bus, nowMs);
+    completeJob(device, bus, OperationRequest::make(OperationKind::POWER_DOWN),
+                nowMs, 100, 192);
+    bus.serialWords[0] = 0x0001U;
+    const OperationResult result = completeJob(
+        device, bus, OperationRequest::make(OperationKind::WAKE_UP), nowMs,
+        1000, 193);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(device.isAttached());
+  }
+}
+
+void test_passive_offline_health_never_gates_a_later_attempt() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  for (uint32_t i = 0; i < 3; ++i) {
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, 1, TransferCode::TIMEOUT, TransferDisposition::NO_EFFECT);
+    const OperationId id =
+        startJob(device, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+                 nowMs + 100, 130 + i);
+    driveUntilTerminal(device, bus, nowMs);
+    TEST_ASSERT_TRUE(takeTerminal(device, id).outcome != OperationOutcome::SUCCEEDED);
+  }
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
+
+  resetOperationTrace(bus);
+  const OperationResult recovered =
+      completeJob(device, bus, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs, 100,
+                  140);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(recovered.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
+}
+
+void test_self_test_and_frc_results_are_typed() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs);
+
+  OperationResult selfTest =
+      completeJob(device, bus, OperationRequest::make(OperationKind::SELF_TEST), nowMs, 12000,
+                  110);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(selfTest.outcome));
+  TEST_ASSERT_EQUAL_UINT32(0U, selfTest.value.value);
+
+  bus.frcResult = static_cast<uint16_t>(cmd::FRC_OFFSET_BIAS - 7U);
+  OperationResult frc = completeJob(device, bus, OperationRequest::forcedRecalibration(400), nowMs,
+                                    2000, 111);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(frc.outcome));
+  TEST_ASSERT_EQUAL_INT32(-7, frc.value.signedValue);
+
+  bus.frcResult = cmd::FRC_FAILED;
+  frc = completeJob(device, bus, OperationRequest::forcedRecalibration(400), nowMs, 2000, 112);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                    static_cast<uint8_t>(frc.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                    static_cast<uint8_t>(frc.status.code));
+}
+
+void test_each_runtime_and_maintenance_stage_fails_without_hidden_retry() {
+  struct ProcedureCase {
+    OperationRequest request;
+    bool powerDownFirst;
+  };
+  const ProcedureCase procedures[] = {
+      {OperationRequest::setTemperatureOffsetMilliC(4000), false},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT), false},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY), false},
+      {OperationRequest::make(OperationKind::WAKE_UP), true},
+      {OperationRequest::make(OperationKind::REINIT), false},
+      {OperationRequest::make(OperationKind::SELF_TEST), false},
+      {OperationRequest::forcedRecalibration(400), false},
+      {OperationRequest::factoryReset(), false},
+  };
+
+  uint32_t requestId = 300;
+  for (const ProcedureCase& procedure : procedures) {
+    ModelTransport baselineBus;
+    Device baselineDevice;
+    bindDevice(baselineDevice, baselineBus);
+    uint32_t baselineNow = 10;
+    attachDevice(baselineDevice, baselineBus, baselineNow, requestId++);
+    if (procedure.powerDownFirst) {
+      completeJob(baselineDevice, baselineBus,
+                  OperationRequest::make(OperationKind::POWER_DOWN),
+                  baselineNow, 100, requestId++);
+    }
+    const OperationResult baseline =
+        completeJob(baselineDevice, baselineBus, procedure.request, baselineNow,
+                    20000, requestId++);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                      static_cast<uint8_t>(baseline.outcome));
+    const size_t transferCount = operationCalls(baselineBus);
+    TEST_ASSERT_TRUE(transferCount > 0U);
+    TEST_ASSERT_TRUE(
+        transferCount <= Device::limits(procedure.request.kind).maxCallbacks);
+
+    for (size_t failedStage = 1; failedStage <= transferCount; ++failedStage) {
+      ModelTransport bus;
+      Device device;
+      bindDevice(device, bus);
+      uint32_t nowMs = 10;
+      attachDevice(device, bus, nowMs, requestId++);
+      if (procedure.powerDownFirst) {
+        completeJob(device, bus,
+                    OperationRequest::make(OperationKind::POWER_DOWN), nowMs,
+                    100, requestId++);
+      }
+      resetOperationTrace(bus);
+      faultRelativeCall(bus, failedStage, TransferCode::TIMEOUT,
+                        TransferDisposition::NO_EFFECT);
+      const OperationId id =
+          startJob(device, procedure.request, nowMs, nowMs + 20000,
+                   requestId++);
+      driveUntilTerminal(device, bus, nowMs);
+      const OperationResult result = takeTerminal(device, id);
+      TEST_ASSERT_TRUE(result.outcome != OperationOutcome::SUCCEEDED);
+      TEST_ASSERT_EQUAL_UINT32(failedStage, operationCalls(bus));
+    }
+  }
+}
+
+void test_end_is_zero_io_and_cancels_active_work() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  OperationId id = {};
+  TEST_ASSERT_TRUE(device.start(OperationRequest::make(OperationKind::ATTACH),
+                                OperationOptions{120, 10, 5000}, id)
+                       .inProgress());
+  const PollResult waiting = device.poll(20, 0);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
+                    static_cast<uint8_t>(waiting.state));
+  const size_t before = bus.calls;
+  device.end();
+  TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+  TEST_ASSERT_FALSE(device.isBound());
+  TEST_ASSERT_FALSE(device.isAttached());
+
+  OperationResult result = {};
+  TEST_ASSERT_TRUE(device.takeResult(id, result).ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::CANCELLED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL_UINT32(20U, result.completedMs);
+}
+
+void test_rebind_uses_only_new_transport_context() {
+  ModelTransport busA;
+  Device device;
+  bindDevice(device, busA);
+  device.end();
+
+  ModelTransport busB;
+  TEST_ASSERT_TRUE(device.begin(makeConfig(busB)).ok());
+  uint32_t nowMs = 10;
+  attachDevice(device, busB, nowMs);
+  TEST_ASSERT_EQUAL_UINT32(0U, busA.calls);
+  TEST_ASSERT_TRUE(busB.calls > 0U);
+}
+
+void test_helper_boundaries_and_extreme_float_inputs() {
+  const uint8_t crcVector[2] = {0xBE, 0xEF};
+  TEST_ASSERT_EQUAL_HEX8(0x92, crc8(crcVector, sizeof(crcVector)));
+  TEST_ASSERT_FALSE(Device::isDataReady(0));
+  TEST_ASSERT_TRUE(Device::isDataReady(0x0001));
+  TEST_ASSERT_TRUE(Device::isDataReady(0x0400));
+  TEST_ASSERT_FALSE(Device::isDataReady(0x0800));
+  TEST_ASSERT_FALSE(Device::isDataReady(0x8000));
+
+  TEST_ASSERT_EQUAL_INT32(-45000, Device::convertTemperatureMilliC(0));
+  TEST_ASSERT_EQUAL_INT32(129997, Device::convertTemperatureMilliC(65535));
+  TEST_ASSERT_EQUAL_UINT32(0U, Device::convertHumidityMilliPercent(0));
+  TEST_ASSERT_EQUAL_UINT32(99998U, Device::convertHumidityMilliPercent(65535));
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, -45.0F, Device::convertTemperatureC(0));
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, 100.0F, Device::convertHumidityPct(65535));
+
+  uint16_t encoded = 0xAAAA;
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeTemperatureOffsetC(NAN, encoded).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeTemperatureOffsetC(INFINITY, encoded).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeTemperatureOffsetC(FLT_MAX, encoded).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeTemperatureOffsetC(-1.0F, encoded).code));
+  TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetMilliC(0, encoded).ok());
+  TEST_ASSERT_EQUAL_HEX16(0x0000, encoded);
+  TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetMilliC(4000, encoded).ok());
+  TEST_ASSERT_EQUAL_HEX16(0x05DA, encoded);
+  TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetMilliC(20000, encoded).ok());
+  TEST_ASSERT_EQUAL_HEX16(0x1D42, encoded);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(
+                        Device::encodeTemperatureOffsetMilliC(20001, encoded).code));
+
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeAmbientPressurePa(69999, encoded).code));
+  TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(70000, encoded).ok());
+  TEST_ASSERT_EQUAL_UINT16(700U, encoded);
+  TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(120000, encoded).ok());
+  TEST_ASSERT_EQUAL_UINT16(1200U, encoded);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(Device::encodeAmbientPressurePa(120001, encoded).code));
 }
 
 int main(int, char**) {
   UNITY_BEGIN();
-  runConfigStatusLifecycleTests();
-  runMeasurementAndTimingTests();
-  runVariantAndSettingsTests();
-  runCompensationAndSettingsTests();
-  runRawProtocolHealthTests();
-  runMaintenanceTests();
-  runExampleTransportTests();
+  RUN_TEST(test_status_and_public_type_contracts);
+  RUN_TEST(test_begin_is_zero_io_and_validates_before_rebinding);
+  RUN_TEST(test_config_validation_boundaries_are_zero_io);
+  RUN_TEST(test_start_is_zero_io_and_result_backpressure_is_exact);
+  RUN_TEST(test_attach_budget_waiting_and_expected_wake_nack);
+  RUN_TEST(test_poll_budget_zero_never_touches_transport);
+  RUN_TEST(test_exactly_once_and_stale_result_do_not_modify_output);
+  RUN_TEST(test_deadline_before_first_transfer_and_exact_boundary);
+  RUN_TEST(test_deadline_after_callback_reports_timeout_without_retry);
+  RUN_TEST(test_deadline_and_waits_handle_u32_wrap);
+  RUN_TEST(test_owner_clock_cannot_move_backwards);
+  RUN_TEST(test_cancel_before_io_is_exact_and_prevents_stale_completion);
+  RUN_TEST(test_cancel_after_effectful_write_requires_reconciliation_and_no_retry);
+  RUN_TEST(test_attach_failure_at_each_transfer_is_terminal_and_bounded);
+  RUN_TEST(test_attach_converges_from_known_modes_and_hotplug);
+  RUN_TEST(test_hotplug_attach_starts_a_new_cache_epoch);
+  RUN_TEST(test_read_identity_response_fault_and_crc_are_atomic);
+  RUN_TEST(test_periodic_fetch_phase_faults_preserve_last_sample);
+  RUN_TEST(test_not_ready_fetch_is_terminal_no_data_without_hidden_retry);
+  RUN_TEST(test_fixed_point_sample_take_and_peek_contract);
+  RUN_TEST(test_configuration_read_marks_fields_only_after_complete_crc);
+  RUN_TEST(test_setting_write_readback_dirty_and_no_unchanged_rewrite);
+  RUN_TEST(test_ambiguous_setting_write_is_not_retried_and_cache_is_invalid);
+  RUN_TEST(test_setting_verification_fault_does_not_reclassify_the_mutation);
+  RUN_TEST(test_setting_write_crossing_deadline_retains_dirty_evidence);
+  RUN_TEST(test_periodic_admission_rejects_idle_only_work_without_io);
+  RUN_TEST(test_maintenance_confirmation_limits_and_no_retry);
+  RUN_TEST(test_transport_contract_failures_are_observable_and_passive);
+  RUN_TEST(test_diagnostic_commands_are_explicit_and_invalidate_managed_state);
+  RUN_TEST(test_reset_verify_failure_invalidates_runtime_cache);
+  RUN_TEST(test_identity_changes_and_wrong_variants_require_attach);
+  RUN_TEST(test_passive_offline_health_never_gates_a_later_attempt);
+  RUN_TEST(test_self_test_and_frc_results_are_typed);
+  RUN_TEST(test_each_runtime_and_maintenance_stage_fails_without_hidden_retry);
+  RUN_TEST(test_end_is_zero_io_and_cancels_active_work);
+  RUN_TEST(test_rebind_uses_only_new_transport_context);
+  RUN_TEST(test_helper_boundaries_and_extreme_float_inputs);
   return UNITY_END();
 }
