@@ -339,5 +339,5 @@ conditions and airflow.
   and not driver-owned recovery authority.
 - Diagnostic helpers have explicit word/command shapes. Returned words remain
   CRC-checked, and diagnostic effects invalidate or dirty managed cache state.
-- `SCD41::limits(OperationKind)` publishes the bounded callback, retry, wait,
-  duration, nonvolatile, and destructive contract for every operation.
+- `SCD41::limits(OperationKind)` publishes the bounded callback, retry, sensor
+  wait, nonvolatile, and destructive contract for every operation.

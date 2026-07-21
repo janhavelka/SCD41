@@ -53,6 +53,14 @@ release or tag exists yet; physical HIL is still a release gate.
   `idf_component.yml`.
 - Release packages include stable integration documentation and exclude dated
   audit/HIL reports.
+- Public headers now document all exported enums, request/result fields,
+  snapshots, helpers, units, parameters, and return contracts.
+- Doxygen now fails on undocumented public API or parameter warnings, writes
+  generated HTML under `.pio/`, and takes its project version from the manifest
+  synchronization check.
+- CI now builds the warning-clean generated API reference in the guard job.
+- README and integration documentation now state the release-candidate status,
+  complete `Config` contract, result-value mapping, and remaining evidence gate.
 
 #### Removed
 

@@ -210,9 +210,9 @@ The driver has one execution model:
 ```cpp
 enum class DriverState : uint8_t {
   UNINIT,    // begin() not called or end() called
-  READY,     // Operational, consecutiveFailures == 0
-  DEGRADED,  // 1 <= consecutiveFailures < offlineThreshold
-  OFFLINE    // consecutiveFailures >= offlineThreshold
+  READY,     // Bound; consecutiveTransferFailures == 0
+  DEGRADED,  // 1 <= consecutiveTransferFailures < offlineThreshold
+  OFFLINE    // consecutiveTransferFailures >= offlineThreshold
 };
 ```
 
@@ -265,6 +265,7 @@ Rules:
 ## Versioning and Releases
 
 Single source of truth: `library.json`. `Version.h` is auto-generated and must never be edited.
+The version check also synchronizes `idf_component.yml` and `Doxyfile`.
 
 SemVer:
 - MAJOR: breaking API, config, enum, or timing-contract changes.
@@ -279,6 +280,22 @@ Release steps:
 5. Run/record physical HIL gates required by the release policy.
 6. Commit and tag: `Release vX.Y.Z`. Do not create the release tag while a
    required physical evidence gate remains open.
+
+---
+
+## Documentation Contract
+
+- Every public type, enum, field, method, parameter, return value, unit, and
+  non-owning lifetime rule must have concrete Doxygen at its declaration.
+- `doxygen Doxyfile` is warning-clean and warning-as-error. Generated output
+  belongs under `.pio/doxygen`; never commit generated HTML into `docs/`.
+- `README.md` is the user entry point. Stable device facts belong in
+  `docs/reference/`, owner contracts in `docs/integration/`, framework details
+  in `docs/porting/`, and evidence procedures in `docs/validation/`.
+- `ASSUMPTIONS.md` holds facts the driver cannot prove and product-policy
+  boundaries. Dated reports are historical evidence, not active API contracts.
+- Update `CHANGELOG.md` whenever public behavior, metadata, or release-visible
+  documentation changes.
 
 ---
 

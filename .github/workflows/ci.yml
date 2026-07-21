@@ -17,8 +17,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Check generated version header
+      - name: Check synchronized version metadata
         run: python scripts/generate_version.py check
+
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes doxygen
+
+      - name: Build warning-clean public API documentation
+        run: doxygen Doxyfile
 
       - name: Enforce core framework and timing guard
         run: python tools/check_core_timing_guard.py

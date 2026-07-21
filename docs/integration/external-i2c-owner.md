@@ -232,13 +232,15 @@ Use `OperationResult::kind` to select the authoritative value member:
 | Kind group | Result value |
 | --- | --- |
 | sample fetch/single shot | `sample` |
-| attach, identity, wake, reinit, factory reset | `identity` |
-| setting read/write, configuration read, persistence, reset | `configuration` |
+| attach, identity, wake, reinit | `identity` |
+| factory reset | `identity` and reconciled `configuration` |
+| setting read | scalar member below plus `configuration` |
+| setting write, configuration read, persistence | `configuration` |
 | data-ready | `dataReady` |
 | temperature offset / forced recalibration | `signedValue` |
 | altitude, pressure, ASC numbers, self-test | `value` |
 | ASC enabled | `boolValue` |
-| diagnostic read / raw maintenance word | `rawWords`, `wordCount` |
+| diagnostic read / deferred maintenance response | `rawWords`, `wordCount` |
 
 ## Cache and publication
 

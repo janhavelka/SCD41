@@ -4,6 +4,11 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
+Release status: `library.json` is staged at `1.0.0` for compatibility and
+release-candidate validation, but no `v1.0.0` release/tag or current physical
+HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
+[hardware validation guide](docs/validation/hardware-hil.md).
+
 The library is designed for an application-owned I2C bus. It does not configure
 pins, own a bus, create a task, lock, log, sleep, retry, reset the bus, or power
 cycle hardware. The application supplies one bounded transfer callback and
@@ -91,6 +96,15 @@ delay `30..1000 ms`. Defaults are 50 ms and 30 ms respectively. The application
 should choose the smallest transport timeout that is safe for its controller and
 bus. The driver enforces the fixed 1 ms SCD41 inter-command spacing internally.
 
+| `Config` field | Contract | Default |
+| --- | --- | ---: |
+| `transfer` | Required synchronous callback for exactly one bounded attempt | null (invalid) |
+| `transferUser` | Non-owning context that must outlive use of the current binding | null |
+| `transferTimeoutMs` | Per-attempt bound in the range 1..1000 ms | 50 ms |
+| `powerUpDelayMs` | Initial attach wait in the range 30..1000 ms | 30 ms |
+| `offlineThreshold` | Consecutive attempted failures for passive `OFFLINE`; zero disables only that transition | 5 |
+| `strictVariantCheck` | Require verified SCD41 variant identity | true |
+
 See [External I2C owner integration](docs/integration/external-i2c-owner.md) for
 the complete contract and [ESP-IDF porting](docs/porting/esp-idf.md) for a native
 adapter.
@@ -127,6 +141,39 @@ sensor wait, and whether the operation writes nonvolatile state or is
 destructive. The library's internal retry count is zero. Applications may
 retry only as new, separately identified operations after interpreting the
 previous terminal effect and reconciliation state.
+
+## Public result types
+
+The public API is fixed-size and allocation-free:
+
+- `TransferRequest` and `TransferResult` are the one-attempt adapter boundary.
+- `OperationRequest`, `OperationOptions`, `OperationId`, and `OperationLimits`
+  define an admitted job and its scheduling contract.
+- `PollResult` reports bounded progress; `OperationResult` is the exactly-once
+  terminal record.
+- `RuntimeSnapshot`, `HealthSnapshot`, `Identity`, `ConfigurationSnapshot`, and
+  `FixedSample` are cache-only views and never perform I2C.
+- `Status` carries a stable `Err`, optional detail, and static-lifetime message.
+
+Interpret `OperationResult::value` by `OperationResult::kind`; other value
+members remain default or are secondary raw evidence:
+
+| Operation kind/group | Authoritative value member |
+| --- | --- |
+| `ATTACH`, `READ_IDENTITY`, `WAKE_UP`, `REINIT` | `identity` |
+| `FACTORY_RESET` | `identity` and reconciled `configuration` |
+| `READ_DATA_READY` | `dataReady` |
+| `FETCH_SAMPLE`, `SINGLE_SHOT`, `SINGLE_SHOT_RHT_ONLY` | `sample` |
+| `READ_TEMPERATURE_OFFSET` | `signedValue` plus `configuration` |
+| `FORCED_RECALIBRATION` | `signedValue` plus raw response evidence |
+| altitude, pressure, numeric ASC reads | `value` plus `configuration` |
+| `SELF_TEST` | `value` plus raw response evidence |
+| `READ_ASC_ENABLED` | `boolValue` plus `configuration` |
+| setting writes, `READ_CONFIGURATION`, `PERSIST_SETTINGS` | `configuration` |
+| diagnostic reads and deferred maintenance responses | `rawWords`, `wordCount` |
+
+The detailed owner actions for every outcome/effect combination are in
+[External I2C owner integration](docs/integration/external-i2c-owner.md).
 
 ## Operation classes
 
@@ -276,7 +323,11 @@ python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
 python tools/test_scd41_hil_runner.py
 python -m platformio test -e native
+doxygen Doxyfile
 ```
+
+Doxygen writes the generated reference to `.pio/doxygen/html/index.html`; do
+not commit generated HTML under `docs/`.
 
 PlatformIO builds cover ESP32-S2 and ESP32-S3. CI also builds the native
 ESP-IDF example for both targets, validates a packed-library consumer, and
@@ -285,10 +336,11 @@ on pioarduino platform release `54.03.20`.
 
 ## Versioning
 
-`library.json` is the version source of truth. `include/SCD41/Version.h` and the
-version in `idf_component.yml` are generated/checked from it. Version 1.0.0 is a
-breaking API release because it replaces direct device calls and dual transport
-callbacks with the externally scheduled operation model.
+`library.json` is the version source of truth. `include/SCD41/Version.h`,
+`idf_component.yml`, and `Doxyfile` project metadata are generated or checked
+from it. The staged 1.0.0 candidate is a breaking API change because it
+replaces direct device calls and dual transport callbacks with the externally
+scheduled operation model.
 
 ## License
 

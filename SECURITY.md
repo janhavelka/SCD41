@@ -7,6 +7,9 @@
 | 1.0.x release candidates | yes |
 | 0.1.x   | no        |
 
+The `1.0.0` manifest is currently staged for release-candidate validation; this
+table does not claim that a `v1.0.0` tag or physical HIL release gate exists.
+
 ## Reporting a Vulnerability
 
 If you discover a security issue in this library:
