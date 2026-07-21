@@ -293,7 +293,8 @@ Release steps:
   `docs/reference/`, owner contracts in `docs/integration/`, framework details
   in `docs/porting/`, and evidence procedures in `docs/validation/`.
 - `ASSUMPTIONS.md` holds facts the driver cannot prove and product-policy
-  boundaries. Dated reports are historical evidence, not active API contracts.
+  boundaries. Completed prompts and closed audits belong in git history, not
+  active documentation. Retain dated reports only for real required evidence.
 - Update `CHANGELOG.md` whenever public behavior, metadata, or release-visible
   documentation changes.
 

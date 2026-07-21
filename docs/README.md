@@ -14,8 +14,6 @@ too detailed for the README.
 | [ESP-IDF porting](porting/esp-idf.md) | ESP-IDF component, transport adapter, and build guidance. |
 | [External I2C owner integration](integration/external-i2c-owner.md) | Applications where one external I2C task owns bounded driver progress. |
 | [Hardware/HIL validation](validation/hardware-hil.md) | Hardware evidence rules and smoke-test matrix. |
-| `reports/tunnelmonitor-node-suitability-audit-20260719.md` | Historical baseline findings and final library disposition. |
-| `reports/` | Repository-local audit/evidence records; excluded from release packages and generated API input. |
 
 ## Generated API Reference
 
@@ -34,12 +32,11 @@ header, ESP-IDF component metadata, and the Doxygen project number.
 
 ## Documentation Policy
 
-- Keep generated extracts, progress logs, and branch notes out of `docs/`. Use
-  git history for that material.
-- A dated suitability audit may remain under `docs/reports/` while its finding
-  dispositions are reviewed. Hardware reports must distinguish recorded
-  evidence from `NOT RUN` entries.
-- Release packages exclude `docs/reports/`; stable contracts and procedures
+- Keep completed task prompts, closed audits, generated extracts, progress logs,
+  and branch notes out of `docs/`. Use git history for that material.
+- Retain a hardware report only when it records an actual run needed as release
+  evidence. A file containing only `NOT RUN` entries is not evidence.
+- Release packages exclude dated reports. Stable contracts and procedures
   belong in the reference, integration, porting, and validation guides.
 - Keep public declarations documented in place. Put owner integration rules in
   `integration/`, device facts in `reference/`, and uncertain facts or product

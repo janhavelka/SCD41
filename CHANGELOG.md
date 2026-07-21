@@ -70,6 +70,8 @@ release or tag exists yet; physical HIL is still a release gate.
   cooperative-yield hooks.
 - Precise address/data/read NACK requirements from the active transport API.
 - Legacy raw byte APIs that could bypass CRC or managed state.
+- Completed implementation prompt sequences, the closed suitability audit, and
+  a pre-HIL report containing only `NOT RUN` entries. Git history retains them.
 
 #### Compatibility
 
