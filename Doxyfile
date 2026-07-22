@@ -32,7 +32,7 @@ REFERENCED_BY_RELATION = YES
 REFERENCES_RELATION    = YES
 STRIP_CODE_COMMENTS    = NO
 
-INPUT                  = README.md CHANGELOG.md ASSUMPTIONS.md include/SCD41 docs/README.md docs/reference/scd41-protocol.md docs/porting/esp-idf.md docs/integration/external-i2c-owner.md docs/validation/hardware-hil.md
+INPUT                  = README.md CHANGELOG.md ASSUMPTIONS.md include/SCD41 docs/reference/scd41-protocol.md docs/porting/esp-idf.md docs/integration/external-i2c-owner.md docs/validation/hardware-hil.md
 FILE_PATTERNS          = *.h *.md
 RECURSIVE              = NO
 EXCLUDE_PATTERNS       = */.pio/* */.git/* */test/* */docs/doxygen/* */docs/reference/vendor/*
@@ -52,6 +52,7 @@ GENERATE_LATEX         = NO
 GENERATE_XML           = NO
 GENERATE_RTF           = NO
 GENERATE_MAN           = NO
+HAVE_DOT               = NO
 
 WARN_IF_UNDOCUMENTED   = YES
 WARN_NO_PARAMDOC       = YES

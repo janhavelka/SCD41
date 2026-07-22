@@ -66,8 +66,8 @@ release or tag exists yet; physical HIL is still a release gate.
 
 - Arduino CI removes the framework's GNU++11 default and explicitly builds with
   GNU++17 on the pinned Espressif 32 7.0.1 platform.
-- Doxygen output now uses a self-creatable ignored directory, so a clean checkout
-  does not fail before documentation generation starts.
+- Doxygen output now uses a self-creatable ignored directory, has one unambiguous
+  main page, and does not require optional Graphviz tooling.
 
 #### Removed
 
