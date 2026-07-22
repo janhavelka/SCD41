@@ -1,19 +1,22 @@
 # Native Test Layout
 
-`test_basic.cpp` is a native Unity regression suite for the framework-neutral
-SCD41 core plus the Arduino example transport shim.
+`test_basic.cpp` is a public-contract native Unity suite for the
+framework-neutral SCD41 core. It uses an injected fixed-memory sensor transport
+model; production code contains no fake transport.
 
-The file is intentionally organized by runner functions:
+Coverage includes:
 
-- `runConfigStatusLifecycleTests`
-- `runMeasurementAndTimingTests`
-- `runVariantAndSettingsTests`
-- `runCompensationAndSettingsTests`
-- `runRawProtocolHealthTests`
-- `runMaintenanceTests`
-- `runExampleTransportTests`
+- zero-I2C bind/admission/cancel/result/end contracts
+- callback budgets, exact operation identity, deadlines, cancellation, and
+  32-bit clock wrap across the distinct state-machine topologies
+- successful execution and per-transfer fault injection for every public
+  `OperationKind`
+- attach convergence, mode admission, expected NACKs, and retained safety gates
+- CRC-atomic sample/config publication, cache epochs, dirty/verified settings,
+  EEPROM uncertainty, and passive health channels
+- contradictory transport results, completion-clock failures, and command
+  spacing after failed attempts
+- fixed-width/copy/size checks for owner-boundary value types
 
-Prefer public API assertions for new tests. The suite keeps a narrow white-box
-include of `SCD41.h` because protocol CRC helpers, raw command spacing,
-probe-side-effect restoration, and health wrapper behavior need exact internal
-state assertions that are not part of the production API.
+Prefer public API assertions. Do not expose private driver state to make a test
+easy; observable snapshots and terminal results are part of the contract.

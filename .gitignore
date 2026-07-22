@@ -4,6 +4,7 @@
 .idea/
 
 # Build artifacts
+dist/
 *.o
 *.a
 *.elf

@@ -13,10 +13,9 @@ from typing import Optional
 
 
 DESTRUCTIVE_CONFIRMATION = "I understand EEPROM and calibration risk"
-MINIMUM_SAFE_COMMANDS = ("version", "scan", "probe", "settings")
-HEALTH_COMMAND_ALIASES = ("health", "drv", "state")
-MAX_STRESS_COUNT = 100000
-DEFAULT_IDLE_TIMEOUT_S = 2.0
+MINIMUM_SAFE_COMMANDS = ("version", "scan", "begin", "identity", "settings", "status")
+HEALTH_COMMAND_ALIASES = ("status",)
+DEFAULT_IDLE_TIMEOUT_S = 8.0
 
 SERIAL_NUMBER_RE = re.compile(
     r"\bserial(?:_number)?\s*[:=]\s*(?:0x)?([0-9A-Fa-f]{12})\b",
@@ -24,10 +23,10 @@ SERIAL_NUMBER_RE = re.compile(
 )
 FAILURE_TOKEN_RE = re.compile(
     r"\b("
-    r"NOT_INITIALIZED|INVALID_CONFIG|INVALID_PARAM|CRC_MISMATCH|"
-    r"DEVICE_NOT_FOUND|OFFLINE|I2C_ERROR|I2C_NACK_ADDR|I2C_NACK_DATA|"
-    r"I2C_NACK_READ|I2C_TIMEOUT|I2C_BUS|COMMAND_FAILED|UNSUPPORTED|"
-    r"TIMEOUT|FAILED|FAILURE"
+    r"NOT_INITIALIZED|INVALID_CONFIG|INVALID_PARAM|RESULT_NOT_READY|STALE_RESULT|"
+    r"CRC_MISMATCH|DEVICE_NOT_FOUND|OFFLINE|I2C_ERROR|I2C_NACK|I2C_TIMEOUT|"
+    r"I2C_BUS|I2C_SHORT_TRANSFER|COMMAND_FAILED|UNSUPPORTED|TIMEOUT|CANCELLED|"
+    r"PARTIAL|INDETERMINATE|RECONCILIATION_REQUIRED|FAILED|FAILURE"
     r")\b",
     re.IGNORECASE,
 )
@@ -47,42 +46,35 @@ class Step:
 
 
 SAFE_STEPS: tuple[Step, ...] = (
-    Step("help surface", "help", r"SCD41 CLI Help|Common"),
-    Step("version", "version", r"SCD41|[Vv]ersion"),
+    Step("help surface", "help", r"SCD41 Owner-Safe CLI v1"),
+    Step("version", "version", r"SCD41 version=[0-9]+\.[0-9]+\.[0-9]+"),
     Step("i2c scan", "scan", r"Found device at 0x62", timeout_s=12.0),
-    Step("begin", "begin", r"OK|initialized|Device initialized", timeout_s=12.0),
-    Step("probe diagnostic", "probe", r"OK|Status|SCD41|found", timeout_s=12.0),
-    Step("serial", "serial", r"serial=0x[0-9A-Fa-f]{12}"),
-    Step("variant", "variant", r"variant=SCD41"),
-    Step("settings", "settings", r"Settings|snapshot|ASC|offset|altitude", timeout_s=12.0),
-    Step("dataready idle", "dataready", r"data_ready=(yes|no)|Status:"),
-    Step("diagnostics", "diag", r"Diagnostics:.*fail=\D*0\D", timeout_s=15.0),
-    Step("periodic start", "periodic on", r"IN_PROGRESS|OK|Status:"),
-    Step("periodic first sample", "read", r"Sample:|CO2=|MEASUREMENT_NOT_READY|pending", timeout_s=15.0, settle_s=6.0),
-    Step("periodic cached sample", "sample", r"Sample:|CO2=|has_sample"),
-    Step("periodic stop", "periodic off", r"IN_PROGRESS|OK|pending", timeout_s=8.0),
-    Step("post-stop status", "status", r"mode=.*IDLE|pending: NONE|pending=NONE", timeout_s=8.0, settle_s=1.0),
-    Step("single-shot full start", "single_start full", r"IN_PROGRESS|pending"),
-    Step("single-shot full read", "read", r"Sample:|CO2=", timeout_s=15.0, settle_s=6.0),
-    Step("single-shot rht start", "single_start rht", r"IN_PROGRESS|pending"),
-    Step("single-shot rht read", "read", r"Sample:|CO2=", timeout_s=8.0, settle_s=0.3),
-    Step("low-power periodic start", "periodic lp", r"IN_PROGRESS|OK|Status:"),
-    Step("low-power periodic sample", "read", r"Sample:|CO2=|MEASUREMENT_NOT_READY|pending", timeout_s=40.0, settle_s=31.0),
-    Step("low-power periodic stop", "periodic off", r"IN_PROGRESS|OK|pending", timeout_s=8.0),
-    Step("power down", "sleep", r"IN_PROGRESS|OK|pending", timeout_s=8.0, settle_s=1.0),
-    Step("wake", "wake", r"IN_PROGRESS|OK|pending", timeout_s=8.0, settle_s=1.0),
-    Step("serial after wake", "serial", r"serial=0x[0-9A-Fa-f]{12}", timeout_s=12.0),
-    Step("recover", "recover", r"OK|IN_PROGRESS|Status:", timeout_s=12.0),
-    Step("final driver health", "drv", r"READY", timeout_s=12.0),
+    Step("bind and attach", "begin", r"op=ATTACH outcome=SUCCEEDED", timeout_s=12.0),
+    Step("attached health", "status", r"runtime bound=yes attached=yes state=READY"),
+    Step("identity", "identity", r"op=READ_IDENTITY outcome=SUCCEEDED.*serial=0x[0-9A-Fa-f]{12}.*variant=SCD41", timeout_s=12.0),
+    Step("settings", "settings", r"op=READ_CONFIGURATION outcome=SUCCEEDED.*config offset_mC=", timeout_s=15.0),
+    Step("dataready idle", "dataready", r"op=READ_DATA_READY outcome=SUCCEEDED.*data_ready=(yes|no)", timeout_s=12.0),
+    Step("periodic start", "periodic on", r"op=START_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
+    Step("periodic sample", "read", r"op=FETCH_SAMPLE outcome=SUCCEEDED.*sample seq=", timeout_s=15.0, settle_s=6.0),
+    Step("periodic cached sample", "sample", r"sample seq="),
+    Step("periodic stop", "periodic off", r"op=STOP_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
+    Step("post-stop status", "status", r"runtime .*mode=IDLE.*operation=NONE", timeout_s=8.0),
+    Step("single-shot full", "single full", r"op=SINGLE_SHOT outcome=SUCCEEDED.*sample seq=", timeout_s=15.0),
+    Step("single-shot rht", "single rht", r"op=SINGLE_SHOT_RHT_ONLY outcome=SUCCEEDED.*sample seq=", timeout_s=8.0),
+    Step("low-power periodic start", "periodic lp", r"op=START_LOW_POWER_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
+    Step("low-power periodic sample", "read", r"op=FETCH_SAMPLE outcome=SUCCEEDED.*sample seq=", timeout_s=45.0, settle_s=31.0),
+    Step("low-power periodic stop", "periodic off", r"op=STOP_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
+    Step("power down", "sleep", r"op=POWER_DOWN outcome=SUCCEEDED", timeout_s=12.0),
+    Step("wake", "wake", r"op=WAKE_UP outcome=SUCCEEDED", timeout_s=12.0),
+    Step("identity after wake", "identity", r"op=READ_IDENTITY outcome=SUCCEEDED.*serial=0x[0-9A-Fa-f]{12}", timeout_s=12.0),
+    Step("final driver health", "status", r"runtime bound=yes attached=yes state=READY", timeout_s=12.0),
 )
 
 
 DESTRUCTIVE_STEPS: tuple[Step, ...] = (
-    Step("persist settings", "persist confirm", r"IN_PROGRESS|OK|pending", timeout_s=12.0, destructive=True),
-    Step("forced recalibration", "frc confirm 400", r"IN_PROGRESS|OK|pending", timeout_s=12.0, destructive=True),
-    Step("forced recalibration result", "frc_result", r"Forced Recalibration|correction|ready", timeout_s=12.0, settle_s=1.0, destructive=True),
-    Step("factory reset", "factory_reset confirm", r"IN_PROGRESS|OK|pending", timeout_s=12.0, destructive=True),
-    Step("post-factory-reset serial", "serial", r"serial=0x[0-9A-Fa-f]{12}", timeout_s=15.0, settle_s=2.0, destructive=True),
+    Step("persist dirty settings or confirm no-op", "persist confirm", r"op=PERSIST_SETTINGS outcome=SUCCEEDED", timeout_s=15.0, destructive=True),
+    Step("factory reset", "factory_reset confirm", r"op=FACTORY_RESET outcome=SUCCEEDED", timeout_s=15.0, destructive=True),
+    Step("post-reset attach", "begin", r"op=ATTACH outcome=SUCCEEDED", timeout_s=15.0, settle_s=2.0, destructive=True),
 )
 
 
@@ -108,7 +100,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=DEFAULT_IDLE_TIMEOUT_S,
         help="Fail a step after this many seconds without serial data",
     )
-    parser.add_argument("--include-destructive", action="store_true", help="Enable EEPROM/calibration destructive steps")
+    parser.add_argument("--include-destructive", action="store_true", help="Enable EEPROM/factory-reset steps; FRC remains manual")
     parser.add_argument(
         "--confirm-destructive",
         default="",
@@ -126,12 +118,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--verbose", action="store_true", help="Print matched output excerpts and failure tokens")
     parser.add_argument("--dry-run", action="store_true", help="Write a NOT RUN plan without opening serial")
     parser.add_argument("--parser-self-test", action="store_true", help="Run parser checks and exit without serial")
-    parser.add_argument(
-        "--stress-count",
-        type=int,
-        default=0,
-        help=f"Append bounded CLI stress command with count 1..{MAX_STRESS_COUNT}",
-    )
     return parser.parse_args(argv)
 
 
@@ -146,7 +132,6 @@ def validate_args(args: argparse.Namespace) -> None:
     require(args.read_timeout > 0.0, "--read-timeout must be > 0")
     require(args.idle_timeout_s > 0.0, "--idle-timeout-s must be > 0")
     require(args.settle_before >= 0.0, "--boot-settle-s must be >= 0")
-    require(0 <= args.stress_count <= MAX_STRESS_COUNT, f"--stress-count must be 0..{MAX_STRESS_COUNT}")
     if args.parser_self_test or args.dry_run:
         return
     require(bool(args.port), "--port is required unless --dry-run or --parser-self-test is used")
@@ -234,16 +219,6 @@ def build_steps(args: argparse.Namespace) -> list[Step]:
     steps: list[Step] = []
     if not args.skip_safe:
         steps.extend(SAFE_STEPS)
-    if args.stress_count > 0:
-        stress_timeout = max(30.0, float(args.stress_count) * 6.5)
-        steps.append(
-            Step(
-                "bounded stress",
-                f"stress {args.stress_count}",
-                r"=== Stress Summary ===",
-                timeout_s=stress_timeout,
-            )
-        )
     if args.include_destructive:
         steps.extend(DESTRUCTIVE_STEPS)
     if args.timeout_s is not None:
@@ -256,7 +231,7 @@ def run_parser_self_test() -> None:
     require(parse_serial_number("serial_number: 100ABCDEF012") == "100ABCDEF012", "serial parser rejected plain form")
     require(parse_serial_number("serial=0x1234") is None, "serial parser accepted short serial")
     require(missing_minimum_safe_steps(SAFE_STEPS) == (), "safe HIL step contract is incomplete")
-    help_text = "version\nscan\nprobe\nsettings\ndrv\n"
+    help_text = "version\nscan\nbegin\nidentity\nsettings\nstatus\n"
     require(missing_minimum_help_commands(help_text) == (), "help command contract parser failed")
     require(
         classify_failure_tokens("Status: I2C_TIMEOUT; fail=1; errors=2")

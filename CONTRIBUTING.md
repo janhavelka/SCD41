@@ -10,9 +10,13 @@ Thanks for contributing to this repository.
 4. Run the repository checks that apply to your change:
    - `python tools/check_core_timing_guard.py`
    - `python tools/check_cli_contract.py`
-   - `pio test -e native`
-   - `pio run -e esp32s3dev`
-   - `pio run -e esp32s2dev`
+   - `python tools/check_idf_example_contract.py`
+   - `python scripts/generate_version.py check`
+   - `python -m platformio test -e native`
+   - `python -m platformio test -e native_ubsan`
+   - `python -m platformio run -e esp32s3dev`
+   - `python -m platformio run -e esp32s2dev`
+   - `doxygen Doxyfile`
 5. Update `CHANGELOG.md` and package docs when behavior or metadata changes.
 6. Commit with a clear message and open a Pull Request.
 
@@ -29,8 +33,25 @@ Thanks for contributing to this repository.
 - Follow the repository naming and layout conventions from `AGENTS.md`.
 - Use `constexpr` instead of macros for constants.
 - No heap allocation in steady-state library code.
-- Keep long sensor operations bounded and `tick()`-driven instead of blocking for hundreds or thousands of milliseconds.
+- Keep all sensor work in the one `start()` / callback-budgeted `poll()` /
+  `takeResult()` model. `tick()` is only a one-callback compatibility executor.
+- Keep admission, cancellation, and result consumption zero-I2C. Preserve
+  absolute deadlines, `nextSafeCommandMs`, and one terminal result per ID.
+- Keep transport attempts single-shot. Retry, bus reset, power cycling, and
+  locking belong to the application owner.
 - Keep EEPROM-writing commands explicit and rare.
+
+### Documentation
+
+- Document every exported type, enum, field, function parameter, return value,
+  unit, and ownership/lifetime rule beside its declaration.
+- Keep `README.md` as the user entry point. Put stable details in the existing
+  reference, integration, porting, or validation owner instead of duplicating
+  another guide.
+- Record uncertain device/application boundaries in `ASSUMPTIONS.md` and
+  release-visible behavior in `CHANGELOG.md`.
+- Run `doxygen Doxyfile`; warnings fail the build. Generated output belongs in
+  `.pio/doxygen` and must not be committed.
 
 ### Pull Requests
 

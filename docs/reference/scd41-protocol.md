@@ -177,13 +177,17 @@ Command words are not followed by CRC. The vendor CRC example gives
 | Factory reset execution | 1200 ms |
 | Self-test execution | 10000 ms |
 
-During command execution the sensor may NACK read attempts. The driver must
-model these delays as observable pending work or explicit diagnostic blocking
-APIs, not hidden unbounded waits.
+During command execution the sensor may NACK read attempts. The driver models
+these delays as observable, zero-I2C pending phases driven by caller polling,
+not hidden waits or early read retries.
 
-The `wake_up` command can NACK while still waking the sensor. Treat only precise
-address/data NACK statuses as expected wake behavior. Generic I2C errors,
-timeouts, bus faults, and read-header NACKs remain failures.
+The `wake_up` command can NACK while still waking the sensor. Attach
+reconciliation may also see a stop-command NACK when periodic mode was not
+active. The driver marks only these expected attempts with
+`TransferIntent::EXPECTED_WRITE_NACK`. A generic transport NACK is accepted in
+a marked phase because common controllers do not expose address/data NACK
+precision. Timeout, bus fault, short transfer, and generic non-NACK failure
+remain failures.
 
 ## Measurement Modes
 
@@ -274,7 +278,7 @@ conditions and airflow.
 | `set_automatic_self_calibration_enabled` | `0x2416` | 1 word write | short | no |
 | `get_automatic_self_calibration_enabled` | `0x2313` | 1 word | short | no |
 | `set_automatic_self_calibration_target` | `0x243A` | 1 word write | short | no |
-| `get_automatic_self_calibration_target` | `0x233B` | 1 word | short | no |
+| `get_automatic_self_calibration_target` | `0x233F` | 1 word | short | no |
 | `get_data_ready_status` | `0xE4B8` | 1 word | short | yes |
 | `persist_settings` | `0x3615` | none | 800 ms | no |
 | `get_serial_number` | `0x3682` | 3 words | short | no |
@@ -320,10 +324,20 @@ conditions and airflow.
 
 ## Library Policy Derived From The Device
 
-- Core code remains framework-neutral and uses injected I2C transport and time.
-- Fallible APIs return `Status`; asynchronous completion failures are surfaced
-  through `tick()` or `poll()` and retained in async result accessors.
-- `probe()` is diagnostic and health-clean.
-- `OFFLINE` is a local driver transport latch, not aggregate application health.
-- Raw byte command helpers are diagnostic-only. Prefer typed word helpers so CRC
-  checks remain automatic.
+- Core code remains framework-neutral and uses one injected, single-attempt I2C
+  transport callback. The application supplies the monotonic time to operations
+  and polls.
+- `begin()` binds without I2C. Every physical transfer occurs only while the
+  caller advances an admitted typed operation through `poll()`.
+- Long execution times are zero-I2C operation phases. Cancellation and deadline
+  expiry stop future host phases but cannot undo an accepted sensor command.
+- Every terminal result is correlated by request ID and generation and consumed
+  exactly once.
+- Effectful writes are never blindly retried. Partial or ambiguous completion
+  remains visible through outcome, effect, dirty cache, and reconciliation state.
+- `OFFLINE` is passive local diagnostic state, not aggregate application health
+  and not driver-owned recovery authority.
+- Diagnostic helpers have explicit word/command shapes. Returned words remain
+  CRC-checked, and diagnostic effects invalidate or dirty managed cache state.
+- `SCD41::limits(OperationKind)` publishes the bounded callback, retry, sensor
+  wait, nonvolatile, and destructive contract for every operation.

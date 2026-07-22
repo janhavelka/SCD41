@@ -1,91 +1,92 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-- Instruction-budgeted `poll(nowMs, maxInstructions)`, `lastPollStatus()`,
-  and `pollBusy()` APIs for external-I2C-owner integration.
-- Poll-driven `startReadSettings()` / `settingsReady()` live settings refresh
-  path, with cached results available through `getSettings()`.
-- `Err::OFFLINE` for latched driver-offline status instead of overloading
-  ordinary busy/error statuses.
-- ESP-IDF component metadata for building the framework-neutral core with `idf_component_register`.
-- ESP-IDF native bring-up CLI example with an application-owned `i2c_master` bus/device, SCD41 transport callbacks, and command parity with the Arduino CLI.
-- `tools/check_idf_example_contract.py` to guard Arduino/ESP-IDF CLI help, command, raw access, and IDF transport contract parity.
-- `tools/check_clean_consumer_compile.py` to compile a clean consumer translation unit against the source tree or packed library tarball.
-- Safe one-sample `demo` workflow in both Arduino and ESP-IDF CLIs.
-- Framework-neutral private timing/yield shim; real timing is supplied by application callbacks.
-- `docs/porting/esp-idf.md` with the implemented ESP-IDF component, transport adapter, and validation guidance.
-- `docs/integration/external-i2c-owner.md` with API classification, long-command behavior, and bounded external-I2C-owner integration risks.
+The manifest is staged at `1.0.0` for compatibility validation. No `v1.0.0`
+release or tag exists yet; physical HIL is still a release gate.
 
-### Changed
-- Core timing guard now rejects Arduino and ESP-IDF framework headers in core/public headers and `src/`.
-- ESP-IDF CLI parsing now uses fixed-size command buffers, rejects overlong
-  commands, and is guarded against `<string>`, `std::string`, and heap-backed
-  parser regressions.
-- README now describes the ESP-IDF component/example flow.
-- `library.json` now declares both Arduino and ESP-IDF framework compatibility.
-- `begin()` now honors the configured power-up settle delay before the first command and no longer folds startup probe traffic into runtime health counters.
-- Explicit recovery/reset bypass internals now use the shared `ScopedOfflineI2cAllowance` / `_reassertOfflineLatch()` procedure so failed recovery attempts that begin from `OFFLINE` keep the latch asserted.
-- Cached raw/fixed-point/converted sample access now uses an explicit `hasSample` flag rather than inferring cache validity from timestamps or readiness state.
-- `requestMeasurement()` now returns the latched-offline `OFFLINE` status without scheduling work while the driver is `OFFLINE`.
-- Expanded the bring-up CLI to match the stronger family examples, including live settings readback, compensation/ASC controls, maintenance commands, version/identity views, and watch mode.
-- Refined the bring-up CLI again to match the mature family behavior more closely: versioned help header, startup/log flow parity, `state` compact-health alias, toggle-style verbose output, more detailed health/error reporting, less noisy unknown-command handling, and a smarter `read` path that prints a ready sample before scheduling another fetch.
-- Extended the bring-up CLI with chip-oriented `status` and cached `sample` / `last` views, plus explicit pending-work and completion summaries for deferred commands such as self-test, FRC, wake-up, stop-periodic, reinit, and factory reset.
-- Tightened the example Wire transport so short reads map to generic `I2C_ERROR` unless a transport can explicitly distinguish read-header NACK behavior.
-- Tightened the raw command helpers so they reject managed mode/state commands, preserve periodic-mode command restrictions, and stay aligned with the driver's internal state model.
-- `readSettings()` now refreshes live ambient-pressure compensation even while periodic measurement is active, while still leaving other idle-only configuration fields untouched.
-- Fixed the bring-up CLI so forced-recalibration failures are always reported and raw diagnostic reads no longer mask read-header NACKs by default.
-- Tightened README and Doxygen coverage so the managed measurement model, raw-command constraints, snapshot behavior, and public API contracts are documented in engineering terms instead of implicit in the code.
-- Documentation is simplified into stable reference, porting, integration, and validation guides under `docs/`.
-- Raw reads and low-level transport wrappers now validate local buffer/length contracts before dispatching to I2C, and synchronous wait guards now return `TIMEOUT` if the injected timebase stalls.
-- Health behavior is now standardized on latched `OFFLINE`: normal public I2C operations return `OFFLINE` with `Driver is offline; call recover()` and do not touch I2C until `recover()` succeeds.
-- `library.json` now advertises every public `include/SCD41` header, including generated `Version.h`, and uses an explicit package export surface.
-- SCD41-only public APIs and known raw command words now return `UNSUPPORTED`
-  on non-SCD41 variants when `strictVariantCheck=false` is used for diagnostics.
-- Arduino and ESP-IDF CLI examples now require confirmation tokens for EEPROM
-  writes, factory reset, and forced recalibration: `persist confirm`,
-  `factory_reset confirm`, and `frc confirm <reference_ppm>`.
-- Temperature-offset documentation now consistently uses the datasheet
-  `65535 / 175` scale and documents nearest-integer rounding for public helper
-  conversions.
+### Planned 1.0.0
 
-### Added
-- `readSettings()` and extended `SettingsSnapshot` live configuration fields for temperature offset, altitude, ambient pressure, and ASC state.
-- `hasSample()` / `SettingsSnapshot::hasSample` and `driverState()` for cross-library diagnostics.
-- Public raw command helpers (`writeCommand`, `writeCommandWithData`, `readCommand`, `readWordCommand`, `readWordsCommand`) plus named single-shot and `readMeasurement()` command helpers.
-- Raw self-test/FRC result accessors and ambient-pressure encode/decode helpers.
-- Small public convenience helpers for application code: `measurementPending()`, `measurementReadyMs()`, `getLastMeasurement()`, and `getIdentity()`.
-- Native coverage for power-up delay handling, direct `read_measurement` reads, raw-command helper restrictions/error paths, live settings readback, periodic ambient-pressure behavior, self-test completion, probe-after-failed-begin diagnostics, and example transport mapping.
-- Native coverage proving latched `OFFLINE` blocks normal I2C operations without touching the bus while explicit recovery/reset commands remain available.
-- README documentation for the single-threaded, non-ISR driver contract and explicit recovery model.
+#### Added
 
-### Fixed
-- `setTemperatureOffsetC(float)` now rejects NaN/infinite input before converting to the fixed-point command word.
-- `begin()` and `probe()` now preserve detailed I2C failure statuses instead of collapsing timeout, bus, and NACK failures to `DEVICE_NOT_FOUND`.
+- One typed, externally scheduled operation model with request ID, generation,
+  immutable deadline, progress, cancellation, and exactly-once terminal result.
+- Explicit steady-state, runtime, maintenance, and diagnostic operation classes.
+- `OperationLimits` metadata for maximum callbacks, retries, sensor wait,
+  nonvolatile writes, and destructive operations.
+- Callback-budgeted `poll(nowMs, maxCallbacks)` with zero-I2C wait phases.
+- `TransferRequest` / `TransferResult` single-attempt transport contract,
+  including transfer intent, generic result code, effect disposition, exact byte
+  count, and callback completion timestamp.
+- Observable successful, no-data, failed, cancelled, timed-out, partial, and
+  indeterminate outcomes with effect and reconciliation state.
+- Fixed-width sample, identity, configuration, runtime, and health snapshots.
+- Typed requests for periodic and single-shot measurement, all supported
+  compensation and ASC settings, power management, self-test, reinit, forced
+  recalibration, persistence, factory reset, and bounded diagnostic words.
+- Native Arduino and ESP-IDF owner-safe CLI examples with matching command
+  contracts and explicit maintenance confirmations.
+- Fault-injection, timing-boundary, cancellation, stale-result, cache-integrity,
+  portability, and package-consumer validation.
+- Undefined-behavior sanitizer CI coverage and packed-library consumer checks.
 
-### Removed
-- Deleted the unused example-side `Scd41Protocol.h` duplicate command layer.
-- Removed generated datasheet extraction folders and historical audit/progress reports from front-facing docs.
+#### Changed
+
+- `begin(const Config&)` is now a zero-I2C bind. Hardware discovery and
+  reconciliation use an explicit `ATTACH` operation.
+- All sensor traffic now occurs only from caller-authorized `poll()` calls.
+- Long command waits no longer block inside public APIs; they are bounded
+  operation phases driven by the caller's clock.
+- I2C is injected through one unified callback instead of separate write and
+  write/read callbacks.
+- Health is passive diagnostic information. The application retains retry,
+  reset, rail, and bus-recovery authority.
+- Cache verification and sensor epochs now prevent failed or reset-like work
+  from being published as verified current hardware state.
+- Wake-up uses an explicit expected-NACK transfer intent, so adapters need not
+  invent address/data NACK precision.
+- `library.json` is the version source for both generated `Version.h` and
+  `idf_component.yml`.
+- Release packages include stable integration documentation and exclude dated
+  audit/HIL reports.
+- Public headers now document all exported enums, request/result fields,
+  snapshots, helpers, units, parameters, and return contracts.
+- Doxygen now fails on undocumented public API or parameter warnings, writes
+  generated HTML under `.pio/`, and takes its project version from the manifest
+  synchronization check.
+- CI now builds the warning-clean generated API reference in the guard job.
+- README and integration documentation now state the release-candidate status,
+  complete `Config` contract, result-value mapping, and remaining evidence gate.
+
+#### Removed
+
+- Blocking/direct device command APIs and the separate legacy measurement
+  scheduler.
+- Driver-owned retry, recovery, bus reset, rail control, time callbacks, and
+  cooperative-yield hooks.
+- Precise address/data/read NACK requirements from the active transport API.
+- Legacy raw byte APIs that could bypass CRC or managed state.
+- Completed implementation prompt sequences, the closed suitability audit, and
+  a pre-HIL report containing only `NOT RUN` entries. Git history retains them.
+
+#### Compatibility
+
+This is a breaking release. Existing consumers must replace legacy callback
+fields and direct command calls with `Config::transfer`, typed
+`OperationRequest`, `start()`, `poll()`, `cancel()`, and `takeResult()`.
+Legacy precise NACK enum values remain for append-only status compatibility,
+but the active unified transport maps ordinary NACKs to `Err::I2C_NACK`.
 
 ## [0.1.0] - 2026-04-14
 
 ### Added
-- Initial SCD41 package metadata and repository policy files.
-- Production-style SCD41 driver core with injected I2C transport, health tracking, periodic and single-shot measurement flows, calibration/configuration commands, and native tests.
-- Family-style bring-up CLI example and shared example helpers.
-- Datasheet-driven repository guidance in `AGENTS.md`.
-- `ASSUMPTIONS.md` capturing SCD41-specific behavioral assumptions and remaining application-policy decisions.
 
-### Changed
-- Replaced the copied library shell with SCD41-specific README, changelog, and tooling metadata.
-- Repointed version generation and timing-guard tooling to the SCD41 package layout.
-- Updated Doxygen, contributing, security, and ignore rules to the SCD41 repository identity.
+- Initial SCD41 package metadata and repository policy files.
+- First SCD41 driver core, examples, native tests, and datasheet reference.
 
 [Unreleased]: https://github.com/janhavelka/SCD41/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/janhavelka/SCD41/releases/tag/v0.1.0

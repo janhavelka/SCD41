@@ -83,13 +83,14 @@ def test_help_contract_detection() -> None:
     help_text = """
     version        Print firmware and library version
     scan           Scan the I2C bus
-    probe          Probe SCD41 without updating health
+    begin          Bind and attach the SCD41
+    identity       Read sensor identity
     settings       Read settings
-    drv            Print driver health
+    status         Print driver health
     """
     assert_equal(hil.missing_minimum_help_commands(help_text), (), "help covers common commands")
     assert_equal(
-        hil.missing_minimum_help_commands("scan\nprobe\nsettings\ndrv\n"),
+        hil.missing_minimum_help_commands("scan\nbegin\nidentity\nsettings\nstatus\n"),
         ("version",),
         "missing version is reported",
     )
@@ -147,11 +148,10 @@ def test_step_pass_rejects_failure_tokens() -> None:
     )
 
 
-def test_build_steps_timeout_override_and_stress() -> None:
-    args = hil.parse_args(["--dry-run", "--timeout-s", "3", "--stress-count", "2"])
+def test_build_steps_timeout_override() -> None:
+    args = hil.parse_args(["--dry-run", "--timeout-s", "3"])
     hil.validate_args(args)
     steps = hil.build_steps(args)
-    assert_true(any(step.command == "stress 2" for step in steps), "stress step appended")
     assert_true(all(step.timeout_s == 3 for step in steps), "timeout override applies to all steps")
 
 
@@ -163,7 +163,7 @@ def test_dry_run_writes_not_run_summary_without_pyserial() -> None:
     with tempfile.TemporaryDirectory(prefix="scd41-hil-dry-run-") as tmp:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
-            result = hil.main(["--dry-run", "--port", "COM8", "--output-dir", tmp, "--stress-count", "1"])
+            result = hil.main(["--dry-run", "--port", "COM8", "--output-dir", tmp])
         assert_equal(result, 0, "dry-run exits successfully")
         reports = sorted(pathlib.Path(tmp).glob("*.md"))
         summaries = sorted(pathlib.Path(tmp).glob("*.json"))
@@ -186,7 +186,7 @@ def main() -> int:
         test_failure_token_classification,
         test_step_pattern_matching,
         test_step_pass_rejects_failure_tokens,
-        test_build_steps_timeout_override_and_stress,
+        test_build_steps_timeout_override,
         test_parser_self_test_mode,
         test_dry_run_writes_not_run_summary_without_pyserial,
     ]

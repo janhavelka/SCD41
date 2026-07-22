@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Synchronize Version.h from library.json and expose build metadata via macros.
+"""Synchronize generated version metadata from library.json.
 
 Default behavior:
-- when run by PlatformIO as an extra script: sync generated headers if needed
-- when run standalone: sync generated headers if needed
+- when run by PlatformIO as an extra script: sync generated metadata if needed
+- when run standalone: sync generated metadata if needed
 
 Standalone commands:
   sync
-      Regenerate generated headers only if source metadata changed.
+      Regenerate versioned outputs only if source metadata changed.
   check
-      Exit with code 1 when generated headers are out of date.
+      Exit with code 1 when generated metadata is out of date.
   bump patch|minor|major
-      Update library.json, then regenerate generated headers.
+      Update library.json, then regenerate versioned outputs.
   set X.Y.Z
-      Set an explicit semantic version, then regenerate generated headers.
+      Set an explicit semantic version, then regenerate versioned outputs.
 """
 
 from __future__ import annotations
@@ -183,13 +183,37 @@ static constexpr const char* VERSION_FULL = {prefix}_VERSION_FULL;
 '''
 
 
+def _replace_single_version_field(current: str, pattern: re.Pattern[str],
+                                  replacement: str, name: str) -> str:
+    matches = pattern.findall(current)
+    if len(matches) != 1:
+        raise ValueError(f"{name} must contain exactly one version field")
+    return pattern.sub(replacement, current, count=1)
+
+
+def _render_idf_component(current: str, version: str) -> str:
+    pattern = re.compile(r'^version:\s*[^\r\n]+$', re.MULTILINE)
+    return _replace_single_version_field(
+        current, pattern, f'version: "{version}"', "idf_component.yml")
+
+
+def _render_doxyfile(current: str, version: str) -> str:
+    pattern = re.compile(r'^PROJECT_NUMBER\s*=\s*[^\r\n]*$', re.MULTILINE)
+    return _replace_single_version_field(
+        current, pattern, f'PROJECT_NUMBER         = "{version}"', "Doxyfile")
+
+
 def _expected_outputs(project_root: Path) -> Dict[Path, str]:
     library_json = project_root / "library.json"
     library_data = _load_library_json(library_json)
     version = str(library_data.get("version", "0.0.0"))
     namespace = "SCD41"
+    idf_component = project_root / "idf_component.yml"
+    doxyfile = project_root / "Doxyfile"
     return {
         project_root / "include" / namespace / "Version.h": _render_version_header(namespace, version),
+        idf_component: _render_idf_component(_read_text(idf_component), version),
+        doxyfile: _render_doxyfile(_read_text(doxyfile), version),
     }
 
 

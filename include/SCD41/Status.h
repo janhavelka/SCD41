@@ -1,63 +1,80 @@
 /// @file Status.h
-/// @brief Error codes and status handling for SCD41 driver
+/// @brief Fixed, allocation-free status values for the SCD41 driver.
 #pragma once
 
 #include <cstdint>
 
 namespace SCD41 {
 
-/// Error codes returned by public SCD41 operations.
+/// Stable, framework-neutral error codes returned by the public API.
+///
+/// Existing numeric values are append-only. Transport adapters report
+/// `TransferCode`; the driver maps that result to the appropriate `Err`.
 enum class Err : uint8_t {
-  OK = 0,                 ///< Operation successful
-  NOT_INITIALIZED,        ///< begin() not called
-  INVALID_CONFIG,         ///< Invalid configuration parameter
-  I2C_ERROR,              ///< I2C communication failure (unspecified)
-  TIMEOUT,                ///< Driver-side timeout (internal wait/guard)
-  INVALID_PARAM,          ///< Invalid parameter value
-  DEVICE_NOT_FOUND,       ///< Device not responding on I2C bus
-  CRC_MISMATCH,           ///< CRC check failed
-  MEASUREMENT_NOT_READY,  ///< Sample or command result not yet available
-  CONVERSION_NOT_READY = MEASUREMENT_NOT_READY, ///< Alias for cross-library uniformity
-  BUSY,                   ///< Device or driver busy
-  IN_PROGRESS,            ///< Operation scheduled; call tick() to complete
-  COMMAND_FAILED,         ///< Sensor reported failure or returned failure sentinel
-  UNSUPPORTED,            ///< Operation not supported by this device/variant
-  I2C_NACK_ADDR,          ///< I2C NACK on address
-  I2C_NACK_DATA,          ///< I2C NACK on data
-  I2C_NACK_READ,          ///< I2C NACK on read header / no data
-  I2C_TIMEOUT,            ///< I2C transaction timeout
-  I2C_BUS,                ///< I2C bus error (SDA stuck, arbitration, etc.)
-  OFFLINE                 ///< Driver is latched offline until recovery succeeds
+  OK = 0,                              ///< The request completed successfully.
+  NOT_INITIALIZED,                     ///< `begin()` has not bound the instance.
+  INVALID_CONFIG,                      ///< A `Config` field violates its contract.
+  I2C_ERROR,                           ///< Legacy generic I2C failure code.
+  TIMEOUT,                             ///< The operation deadline expired.
+  INVALID_PARAM,                       ///< A request value or ID is invalid.
+  DEVICE_NOT_FOUND,                    ///< Attach could not verify a supported device.
+  CRC_MISMATCH,                        ///< A returned word failed the Sensirion CRC-8 check.
+  MEASUREMENT_NOT_READY,               ///< The requested sample is not available yet.
+  CONVERSION_NOT_READY = MEASUREMENT_NOT_READY, ///< Compatibility alias.
+  BUSY,                                ///< Admission is blocked by active/result/safety state.
+  IN_PROGRESS,                         ///< Work was admitted or remains active.
+  COMMAND_FAILED,                      ///< The sensor reported command-level failure.
+  UNSUPPORTED,                         ///< The operation is unsupported for this variant.
+  I2C_NACK_ADDR,                       ///< Legacy precise address-NACK code.
+  I2C_NACK_DATA,                       ///< Legacy precise data-NACK code.
+  I2C_NACK_READ,                       ///< Legacy precise read-NACK code.
+  I2C_TIMEOUT,                         ///< One physical transfer timed out.
+  I2C_BUS,                             ///< The controller reported a bus fault.
+  OFFLINE, ///< Passive diagnostic state only; it never gates transfers.
+
+  // Append-only operation-model additions.
+  RESULT_NOT_READY,                    ///< No retained terminal result is available.
+  STALE_RESULT,                        ///< The supplied ID does not match retained state.
+  CANCELLED,                           ///< Host-side future work was cancelled.
+  PARTIAL,                             ///< Some composite fields completed before failure.
+  INDETERMINATE,                       ///< Hardware effect cannot be proven.
+  CONFIRMATION_REQUIRED,               ///< Maintenance confirmation is absent or wrong.
+  RECONCILIATION_REQUIRED,             ///< Attach/readback is required before this work.
+  I2C_NACK,                            ///< Unified transport reported a generic NACK.
+  I2C_SHORT_TRANSFER                   ///< Fewer bytes completed than requested.
 };
 
-/// Status structure returned by all fallible operations.
-/// @note `msg` must point to a static string. The driver does not allocate message storage.
+/// Allocation-free status with a stable code, adapter/device detail, and
+/// static-lifetime message.
 struct Status {
-  Err code = Err::OK;      ///< Result code
-  int32_t detail = 0;   ///< Raw platform error, actual short transfer byte count, or 0
-  const char* msg = ""; ///< Static string describing the error
+  Err code = Err::OK;   ///< Machine-readable status code.
+  int32_t detail = 0;   ///< Optional platform or protocol detail; zero when absent.
+  const char* msg = ""; ///< Static-lifetime diagnostic text; never heap-owned.
 
-  /// Construct an OK status by default.
   constexpr Status() = default;
-  /// Construct a status with explicit code, detail, and message.
+  /// Construct a status from its three fixed fields.
+  /// @param c Machine-readable status code.
+  /// @param d Optional platform or protocol detail.
+  /// @param m Static-lifetime diagnostic string.
   constexpr Status(Err c, int32_t d, const char* m) : code(c), detail(d), msg(m) {}
 
-  /// @return true if operation succeeded
+  /// @return `true` only when `code == Err::OK`.
   constexpr bool ok() const { return code == Err::OK; }
-
-  /// @return true if the status matches the requested error code
+  /// @param expected Code to compare.
+  /// @return `true` when `code` matches `expected`.
   constexpr bool is(Err expected) const { return code == expected; }
-
-  /// @return true if operation is pending completion
+  /// @return `true` only when the operation remains active.
   constexpr bool inProgress() const { return code == Err::IN_PROGRESS; }
-
-  /// @return true if operation succeeded
+  /// @return The same value as `ok()`.
   explicit constexpr operator bool() const { return ok(); }
 
-  /// Create a success status.
+  /// @return A successful status with zero detail.
   static constexpr Status Ok() { return Status{Err::OK, 0, "OK"}; }
-
-  /// Create an error status.
+  /// Build an error status without allocation.
+  /// @param err Machine-readable failure code.
+  /// @param message Static-lifetime diagnostic string.
+  /// @param detailCode Optional platform or protocol detail.
+  /// @return The constructed failure status.
   static constexpr Status Error(Err err, const char* message, int32_t detailCode = 0) {
     return Status{err, detailCode, message};
   }
