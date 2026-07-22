@@ -326,7 +326,7 @@ python -m platformio test -e native
 doxygen Doxyfile
 ```
 
-Doxygen writes the generated reference to `.pio/doxygen/html/index.html`; do
+Doxygen writes the generated reference to `.doxygen/html/index.html`; do
 not commit generated HTML under `docs/`.
 
 PlatformIO builds cover ESP32-S2 and ESP32-S3. CI also builds the native

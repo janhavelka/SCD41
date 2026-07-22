@@ -288,7 +288,7 @@ Release steps:
 - Every public type, enum, field, method, parameter, return value, unit, and
   non-owning lifetime rule must have concrete Doxygen at its declaration.
 - `doxygen Doxyfile` is warning-clean and warning-as-error. Generated output
-  belongs under `.pio/doxygen`; never commit generated HTML into `docs/`.
+  belongs under `.doxygen`; never commit generated HTML into `docs/`.
 - `README.md` is the user entry point. Stable device facts belong in
   `docs/reference/`, owner contracts in `docs/integration/`, framework details
   in `docs/porting/`, and evidence procedures in `docs/validation/`.

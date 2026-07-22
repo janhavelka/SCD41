@@ -26,7 +26,7 @@ doxygen Doxyfile
 ```
 
 Warnings, undocumented public symbols, and missing parameter documentation are
-build failures. Generated HTML is written to `.pio/doxygen/html/index.html` and
+build failures. Generated HTML is written to `.doxygen/html/index.html` and
 must not be committed. `library.json` is the version source for the generated
 header, ESP-IDF component metadata, and the Doxygen project number.
 

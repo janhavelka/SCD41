@@ -51,7 +51,7 @@ Thanks for contributing to this repository.
 - Record uncertain device/application boundaries in `ASSUMPTIONS.md` and
   release-visible behavior in `CHANGELOG.md`.
 - Run `doxygen Doxyfile`; warnings fail the build. Generated output belongs in
-  `.pio/doxygen` and must not be committed.
+  `.doxygen` and must not be committed.
 
 ### Pull Requests
 
