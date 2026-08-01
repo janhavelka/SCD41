@@ -36,6 +36,12 @@ release or tag exists yet; physical HIL is still a release gate.
 
 #### Changed
 
+- Exact-pinned the Arduino ESP32-S2/S3 example builds to pioarduino
+  `platform-espressif32` `55.03.311` (Arduino-ESP32 `3.3.11`, ESP-IDF `5.5.5`)
+  while retaining the `54.03.20` TunnelMonitor target-package compatibility
+  build. The ESP32-S3 example now explicitly selects its 4 MB flash / QSPI
+  PSRAM memory type instead of relying on platform defaults. CI pins the
+  platform's minimum supported PlatformIO Core version, `6.1.19`.
 - `begin(const Config&)` is now a zero-I2C bind. Hardware discovery and
   reconciliation use an explicit `ATTACH` operation.
 - All sensor traffic now occurs only from caller-authorized `poll()` calls.
@@ -64,8 +70,8 @@ release or tag exists yet; physical HIL is still a release gate.
 
 #### Fixed
 
-- Arduino CI removes the framework's GNU++11 default and explicitly builds with
-  GNU++17 on the pinned Espressif 32 7.0.1 platform.
+- Arduino CI explicitly builds the library and examples with GNU++17 on the
+  pinned pioarduino `55.03.311` platform.
 - GitHub-hosted CI actions use their Node 24-compatible stable majors.
 - Doxygen output now uses a self-creatable ignored directory, has one unambiguous
   main page, and does not require optional Graphviz tooling.

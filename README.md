@@ -329,10 +329,14 @@ doxygen Doxyfile
 Doxygen writes the generated reference to `.doxygen/html/index.html`; do
 not commit generated HTML under `docs/`.
 
-PlatformIO builds cover ESP32-S2 and ESP32-S3. CI also builds the native
-ESP-IDF example for both targets, validates a packed-library consumer, and
-compile-links that package for the integration target `esp32-s3-wroom-n16r8`
-on pioarduino platform release `54.03.20`.
+PlatformIO 6.1.19 or newer builds the Arduino examples for ESP32-S2 and
+ESP32-S3 on the exact-pinned pioarduino `platform-espressif32` `55.03.311`
+stack (Arduino-ESP32 `3.3.11`, ESP-IDF `5.5.5`). This pin controls only this
+repository's examples; consuming applications retain control of their own
+platform version. CI also builds the native ESP-IDF example for both targets
+and validates a packed-library consumer. A separate compatibility job
+compile-links that package for TunnelMonitor-node's integration target
+`esp32-s3-wroom-n16r8` on its retained pioarduino `54.03.20` stack.
 
 ## Versioning
 
