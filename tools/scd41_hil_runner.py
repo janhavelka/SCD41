@@ -13,8 +13,16 @@ from typing import Optional
 
 
 DESTRUCTIVE_CONFIRMATION = "I understand EEPROM and calibration risk"
-MINIMUM_SAFE_COMMANDS = ("version", "scan", "begin", "identity", "settings", "status")
-HEALTH_COMMAND_ALIASES = ("status",)
+MINIMUM_SAFE_COMMANDS = (
+    "version",
+    "scan",
+    "begin",
+    "identity",
+    "variant",
+    "settings",
+    "status",
+)
+HEALTH_COMMAND_ALIASES = ("status", "health", "drv")
 DEFAULT_IDLE_TIMEOUT_S = 8.0
 
 SERIAL_NUMBER_RE = re.compile(
@@ -52,6 +60,7 @@ SAFE_STEPS: tuple[Step, ...] = (
     Step("bind and attach", "begin", r"op=ATTACH outcome=SUCCEEDED", timeout_s=12.0),
     Step("attached health", "status", r"runtime bound=yes attached=yes state=READY"),
     Step("identity", "identity", r"op=READ_IDENTITY outcome=SUCCEEDED.*serial=0x[0-9A-Fa-f]{12}.*variant=SCD41", timeout_s=12.0),
+    Step("sensor variant", "variant", r"op=READ_SENSOR_VARIANT outcome=SUCCEEDED.*variant=SCD41.*variant_word=0x[0-9A-Fa-f]{4}", timeout_s=12.0),
     Step("settings", "settings", r"op=READ_CONFIGURATION outcome=SUCCEEDED.*config offset_mC=", timeout_s=15.0),
     Step("dataready idle", "dataready", r"op=READ_DATA_READY outcome=SUCCEEDED.*data_ready=(yes|no)", timeout_s=12.0),
     Step("periodic start", "periodic on", r"op=START_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
@@ -231,7 +240,7 @@ def run_parser_self_test() -> None:
     require(parse_serial_number("serial_number: 100ABCDEF012") == "100ABCDEF012", "serial parser rejected plain form")
     require(parse_serial_number("serial=0x1234") is None, "serial parser accepted short serial")
     require(missing_minimum_safe_steps(SAFE_STEPS) == (), "safe HIL step contract is incomplete")
-    help_text = "version\nscan\nbegin\nidentity\nsettings\nstatus\n"
+    help_text = "version\nscan\nbegin\nidentity\nvariant\nsettings\nstatus\n"
     require(missing_minimum_help_commands(help_text) == (), "help command contract parser failed")
     require(
         classify_failure_tokens("Status: I2C_TIMEOUT; fail=1; errors=2")

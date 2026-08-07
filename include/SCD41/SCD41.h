@@ -20,12 +20,32 @@ enum class DriverState : uint8_t {
   OFFLINE   ///< Threshold reached; diagnostic only and never an admission gate.
 };
 
-/// Variant encoded in serial-number word zero.
+/// Return a stable allocation-free diagnostic name for a driver state.
+/// @param state Driver state to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* driverStateName(DriverState state) {
+  switch (state) {
+    case DriverState::UNINIT: return "UNINIT";
+    case DriverState::READY: return "READY";
+    case DriverState::DEGRADED: return "DEGRADED";
+    case DriverState::OFFLINE: return "OFFLINE";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling shared by the mature sibling driver APIs.
+/// @param state Driver state to name.
+/// @return The same static-lifetime string as `driverStateName(state)`.
+constexpr const char* toString(DriverState state) {
+  return driverStateName(state);
+}
+
+/// Variant encoded in the dedicated `get_sensor_variant` response.
 enum class SensorVariant : uint8_t {
   UNKNOWN = 0xFF, ///< No verified or recognized identity.
   SCD40 = 0x00,   ///< Observed SCD40 identity; not claimed as supported.
   SCD41 = 0x01,   ///< Supported production target.
-  SCD42 = 0x02,   ///< Observed SCD42 identity; not claimed as supported.
+  SCD42 = 0x02,   ///< Legacy enum retained; datasheet v1.7 defines no SCD42 code.
   SCD43 = 0x05    ///< Observed SCD43 identity; not claimed as supported.
 };
 
@@ -89,7 +109,8 @@ enum class OperationKind : uint8_t {
   FACTORY_RESET,             ///< Perform explicitly confirmed factory reset.
   DIAGNOSTIC_READ_WORDS,     ///< Send an arbitrary command and CRC-read up to 3 words.
   DIAGNOSTIC_WRITE_COMMAND,  ///< Send an arbitrary command word.
-  DIAGNOSTIC_WRITE_WORD      ///< Send an arbitrary command plus CRC-protected word.
+  DIAGNOSTIC_WRITE_WORD,     ///< Send an arbitrary command plus CRC-protected word.
+  READ_SENSOR_VARIANT        ///< Read the dedicated CRC-protected variant word.
 };
 
 /// Ownership state of the single operation/result slot.
@@ -367,6 +388,7 @@ struct Identity {
   SensorVariant variant = SensorVariant::UNKNOWN; ///< Decoded family variant.
   uint32_t sensorEpoch = 0; ///< Epoch in which this identity was verified.
   bool valid = false; ///< `true` only after a complete CRC-valid identity read.
+  uint16_t variantWord = 0; ///< Complete CRC-verified `get_sensor_variant` word.
 };
 
 /// Raw and decoded result of `READ_DATA_READY`.
@@ -452,6 +474,7 @@ struct HealthSnapshot {
 /// Fixed result storage. Interpret members by `OperationResult::kind`:
 /// - sample operations -> `sample`
 /// - attach/identity/wake/reinit -> `identity`
+/// - sensor-variant read -> `identity` and the raw word in `value`
 /// - factory reset -> `identity` and `configuration`
 /// - setting reads -> their scalar member plus `configuration`
 /// - setting writes/configuration/persistence -> `configuration`
@@ -620,7 +643,7 @@ public:
   static int32_t decodeTemperatureOffsetMilliC(uint16_t raw);
   /// Encode ambient pressure in the supported 70000..120000 Pa range.
   /// @param pressurePa Pressure in pascals.
-  /// @param out Encoded hPa word; unchanged when validation fails.
+  /// @param out Encoded `pressurePa / 100` word; unchanged on validation failure.
   /// @return `OK` or `INVALID_PARAM`.
   static Status encodeAmbientPressurePa(uint32_t pressurePa, uint16_t& out);
   /// Decode an ambient-pressure word to pascals.
@@ -696,7 +719,7 @@ private:
   static uint16_t _readCommandFor(OperationKind kind);
   static uint16_t _writeCommandFor(OperationKind kind);
   static ConfigurationField _fieldFor(OperationKind kind);
-  static SensorVariant _variantFromSerialWord(uint16_t word0);
+  static SensorVariant _variantFromVariantWord(uint16_t variantWord);
   static uint8_t _crc8(const uint8_t* data, size_t length);
   static uint32_t _executionWaitMs(OperationKind kind);
 

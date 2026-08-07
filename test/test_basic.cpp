@@ -34,6 +34,10 @@ static_assert(sizeof(PollResult) <= 40, "review poll result growth");
 static_assert(sizeof(FixedSample) <= 32, "review sample growth");
 static_assert(sizeof(OperationResult) <= 256, "review terminal result growth");
 static_assert(sizeof(Device) <= 1024, "review driver fixed-memory growth");
+static_assert(static_cast<uint8_t>(OperationKind::DIAGNOSTIC_WRITE_WORD) == 34U,
+              "existing operation IDs are append-only");
+static_assert(static_cast<uint8_t>(OperationKind::READ_SENSOR_VARIANT) == 35U,
+              "new operations must be appended");
 
 namespace {
 
@@ -112,9 +116,11 @@ struct ModelTransport {
   bool present = true;
   bool badCrc = false;
   uint8_t badCrcWord = 0;
+  uint16_t badCrcCommand = 0;
   ModelMode mode = ModelMode::IDLE;
   uint16_t pendingResponseCommand = 0;
-  uint16_t serialWords[3] = {0x1001, 0x2345, 0x6789};
+  uint16_t serialWords[3] = {0xF896, 0x9F07, 0x3BBE};
+  uint16_t variantWord = 0x1440;
   uint16_t measurementWords[3] = {600, 20000, 30000};
   uint16_t dataReadyWord = 1;
   uint16_t temperatureOffsetRaw = 0;
@@ -157,6 +163,7 @@ void faultRelativeCall(ModelTransport& bus, size_t relativeCall, TransferCode co
 bool isReadCommand(uint16_t command) {
   switch (command) {
     case cmd::CMD_GET_SERIAL_NUMBER:
+    case cmd::CMD_GET_SENSOR_VARIANT:
     case cmd::CMD_GET_DATA_READY_STATUS:
     case cmd::CMD_READ_MEASUREMENT:
     case cmd::CMD_GET_TEMPERATURE_OFFSET:
@@ -263,6 +270,9 @@ void fillResponse(ModelTransport& bus, uint8_t* out, size_t length) {
     case cmd::CMD_GET_SERIAL_NUMBER:
       std::memcpy(words, bus.serialWords, sizeof(words));
       break;
+    case cmd::CMD_GET_SENSOR_VARIANT:
+      words[0] = bus.variantWord;
+      break;
     case cmd::CMD_GET_DATA_READY_STATUS:
       words[0] = bus.dataReadyWord;
       break;
@@ -309,7 +319,9 @@ void fillResponse(ModelTransport& bus, uint8_t* out, size_t length) {
   for (uint8_t i = 0; i < wordCount; ++i) {
     packWord(words[i], &out[static_cast<size_t>(i) * 3U]);
   }
-  if (bus.badCrc && bus.badCrcWord < wordCount) {
+  if (bus.badCrc && bus.badCrcWord < wordCount &&
+      (bus.badCrcCommand == 0U ||
+       bus.badCrcCommand == bus.pendingResponseCommand)) {
     out[static_cast<size_t>(bus.badCrcWord) * 3U + 2U] ^= 0x5AU;
   }
 }
@@ -493,6 +505,64 @@ void setUp() {}
 void tearDown() {}
 
 void test_status_and_public_type_contracts() {
+  struct ErrorNameCase {
+    Err code;
+    const char* name;
+  };
+  const ErrorNameCase errorNames[] = {
+      {Err::OK, "OK"},
+      {Err::NOT_INITIALIZED, "NOT_INITIALIZED"},
+      {Err::INVALID_CONFIG, "INVALID_CONFIG"},
+      {Err::I2C_ERROR, "I2C_ERROR"},
+      {Err::TIMEOUT, "TIMEOUT"},
+      {Err::INVALID_PARAM, "INVALID_PARAM"},
+      {Err::DEVICE_NOT_FOUND, "DEVICE_NOT_FOUND"},
+      {Err::CRC_MISMATCH, "CRC_MISMATCH"},
+      {Err::MEASUREMENT_NOT_READY, "MEASUREMENT_NOT_READY"},
+      {Err::BUSY, "BUSY"},
+      {Err::IN_PROGRESS, "IN_PROGRESS"},
+      {Err::COMMAND_FAILED, "COMMAND_FAILED"},
+      {Err::UNSUPPORTED, "UNSUPPORTED"},
+      {Err::I2C_NACK_ADDR, "I2C_NACK_ADDR"},
+      {Err::I2C_NACK_DATA, "I2C_NACK_DATA"},
+      {Err::I2C_NACK_READ, "I2C_NACK_READ"},
+      {Err::I2C_TIMEOUT, "I2C_TIMEOUT"},
+      {Err::I2C_BUS, "I2C_BUS"},
+      {Err::OFFLINE, "OFFLINE"},
+      {Err::RESULT_NOT_READY, "RESULT_NOT_READY"},
+      {Err::STALE_RESULT, "STALE_RESULT"},
+      {Err::CANCELLED, "CANCELLED"},
+      {Err::PARTIAL, "PARTIAL"},
+      {Err::INDETERMINATE, "INDETERMINATE"},
+      {Err::CONFIRMATION_REQUIRED, "CONFIRMATION_REQUIRED"},
+      {Err::RECONCILIATION_REQUIRED, "RECONCILIATION_REQUIRED"},
+      {Err::I2C_NACK, "I2C_NACK"},
+      {Err::I2C_SHORT_TRANSFER, "I2C_SHORT_TRANSFER"},
+  };
+  for (const ErrorNameCase& item : errorNames) {
+    TEST_ASSERT_EQUAL_STRING(item.name, errorName(item.code));
+  }
+  TEST_ASSERT_EQUAL_STRING("MEASUREMENT_NOT_READY",
+                           errorName(Err::CONVERSION_NOT_READY));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN", errorName(static_cast<Err>(0xFFU)));
+  TEST_ASSERT_EQUAL_STRING("OK", toString(Err::OK));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN", toString(static_cast<Err>(0xFFU)));
+  TEST_ASSERT_EQUAL_STRING("UNINIT", driverStateName(DriverState::UNINIT));
+  TEST_ASSERT_EQUAL_STRING("READY", driverStateName(DriverState::READY));
+  TEST_ASSERT_EQUAL_STRING("DEGRADED", driverStateName(DriverState::DEGRADED));
+  TEST_ASSERT_EQUAL_STRING("OFFLINE", driverStateName(DriverState::OFFLINE));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN",
+                           driverStateName(static_cast<DriverState>(0xFFU)));
+  TEST_ASSERT_EQUAL_STRING("READY", toString(DriverState::READY));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN",
+                           toString(static_cast<DriverState>(0xFFU)));
+  const Identity legacyIdentity{UINT64_C(0x123456789ABC),
+                                SensorVariant::SCD41, 7U, true};
+  TEST_ASSERT_EQUAL_HEX64(UINT64_C(0x123456789ABC),
+                          legacyIdentity.serialNumber);
+  TEST_ASSERT_EQUAL_UINT32(7U, legacyIdentity.sensorEpoch);
+  TEST_ASSERT_TRUE(legacyIdentity.valid);
+  TEST_ASSERT_EQUAL_HEX16(0U, legacyIdentity.variantWord);
   TEST_ASSERT_TRUE(Status::Ok().ok());
   TEST_ASSERT_TRUE(Status::Error(Err::IN_PROGRESS, "pending").inProgress());
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationClass::STEADY_STATE),
@@ -503,7 +573,14 @@ void test_status_and_public_type_contracts() {
   TEST_ASSERT_TRUE(Device::limits(OperationKind::PERSIST_SETTINGS).writesNonvolatile);
   TEST_ASSERT_TRUE(Device::limits(OperationKind::FORCED_RECALIBRATION).writesNonvolatile);
   TEST_ASSERT_TRUE(Device::limits(OperationKind::FACTORY_RESET).destructive);
-  TEST_ASSERT_EQUAL_UINT32(1531U, Device::limits(OperationKind::ATTACH).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT32(1533U, Device::limits(OperationKind::ATTACH).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT8(6U, Device::limits(OperationKind::ATTACH).maxCallbacks);
+  TEST_ASSERT_EQUAL_UINT32(3U, Device::limits(OperationKind::READ_IDENTITY).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT8(4U, Device::limits(OperationKind::READ_IDENTITY).maxCallbacks);
+  TEST_ASSERT_EQUAL_UINT32(1U,
+                           Device::limits(OperationKind::READ_SENSOR_VARIANT).maxWaitMs);
+  TEST_ASSERT_EQUAL_UINT8(
+      2U, Device::limits(OperationKind::READ_SENSOR_VARIANT).maxCallbacks);
   TEST_ASSERT_EQUAL_UINT32(3U, Device::limits(OperationKind::FETCH_SAMPLE).maxWaitMs);
   TEST_ASSERT_EQUAL_UINT32(5003U, Device::limits(OperationKind::SINGLE_SHOT).maxWaitMs);
   TEST_ASSERT_EQUAL_UINT32(53U,
@@ -680,8 +757,7 @@ void test_exactly_once_and_stale_result_do_not_modify_output() {
       startJob(device, OperationRequest::make(OperationKind::ATTACH), nowMs, 5000, 9);
   driveUntilTerminal(device, bus, nowMs);
 
-  OperationResult sentinel;
-  std::memset(&sentinel, 0xA5, sizeof(sentinel));
+  OperationResult sentinel = {};
   uint8_t before[sizeof(sentinel)] = {};
   std::memcpy(before, &sentinel, sizeof(sentinel));
   const Status stale = device.takeResult(OperationId{id.requestId + 1U, id.generation}, sentinel);
@@ -943,6 +1019,145 @@ void test_read_identity_response_fault_and_crc_are_atomic() {
                     static_cast<uint8_t>(crcResult.status.code));
   const Identity afterIdentity = device.identity();
   TEST_ASSERT_EQUAL_MEMORY(&beforeIdentity, &afterIdentity, sizeof(beforeIdentity));
+
+  bus.badCrcCommand = cmd::CMD_GET_SENSOR_VARIANT;
+  bus.badCrcWord = 0;
+  const OperationResult variantCrcResult =
+      completeJob(device, bus,
+                  OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+                  100, 32);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(variantCrcResult.status.code));
+  const Identity afterVariantCrc = device.identity();
+  TEST_ASSERT_EQUAL_MEMORY(&beforeIdentity, &afterVariantCrc,
+                           sizeof(beforeIdentity));
+}
+
+void test_dedicated_variant_command_contract_and_strict_failures() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10;
+  attachDevice(device, bus, nowMs, 32);
+
+  TEST_ASSERT_EQUAL_UINT32(6U, operationCalls(bus));
+  TEST_ASSERT_EQUAL_UINT32(1U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SERIAL_NUMBER));
+  TEST_ASSERT_EQUAL_UINT32(1U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SENSOR_VARIANT));
+  TEST_ASSERT_EQUAL_HEX64(UINT64_C(0xF8969F073BBE),
+                          device.identity().serialNumber);
+  TEST_ASSERT_EQUAL_HEX16(0x1440U, device.identity().variantWord);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD41),
+                    static_cast<uint8_t>(device.identity().variant));
+
+  const Identity attachedIdentity = device.identity();
+  const OperationResult variant = completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_SENSOR_VARIANT),
+      nowMs, 100, 33);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(variant.outcome));
+  TEST_ASSERT_EQUAL_UINT32(2U, operationCalls(bus));
+  TEST_ASSERT_EQUAL_UINT32(1U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SENSOR_VARIANT));
+  TEST_ASSERT_EQUAL_UINT32(0U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SERIAL_NUMBER));
+  TEST_ASSERT_EQUAL_HEX16(0x1440U, variant.value.value);
+  TEST_ASSERT_EQUAL_MEMORY(&attachedIdentity, &variant.value.identity,
+                           sizeof(attachedIdentity));
+
+  const OperationResult identity = completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_IDENTITY),
+      nowMs, 100, 34);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(identity.outcome));
+  TEST_ASSERT_EQUAL_UINT32(4U, operationCalls(bus));
+  TEST_ASSERT_EQUAL_UINT32(1U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SERIAL_NUMBER));
+  TEST_ASSERT_EQUAL_UINT32(1U, countCommand(bus, bus.operationCallBase,
+                                           cmd::CMD_GET_SENSOR_VARIANT));
+  TEST_ASSERT_EQUAL_MEMORY(&attachedIdentity, &identity.value.identity,
+                           sizeof(attachedIdentity));
+
+  const Identity beforeCrcFailure = device.identity();
+  bus.badCrc = true;
+  bus.badCrcWord = 0;
+  const OperationResult badVariant = completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_SENSOR_VARIANT),
+      nowMs, 100, 35);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(badVariant.status.code));
+  const Identity afterCrcFailure = device.identity();
+  TEST_ASSERT_EQUAL_MEMORY(&beforeCrcFailure, &afterCrcFailure,
+                           sizeof(beforeCrcFailure));
+
+  bus.badCrc = false;
+  bus.badCrcCommand = 0U;
+  bus.variantWord = 0x0440U;
+  const OperationResult changedVariant = completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_SENSOR_VARIANT),
+      nowMs, 100, 36);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                    static_cast<uint8_t>(changedVariant.status.code));
+  TEST_ASSERT_TRUE(changedVariant.reconciliationRequired);
+  TEST_ASSERT_FALSE(device.isAttached());
+  TEST_ASSERT_FALSE(device.identity().valid);
+  TEST_ASSERT_EQUAL_HEX64(UINT64_C(0), device.identity().serialNumber);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(SensorVariant::SCD40),
+                    static_cast<uint8_t>(device.identity().variant));
+  TEST_ASSERT_EQUAL_HEX16(0x0440U, device.identity().variantWord);
+
+  ModelTransport attachCrcBus;
+  attachCrcBus.badCrc = true;
+  attachCrcBus.badCrcCommand = cmd::CMD_GET_SENSOR_VARIANT;
+  Device attachCrcDevice;
+  bindDevice(attachCrcDevice, attachCrcBus);
+  uint32_t attachCrcNowMs = 10;
+  const OperationResult attachCrc = completeJob(
+      attachCrcDevice, attachCrcBus,
+      OperationRequest::make(OperationKind::ATTACH), attachCrcNowMs, 5000, 37);
+  TEST_ASSERT_EQUAL_UINT32(6U, operationCalls(attachCrcBus));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                    static_cast<uint8_t>(attachCrc.outcome));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(attachCrc.status.code));
+  TEST_ASSERT_FALSE(attachCrcDevice.isAttached());
+  TEST_ASSERT_FALSE(attachCrcDevice.identity().valid);
+  TEST_ASSERT_TRUE(attachCrc.reconciliationRequired);
+
+  struct UnsupportedVariantCase {
+    uint16_t word;
+    SensorVariant variant;
+  };
+  const UnsupportedVariantCase unsupported[] = {
+      {0x0440U, SensorVariant::SCD40},
+      {0x5441U, SensorVariant::SCD43},
+      {0x2440U, SensorVariant::UNKNOWN},
+      {0xF440U, SensorVariant::UNKNOWN},
+  };
+  for (const UnsupportedVariantCase& item : unsupported) {
+    ModelTransport strictBus;
+    strictBus.variantWord = item.word;
+    Device strictDevice;
+    bindDevice(strictDevice, strictBus);
+    uint32_t strictNowMs = 10;
+    const OperationResult result = completeJob(
+        strictDevice, strictBus, OperationRequest::make(OperationKind::ATTACH),
+        strictNowMs, 5000, 36);
+    TEST_ASSERT_EQUAL_UINT32(6U, operationCalls(strictBus));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                      static_cast<uint8_t>(result.outcome));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::UNSUPPORTED),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(strictDevice.isAttached());
+    TEST_ASSERT_TRUE(strictDevice.identity().valid);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.variant),
+                      static_cast<uint8_t>(strictDevice.identity().variant));
+    TEST_ASSERT_EQUAL_HEX16(item.word, strictDevice.identity().variantWord);
+    TEST_ASSERT_EQUAL_HEX64(UINT64_C(0xF8969F073BBE),
+                            strictDevice.identity().serialNumber);
+  }
 }
 
 void test_periodic_fetch_phase_faults_preserve_last_sample() {
@@ -1870,7 +2085,7 @@ void test_identity_changes_and_wrong_variants_require_attach() {
     bindDevice(device, bus);
     uint32_t nowMs = 10;
     attachDevice(device, bus, nowMs);
-    bus.serialWords[0] = 0x0001U;
+    bus.variantWord = 0x0440U;
     const OperationResult result = completeJob(
         device, bus, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
         100, 191);
@@ -1890,7 +2105,7 @@ void test_identity_changes_and_wrong_variants_require_attach() {
     attachDevice(device, bus, nowMs);
     completeJob(device, bus, OperationRequest::make(OperationKind::POWER_DOWN),
                 nowMs, 100, 192);
-    bus.serialWords[0] = 0x0001U;
+    bus.variantWord = 0x0440U;
     const OperationResult result = completeJob(
         device, bus, OperationRequest::make(OperationKind::WAKE_UP), nowMs,
         1000, 193);
@@ -2241,7 +2456,7 @@ void test_scheduled_wait_topologies_handle_clock_wrap() {
     ModelTransport bus;
     Device device;
     bindDevice(device, bus);
-    uint32_t nowMs = 0xFFFFFDCDU;
+    uint32_t nowMs = 0xFFFFFDCBU;
     attachDevice(device, bus, nowMs, requestId++);
     TEST_ASSERT_TRUE(nowMs >= 0xFFFFF000U);
     const uint32_t startedMs = nowMs;
@@ -2294,6 +2509,18 @@ void test_rebind_uses_only_new_transport_context() {
 void test_helper_boundaries_and_extreme_float_inputs() {
   const uint8_t crcVector[2] = {0xBE, 0xEF};
   TEST_ASSERT_EQUAL_HEX8(0x92, crc8(crcVector, sizeof(crcVector)));
+  const uint8_t scd40Variant[2] = {0x04U, 0x40U};
+  const uint8_t scd41Variant[2] = {0x14U, 0x40U};
+  const uint8_t scd43Variant[2] = {0x54U, 0x41U};
+  const uint8_t serialWord0[2] = {0xF8U, 0x96U};
+  const uint8_t serialWord1[2] = {0x9FU, 0x07U};
+  const uint8_t serialWord2[2] = {0x3BU, 0xBEU};
+  TEST_ASSERT_EQUAL_HEX8(0x3FU, crc8(scd40Variant, sizeof(scd40Variant)));
+  TEST_ASSERT_EQUAL_HEX8(0x51U, crc8(scd41Variant, sizeof(scd41Variant)));
+  TEST_ASSERT_EQUAL_HEX8(0xE9U, crc8(scd43Variant, sizeof(scd43Variant)));
+  TEST_ASSERT_EQUAL_HEX8(0x31U, crc8(serialWord0, sizeof(serialWord0)));
+  TEST_ASSERT_EQUAL_HEX8(0xC2U, crc8(serialWord1, sizeof(serialWord1)));
+  TEST_ASSERT_EQUAL_HEX8(0x89U, crc8(serialWord2, sizeof(serialWord2)));
   TEST_ASSERT_FALSE(Device::isDataReady(0));
   TEST_ASSERT_TRUE(Device::isDataReady(0x0001));
   TEST_ASSERT_TRUE(Device::isDataReady(0x0400));
@@ -2330,6 +2557,10 @@ void test_helper_boundaries_and_extreme_float_inputs() {
                     static_cast<uint8_t>(Device::encodeAmbientPressurePa(69999, encoded).code));
   TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(70000, encoded).ok());
   TEST_ASSERT_EQUAL_UINT16(700U, encoded);
+  TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(70099, encoded).ok());
+  TEST_ASSERT_EQUAL_UINT16(700U, encoded);
+  TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(70100, encoded).ok());
+  TEST_ASSERT_EQUAL_UINT16(701U, encoded);
   TEST_ASSERT_TRUE(Device::encodeAmbientPressurePa(120000, encoded).ok());
   TEST_ASSERT_EQUAL_UINT16(1200U, encoded);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
@@ -2355,6 +2586,7 @@ int main(int, char**) {
   RUN_TEST(test_attach_converges_from_known_modes_and_hotplug);
   RUN_TEST(test_hotplug_attach_starts_a_new_cache_epoch);
   RUN_TEST(test_read_identity_response_fault_and_crc_are_atomic);
+  RUN_TEST(test_dedicated_variant_command_contract_and_strict_failures);
   RUN_TEST(test_periodic_fetch_phase_faults_preserve_last_sample);
   RUN_TEST(test_not_ready_fetch_is_terminal_no_data_without_hidden_retry);
   RUN_TEST(test_fixed_point_sample_take_and_peek_contract);

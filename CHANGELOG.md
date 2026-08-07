@@ -6,8 +6,40 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.0.0` for compatibility validation. No `v1.0.0`
-release or tag exists yet; physical HIL is still a release gate.
+The manifest is staged at `1.1.0` for compatibility validation. No release tag
+is created while physical HIL remains an open release gate.
+
+### Planned 1.1.0
+
+#### Added
+
+- Append-only `READ_SENSOR_VARIANT` operation and `Identity::variantWord` for
+  the dedicated CRC-protected `get_sensor_variant` (`0x202F`) response.
+- Allocation-free `errorName` / `driverStateName` helpers with `toString`
+  aliases and exhaustive enum/unknown-value coverage.
+- Arduino and native ESP-IDF CLI parity for variant reads and bounded raw
+  command, word-write, and CRC-checked word-read diagnostics, with complete
+  timing, state, health, and configuration-result evidence.
+
+#### Changed
+
+- Synchronized the bundled vendor reference and protocol documentation to the
+  Sensirion SCD4x datasheet v1.7 (April 2025), including MSL1 handling, current
+  FRC preparation, and the removal of the old first-single-shot discard rule.
+- `READ_IDENTITY`, `ATTACH`, wake, and reset reconciliation now verify both the
+  serial number and the dedicated sensor-variant response atomically.
+- Exact-pinned native host validation to PlatformIO `native@1.2.1`.
+- Pinned CI runners and third-party actions to audited Ubuntu/action revisions
+  while retaining the native ESP-IDF v6.0.1 build contract.
+
+#### Fixed
+
+- Strict variant checking no longer misinterprets arbitrary serial-number bits
+  as product identity. Vendor serial example `0xF8969F073BBE` is accepted, and
+  SCD40, SCD43, unknown, or CRC-invalid variant responses remain observable and
+  fail safely under strict policy.
+- Ambient-pressure encoding now follows the datasheet's exact integer
+  `pressurePa / 100` conversion instead of rounding to the nearest hPa.
 
 ### Planned 1.0.0
 

@@ -148,8 +148,10 @@ struct Status {
 
 - I2C address is fixed at `0x62`.
 - `begin()` only validates and copies configuration. Explicit `ATTACH` performs
-  wake/stop reconciliation, reads `get_serial_number`, CRC-checks it, and
-  validates SCD41 variant bits `[15:12] == 0x1`.
+  wake/stop reconciliation, then reads and CRC-checks `get_serial_number` and
+  the dedicated `get_sensor_variant` (`0x202F`) response.
+- Strict variant policy validates bits `[15:12] == 0x1` only in the dedicated
+  sensor-variant response. Serial-number words carry no variant contract.
 - All commands are 16-bit, MSB-first.
 - Every returned 16-bit data word MUST be CRC-8 checked.
 - Every written 16-bit payload word MUST append the correct CRC-8 byte.

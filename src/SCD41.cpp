@@ -42,6 +42,7 @@ uint64_t serialNumberFromWords(const uint16_t words[3]) {
 bool isReadKind(OperationKind kind) {
   switch (kind) {
     case OperationKind::READ_IDENTITY:
+    case OperationKind::READ_SENSOR_VARIANT:
     case OperationKind::READ_DATA_READY:
     case OperationKind::READ_TEMPERATURE_OFFSET:
     case OperationKind::READ_SENSOR_ALTITUDE:
@@ -79,6 +80,7 @@ bool isManagedCommand(uint16_t command) {
     case cmd::CMD_PERFORM_SELF_TEST:
     case cmd::CMD_PERFORM_FACTORY_RESET:
     case cmd::CMD_REINIT:
+    case cmd::CMD_GET_SENSOR_VARIANT:
     case cmd::CMD_SET_ASC_INITIAL_PERIOD:
     case cmd::CMD_GET_ASC_INITIAL_PERIOD:
     case cmd::CMD_SET_ASC_STANDARD_PERIOD:
@@ -436,11 +438,11 @@ OperationLimits SCD41::limits(OperationKind kind) {
   limitsValue.maxRetries = 0;
   switch (kind) {
     case OperationKind::ATTACH:
-      limitsValue.maxCallbacks = 4;
-      limitsValue.maxWaitMs = 1531;
+      limitsValue.maxCallbacks = 6;
+      limitsValue.maxWaitMs = 1533;
       break;
-    case OperationKind::READ_IDENTITY:
     case OperationKind::READ_DATA_READY:
+    case OperationKind::READ_SENSOR_VARIANT:
     case OperationKind::READ_TEMPERATURE_OFFSET:
     case OperationKind::READ_SENSOR_ALTITUDE:
     case OperationKind::READ_AMBIENT_PRESSURE:
@@ -450,6 +452,11 @@ OperationLimits SCD41::limits(OperationKind kind) {
     case OperationKind::READ_ASC_STANDARD_PERIOD:
       limitsValue.maxCallbacks = 2;
       limitsValue.maxWaitMs = 1;
+      limitsValue.operationClass = OperationClass::STEADY_STATE;
+      break;
+    case OperationKind::READ_IDENTITY:
+      limitsValue.maxCallbacks = 4;
+      limitsValue.maxWaitMs = 3;
       limitsValue.operationClass = OperationClass::STEADY_STATE;
       break;
     case OperationKind::START_PERIODIC:
@@ -491,8 +498,8 @@ OperationLimits SCD41::limits(OperationKind kind) {
       break;
     case OperationKind::WAKE_UP:
     case OperationKind::REINIT:
-      limitsValue.maxCallbacks = 3;
-      limitsValue.maxWaitMs = 31;
+      limitsValue.maxCallbacks = 5;
+      limitsValue.maxWaitMs = 33;
       break;
     case OperationKind::SELF_TEST:
       limitsValue.maxCallbacks = 2;
@@ -512,8 +519,8 @@ OperationLimits SCD41::limits(OperationKind kind) {
       limitsValue.writesNonvolatile = true;
       break;
     case OperationKind::FACTORY_RESET:
-      limitsValue.maxCallbacks = 3;
-      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_FACTORY_RESET_MS + 1U;
+      limitsValue.maxCallbacks = 5;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_FACTORY_RESET_MS + 3U;
       limitsValue.operationClass = OperationClass::MAINTENANCE;
       limitsValue.writesNonvolatile = true;
       limitsValue.destructive = true;
@@ -585,7 +592,7 @@ Status SCD41::encodeAmbientPressurePa(uint32_t pressurePa, uint16_t& out) {
       pressurePa > cmd::AMBIENT_PRESSURE_MAX_PA) {
     return Status::Error(Err::INVALID_PARAM, "Ambient pressure out of range");
   }
-  out = static_cast<uint16_t>((pressurePa + 50U) / 100U);
+  out = static_cast<uint16_t>(pressurePa / 100U);
   return Status::Ok();
 }
 
@@ -928,7 +935,9 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       if (!_timeReached(nowMs, _active.nextDueMs)) {
         return Status::Error(Err::IN_PROGRESS, "Waiting for identity");
       }
-      _active.phase = OperationPhase::READ_RESPONSE;
+      _active.phase = _active.fieldIndex == 0U
+                          ? OperationPhase::READ_RESPONSE
+                          : OperationPhase::READ_VERIFY_RESPONSE;
       return Status::Error(Err::IN_PROGRESS, "Identity response due");
 
     case OperationPhase::READ_RESPONSE: {
@@ -936,11 +945,35 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       status = _readWords(words, 3, nowMs, callbacksRemaining);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
-      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      _workingValue.identity.serialNumber = serialNumberFromWords(words);
+      _active.fieldIndex = 1U;
+      _active.phase = OperationPhase::SEND_VERIFY_COMMAND;
+      _active.nextDueMs = nowMs;
+      return Status::Error(Err::IN_PROGRESS, "Variant read due");
+    }
+
+    case OperationPhase::SEND_VERIFY_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SENSOR_VARIANT,
+                             TransferIntent::NORMAL, nowMs,
+                             callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for variant");
+
+    case OperationPhase::READ_VERIFY_RESPONSE: {
+      uint16_t variantWord = 0U;
+      status = _readWords(&variantWord, 1, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromVariantWord(variantWord);
+      const uint64_t serialNumber = _workingValue.identity.serialNumber;
       if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
         _advanceSensorEpoch();
-        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = variantWord;
         _identity.sensorEpoch = _sensorEpoch;
         _identity.valid = true;
         _configuration = {};
@@ -952,13 +985,14 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                 nowMs);
         return Status::Ok();
       }
-      const uint64_t serialNumber = serialNumberFromWords(words);
       const bool sameSensor = _identity.valid &&
-                              _identity.serialNumber == serialNumber;
+                              _identity.serialNumber == serialNumber &&
+                              _identity.variant == variant;
       const ConfigurationSnapshot previousConfiguration = _configuration;
       _advanceSensorEpoch();
       _identity.serialNumber = serialNumber;
       _identity.variant = variant;
+      _identity.variantWord = variantWord;
       _identity.sensorEpoch = _sensorEpoch;
       _identity.valid = true;
       _workingValue.identity = _identity;
@@ -999,7 +1033,10 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       if (!_timeReached(nowMs, _active.nextDueMs)) {
         return Status::Error(Err::IN_PROGRESS, "Waiting for read response");
       }
-      _active.phase = OperationPhase::READ_RESPONSE;
+      _active.phase = readKind == OperationKind::READ_IDENTITY &&
+                              _active.fieldIndex == 1U
+                          ? OperationPhase::READ_VERIFY_RESPONSE
+                          : OperationPhase::READ_RESPONSE;
       return Status::Error(Err::IN_PROGRESS, "Read response due");
 
     case OperationPhase::READ_RESPONSE: {
@@ -1018,44 +1055,42 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       }
 
       if (readKind == OperationKind::READ_IDENTITY) {
-        const SensorVariant variant = _variantFromSerialWord(words[0]);
-        if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+        _workingValue.identity.serialNumber = serialNumberFromWords(words);
+        _active.fieldIndex = 1U;
+        _active.phase = OperationPhase::SEND_VERIFY_COMMAND;
+        _active.nextDueMs = nowMs;
+        return Status::Error(Err::IN_PROGRESS, "Variant read due");
+      } else if (readKind == OperationKind::READ_SENSOR_VARIANT) {
+        const SensorVariant variant = _variantFromVariantWord(words[0]);
+        const bool variantChanged =
+            _identity.valid && _identity.variant != variant;
+        const bool strictUnsupported =
+            _config.strictVariantCheck && variant != SensorVariant::SCD41;
+        if (strictUnsupported || variantChanged) {
           _advanceSensorEpoch();
-          _identity.serialNumber = serialNumberFromWords(words);
+          _identity = {};
           _identity.variant = variant;
+          _identity.variantWord = words[0];
           _identity.sensorEpoch = _sensorEpoch;
-          _identity.valid = true;
           _configuration = {};
           _configuration.sensorEpoch = _sensorEpoch;
           _workingValue.identity = _identity;
+          _workingValue.value = words[0];
           _markReconciliationRequired();
           _finish(OperationOutcome::FAILED, EffectState::NONE,
-                  Status::Error(Err::UNSUPPORTED,
-                                "Detected variant is not SCD41"), nowMs);
-          return Status::Ok();
-        }
-        const uint64_t serialNumber = serialNumberFromWords(words);
-        if (_identity.valid && _identity.serialNumber != serialNumber) {
-          _advanceSensorEpoch();
-          _configuration = {};
-          _configuration.sensorEpoch = _sensorEpoch;
-          _identity.serialNumber = serialNumber;
-          _identity.variant = variant;
-          _identity.sensorEpoch = _sensorEpoch;
-          _identity.valid = true;
-          _workingValue.identity = _identity;
-          _markReconciliationRequired();
-          _finish(OperationOutcome::FAILED, EffectState::NONE,
-                  Status::Error(Err::RECONCILIATION_REQUIRED,
-                                "Sensor identity changed; attach required"),
+                  strictUnsupported
+                      ? Status::Error(Err::UNSUPPORTED,
+                                      "Detected variant is not SCD41")
+                      : Status::Error(Err::RECONCILIATION_REQUIRED,
+                                      "Sensor variant changed; attach required"),
                   nowMs);
           return Status::Ok();
         }
-        _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = words[0];
         _identity.sensorEpoch = _sensorEpoch;
-        _identity.valid = true;
         _workingValue.identity = _identity;
+        _workingValue.value = words[0];
       } else if (readKind == OperationKind::READ_DATA_READY) {
         _workingValue.dataReady.raw = words[0];
         _workingValue.dataReady.ready = isDataReady(words[0]);
@@ -1087,6 +1122,69 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       }
 
       _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(), nowMs);
+      return Status::Ok();
+    }
+
+    case OperationPhase::SEND_VERIFY_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SENSOR_VARIANT,
+                             TransferIntent::NORMAL, nowMs,
+                             callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for variant");
+
+    case OperationPhase::READ_VERIFY_RESPONSE: {
+      uint16_t variantWord = 0U;
+      status = _readWords(&variantWord, 1, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromVariantWord(variantWord);
+      const uint64_t serialNumber = _workingValue.identity.serialNumber;
+      if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
+        _advanceSensorEpoch();
+        _identity.serialNumber = serialNumber;
+        _identity.variant = variant;
+        _identity.variantWord = variantWord;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::FAILED, EffectState::NONE,
+                Status::Error(Err::UNSUPPORTED,
+                              "Detected variant is not SCD41"), nowMs);
+        return Status::Ok();
+      }
+      if (_identity.valid &&
+          (_identity.serialNumber != serialNumber ||
+           _identity.variant != variant)) {
+        _advanceSensorEpoch();
+        _configuration = {};
+        _configuration.sensorEpoch = _sensorEpoch;
+        _identity.serialNumber = serialNumber;
+        _identity.variant = variant;
+        _identity.variantWord = variantWord;
+        _identity.sensorEpoch = _sensorEpoch;
+        _identity.valid = true;
+        _workingValue.identity = _identity;
+        _markReconciliationRequired();
+        _finish(OperationOutcome::FAILED, EffectState::NONE,
+                Status::Error(Err::RECONCILIATION_REQUIRED,
+                              "Sensor identity changed; attach required"),
+                nowMs);
+        return Status::Ok();
+      }
+      _identity.serialNumber = serialNumber;
+      _identity.variant = variant;
+      _identity.variantWord = variantWord;
+      _identity.sensorEpoch = _sensorEpoch;
+      _identity.valid = true;
+      _workingValue.identity = _identity;
+      _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
+              nowMs);
       return Status::Ok();
     }
 
@@ -1218,9 +1316,13 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         return Status::Error(Err::IN_PROGRESS, "Waiting for command completion");
       }
       if (kind == OperationKind::WAKE_UP) {
-        _active.phase = _active.fieldIndex == 3U
-                            ? OperationPhase::READ_VERIFY_RESPONSE
-                            : OperationPhase::SEND_VERIFY_COMMAND;
+        if (_active.fieldIndex == 0U) {
+          _active.phase = OperationPhase::SEND_VERIFY_COMMAND;
+        } else if (_active.fieldIndex == 1U) {
+          _active.phase = OperationPhase::READ_VERIFY_RESPONSE;
+        } else {
+          _active.phase = OperationPhase::READ_RESPONSE;
+        }
         return Status::Error(Err::IN_PROGRESS, "Wake verification due");
       }
       if (kind == OperationKind::START_PERIODIC) {
@@ -1237,12 +1339,13 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       return Status::Ok();
 
     case OperationPhase::SEND_VERIFY_COMMAND:
-      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER, TransferIntent::NORMAL,
-                             nowMs, callbacksRemaining);
+      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER,
+                             TransferIntent::NORMAL, nowMs,
+                             callbacksRemaining);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
       _active.phase = OperationPhase::WAIT_EXECUTION;
-      _active.fieldIndex = 3U;
+      _active.fieldIndex = 1U;
       _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
       return Status::Error(Err::IN_PROGRESS, "Waiting for wake verification");
 
@@ -1251,11 +1354,35 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       status = _readWords(words, 3, nowMs, callbacksRemaining);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
-      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      _workingValue.identity.serialNumber = serialNumberFromWords(words);
+      _active.phase = OperationPhase::SEND_READ_COMMAND;
+      _active.nextDueMs = nowMs;
+      return Status::Error(Err::IN_PROGRESS, "Wake variant read due");
+    }
+
+    case OperationPhase::SEND_READ_COMMAND:
+      status = _writeCommand(cmd::CMD_GET_SENSOR_VARIANT,
+                             TransferIntent::NORMAL, nowMs,
+                             callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      _active.phase = OperationPhase::WAIT_EXECUTION;
+      _active.fieldIndex = 2U;
+      _active.nextDueMs = nowMs + cmd::EXECUTION_TIME_SHORT_MS;
+      return Status::Error(Err::IN_PROGRESS, "Waiting for wake variant");
+
+    case OperationPhase::READ_RESPONSE: {
+      uint16_t variantWord = 0U;
+      status = _readWords(&variantWord, 1, nowMs, callbacksRemaining);
+      if (status.inProgress()) return status;
+      if (!status.ok()) return status;
+      const SensorVariant variant = _variantFromVariantWord(variantWord);
+      const uint64_t serialNumber = _workingValue.identity.serialNumber;
       if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
         _advanceSensorEpoch();
-        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = variantWord;
         _identity.sensorEpoch = _sensorEpoch;
         _identity.valid = true;
         _configuration = {};
@@ -1267,13 +1394,15 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                               "Wake verified wrong variant"), nowMs);
         return Status::Ok();
       }
-      const uint64_t serialNumber = serialNumberFromWords(words);
-      if (_identity.valid && _identity.serialNumber != serialNumber) {
+      if (_identity.valid &&
+          (_identity.serialNumber != serialNumber ||
+           _identity.variant != variant)) {
         _advanceSensorEpoch();
         _configuration = {};
         _configuration.sensorEpoch = _sensorEpoch;
         _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = variantWord;
         _identity.sensorEpoch = _sensorEpoch;
         _identity.valid = true;
         _workingValue.identity = _identity;
@@ -1286,6 +1415,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       }
       _identity.serialNumber = serialNumber;
       _identity.variant = variant;
+      _identity.variantWord = variantWord;
       _identity.sensorEpoch = _sensorEpoch;
       _identity.valid = true;
       _workingValue.identity = _identity;
@@ -1500,8 +1630,10 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
     }
 
     case OperationPhase::SEND_VERIFY_COMMAND:
-      status = _writeCommand(cmd::CMD_GET_SERIAL_NUMBER, TransferIntent::NORMAL,
-                             nowMs, callbacksRemaining);
+      status = _writeCommand(
+          _active.fieldIndex == 0U ? cmd::CMD_GET_SERIAL_NUMBER
+                                   : cmd::CMD_GET_SENSOR_VARIANT,
+          TransferIntent::NORMAL, nowMs, callbacksRemaining);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
       _active.phase = OperationPhase::SEND_READ_COMMAND;
@@ -1517,14 +1649,25 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
 
     case OperationPhase::READ_VERIFY_RESPONSE: {
       uint16_t words[3] = {};
-      status = _readWords(words, 3, nowMs, callbacksRemaining);
+      const uint8_t count = _active.fieldIndex == 0U ? 3U : 1U;
+      status = _readWords(words, count, nowMs, callbacksRemaining);
       if (status.inProgress()) return status;
       if (!status.ok()) return status;
-      const SensorVariant variant = _variantFromSerialWord(words[0]);
+      if (_active.fieldIndex == 0U) {
+        _workingValue.identity.serialNumber = serialNumberFromWords(words);
+        _active.fieldIndex = 1U;
+        _active.phase = OperationPhase::SEND_VERIFY_COMMAND;
+        _active.nextDueMs = nowMs;
+        return Status::Error(Err::IN_PROGRESS, "Reset variant read due");
+      }
+      const uint16_t variantWord = words[0];
+      const SensorVariant variant = _variantFromVariantWord(variantWord);
+      const uint64_t serialNumber = _workingValue.identity.serialNumber;
       if (_config.strictVariantCheck && variant != SensorVariant::SCD41) {
         _advanceSensorEpoch();
-        _identity.serialNumber = serialNumberFromWords(words);
+        _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = variantWord;
         _identity.sensorEpoch = _sensorEpoch;
         _identity.valid = true;
         _configuration = {};
@@ -1536,11 +1679,13 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
                               "Reset verified wrong variant"), nowMs);
         return Status::Ok();
       }
-      const uint64_t serialNumber = serialNumberFromWords(words);
-      if (_identity.valid && _identity.serialNumber != serialNumber) {
+      if (_identity.valid &&
+          (_identity.serialNumber != serialNumber ||
+           _identity.variant != variant)) {
         _advanceSensorEpoch();
         _identity.serialNumber = serialNumber;
         _identity.variant = variant;
+        _identity.variantWord = variantWord;
         _identity.sensorEpoch = _sensorEpoch;
         _identity.valid = true;
         _configuration = {};
@@ -1556,6 +1701,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _advanceSensorEpoch();
       _identity.serialNumber = serialNumber;
       _identity.variant = variant;
+      _identity.variantWord = variantWord;
       _identity.sensorEpoch = _sensorEpoch;
       _identity.valid = true;
       _configuration.verifiedMask = 0;
@@ -2116,6 +2262,8 @@ uint16_t SCD41::_readCommandFor(OperationKind kind) {
   switch (kind) {
     case OperationKind::READ_IDENTITY:
       return cmd::CMD_GET_SERIAL_NUMBER;
+    case OperationKind::READ_SENSOR_VARIANT:
+      return cmd::CMD_GET_SENSOR_VARIANT;
     case OperationKind::READ_DATA_READY:
       return cmd::CMD_GET_DATA_READY_STATUS;
     case OperationKind::READ_TEMPERATURE_OFFSET:
@@ -2215,16 +2363,14 @@ ConfigurationField SCD41::_fieldFor(OperationKind kind) {
   }
 }
 
-SensorVariant SCD41::_variantFromSerialWord(uint16_t word0) {
-  switch (static_cast<uint8_t>((word0 & cmd::SERIAL_VARIANT_MASK) >>
-                               cmd::SERIAL_VARIANT_SHIFT)) {
-    case cmd::SERIAL_VARIANT_SCD40:
+SensorVariant SCD41::_variantFromVariantWord(uint16_t variantWord) {
+  switch (static_cast<uint8_t>((variantWord & cmd::SENSOR_VARIANT_MASK) >>
+                               cmd::SENSOR_VARIANT_SHIFT)) {
+    case cmd::SENSOR_VARIANT_SCD40:
       return SensorVariant::SCD40;
-    case cmd::SERIAL_VARIANT_SCD41:
+    case cmd::SENSOR_VARIANT_SCD41:
       return SensorVariant::SCD41;
-    case cmd::SERIAL_VARIANT_SCD42:
-      return SensorVariant::SCD42;
-    case cmd::SERIAL_VARIANT_SCD43:
+    case cmd::SENSOR_VARIANT_SCD43:
       return SensorVariant::SCD43;
     default:
       return SensorVariant::UNKNOWN;

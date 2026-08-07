@@ -15,9 +15,10 @@ IDF_TRANSPORT_HEADER = IDF_ROOT / "main" / "IdfI2cTransport.h"
 IDF_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
 
 MANDATORY_COMMANDS = {
-    "?", "help", "version", "scan", "begin", "end", "status", "result",
-    "cancel", "identity", "periodic", "dataready", "read", "single", "sample",
-    "settings", "sleep", "wake", "toffset", "altitude", "pressure",
+    "?", "help", "version", "ver", "scan", "begin", "end", "status", "drv",
+    "health", "result", "cancel", "identity", "variant", "periodic",
+    "dataready", "read", "single", "sample",
+    "settings", "cfg", "sleep", "wake", "toffset", "altitude", "pressure",
     "asc_enabled", "asc_target", "asc_initial", "asc_standard", "reinit",
     "selftest", "frc", "persist", "factory_reset", "command",
 }
@@ -35,6 +36,9 @@ REQUIRED_IDF_TOKENS = (
     "device.cancel(runtime.operationId, idfNowMs())",
     "device.takeResult(id, result)",
     "SCD41::SCD41::limits(kind)",
+    "SCD41::errorName(value)",
+    "OperationRequest::diagnosticWriteCommand(command)",
+    "OperationRequest::diagnosticWriteWord(command, word)",
 )
 REQUIRED_TRANSPORT_TOKENS = (
     "SCD41::TransferResult idfI2cTransfer",
@@ -117,6 +121,11 @@ def check_confirmations(text: str) -> None:
                    "OperationRequest::factoryReset()", "factory_reset")
     require_before(command_block(text, "frc"), 'confirm != "confirm"',
                    "OperationRequest::forcedRecalibration", "forced recalibration")
+    raw = command_block(text, "command")
+    require_before(raw, 'confirm != "confirm"',
+                   "OperationRequest::diagnosticWriteCommand", "diagnostic command write")
+    require_before(raw, 'confirm != "confirm"',
+                   "OperationRequest::diagnosticWriteWord", "diagnostic word write")
 
 
 def main() -> int:

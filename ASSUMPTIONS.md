@@ -5,10 +5,14 @@ core driver cannot determine by itself.
 
 ## Device and protocol assumptions
 
-- The production target is SCD41. SCD40, SCD42, and SCD43 identities can be
-  observed, but are not claimed as supported devices.
+- The production target is SCD41. SCD40 and SCD43 identities can be observed,
+  but are not claimed as supported devices. The legacy `SCD42` enum remains for
+  source compatibility; datasheet v1.7 defines no SCD42 variant encoding.
 - The I2C address is fixed at `0x62`.
-- Serial-number word 0 bits `[15:12] == 0x1` identify SCD41.
+- The CRC-protected `get_sensor_variant` (`0x202F`) response bits `[15:12]`
+  identify the family: `0x0` SCD40, `0x1` SCD41, and `0x5` SCD43. Serial-number
+  words carry no variant contract. Unrecognized encodings remain observable as
+  `SensorVariant::UNKNOWN`.
 - Ambient pressure is supplied in Pa at the public API and encoded as `Pa / 100`
   for the device. The documented useful input range is 70000-120000 Pa.
 - A generic write NACK for a request marked `EXPECTED_WRITE_NACK` is sufficient
@@ -51,8 +55,9 @@ core driver cannot determine by itself.
   older epoch is historical diagnostic data, not current sensor output.
 - Sleep/wake does not by itself define a new product measurement epoch. The
   result and reconciliation fields remain the authoritative driver evidence.
-- The first single-shot CO2 results after power-up or a mode transition may be
-  unsuitable for publication. Warm-up discard count is product policy.
+- Warm-up, publication, and measurement-quality policy remain product-owned;
+  the driver reports protocol-valid measurements without imposing a discard
+  count.
 - Temperature offset, altitude, pressure source, ASC policy, calibration
   cadence, reference concentration, persistence frequency, and sample-quality
   thresholds are product decisions.

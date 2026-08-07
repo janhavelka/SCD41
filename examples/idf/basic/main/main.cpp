@@ -169,45 +169,27 @@ bool readLine(Line& output) {
 }
 
 const char* errName(SCD41::Err value) {
+  return SCD41::errorName(value);
+}
+
+const char* stateName(SCD41::DriverState value) {
+  return SCD41::driverStateName(value);
+}
+
+const char* operationStateName(SCD41::OperationState value) {
   switch (value) {
-    case SCD41::Err::OK: return "OK";
-    case SCD41::Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
-    case SCD41::Err::INVALID_CONFIG: return "INVALID_CONFIG";
-    case SCD41::Err::INVALID_PARAM: return "INVALID_PARAM";
-    case SCD41::Err::BUSY: return "BUSY";
-    case SCD41::Err::IN_PROGRESS: return "IN_PROGRESS";
-    case SCD41::Err::RESULT_NOT_READY: return "RESULT_NOT_READY";
-    case SCD41::Err::STALE_RESULT: return "STALE_RESULT";
-    case SCD41::Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
-    case SCD41::Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
-    case SCD41::Err::CRC_MISMATCH: return "CRC_MISMATCH";
-    case SCD41::Err::COMMAND_FAILED: return "COMMAND_FAILED";
-    case SCD41::Err::UNSUPPORTED: return "UNSUPPORTED";
-    case SCD41::Err::TIMEOUT: return "TIMEOUT";
-    case SCD41::Err::CANCELLED: return "CANCELLED";
-    case SCD41::Err::PARTIAL: return "PARTIAL";
-    case SCD41::Err::INDETERMINATE: return "INDETERMINATE";
-    case SCD41::Err::CONFIRMATION_REQUIRED: return "CONFIRMATION_REQUIRED";
-    case SCD41::Err::RECONCILIATION_REQUIRED: return "RECONCILIATION_REQUIRED";
-    case SCD41::Err::I2C_ERROR: return "I2C_ERROR";
-    case SCD41::Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
-    case SCD41::Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
-    case SCD41::Err::I2C_NACK_READ: return "I2C_NACK_READ";
-    case SCD41::Err::I2C_NACK: return "I2C_NACK";
-    case SCD41::Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
-    case SCD41::Err::I2C_BUS: return "I2C_BUS";
-    case SCD41::Err::I2C_SHORT_TRANSFER: return "I2C_SHORT_TRANSFER";
-    case SCD41::Err::OFFLINE: return "OFFLINE";
+    case SCD41::OperationState::IDLE: return "IDLE";
+    case SCD41::OperationState::ACTIVE: return "ACTIVE";
+    case SCD41::OperationState::RESULT_PENDING: return "RESULT_PENDING";
   }
   return "UNKNOWN";
 }
 
-const char* stateName(SCD41::DriverState value) {
+const char* evidenceName(SCD41::ModeEvidence value) {
   switch (value) {
-    case SCD41::DriverState::UNINIT: return "UNINIT";
-    case SCD41::DriverState::READY: return "READY";
-    case SCD41::DriverState::DEGRADED: return "DEGRADED";
-    case SCD41::DriverState::OFFLINE: return "OFFLINE";
+    case SCD41::ModeEvidence::UNKNOWN: return "UNKNOWN";
+    case SCD41::ModeEvidence::ACKNOWLEDGED: return "ACKNOWLEDGED";
+    case SCD41::ModeEvidence::VERIFIED: return "VERIFIED";
   }
   return "UNKNOWN";
 }
@@ -260,6 +242,7 @@ const char* operationName(SCD41::OperationKind value) {
     case SCD41::OperationKind::DIAGNOSTIC_READ_WORDS: return "DIAGNOSTIC_READ_WORDS";
     case SCD41::OperationKind::DIAGNOSTIC_WRITE_COMMAND: return "DIAGNOSTIC_WRITE_COMMAND";
     case SCD41::OperationKind::DIAGNOSTIC_WRITE_WORD: return "DIAGNOSTIC_WRITE_WORD";
+    case SCD41::OperationKind::READ_SENSOR_VARIANT: return "READ_SENSOR_VARIANT";
   }
   return "UNKNOWN";
 }
@@ -328,7 +311,16 @@ uint32_t operationBudgetMs(SCD41::OperationKind kind) {
 }
 
 void printStatus(const SCD41::Status& status) {
-  std::printf("status=%s detail=%ld msg=%s\n", errName(status.code),
+  const char* color = status.ok()
+                          ? LOG_COLOR_GREEN
+                          : (status.inProgress()
+                                 ? LOG_COLOR_CYAN
+                                 : ((status.code == SCD41::Err::BUSY ||
+                                     status.code == SCD41::Err::MEASUREMENT_NOT_READY)
+                                        ? LOG_COLOR_YELLOW
+                                        : LOG_COLOR_RED));
+  std::printf("status=%s%s%s detail=%ld msg=%s\n", color,
+              errName(status.code), LOG_COLOR_RESET,
               static_cast<long>(status.detail), status.msg);
 }
 
@@ -358,22 +350,41 @@ void printConfiguration(const SCD41::ConfigurationSnapshot& value) {
 }
 
 void printResult(const SCD41::OperationResult& result) {
-  std::printf("result request=%lu generation=%lu op=%s outcome=%s effect=%s status=%s callbacks=%u reconcile=%s\n",
+  const bool successful = result.outcome == SCD41::OperationOutcome::SUCCEEDED;
+  const char* outcomeColor = successful
+                                 ? LOG_COLOR_GREEN
+                                 : ((result.outcome == SCD41::OperationOutcome::NO_DATA ||
+                                     result.outcome == SCD41::OperationOutcome::PARTIAL ||
+                                     result.outcome == SCD41::OperationOutcome::CANCELLED)
+                                        ? LOG_COLOR_YELLOW
+                                        : LOG_COLOR_RED);
+  std::printf("result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
               static_cast<unsigned long>(result.id.requestId),
               static_cast<unsigned long>(result.id.generation),
-              operationName(result.kind), outcomeName(result.outcome),
+              operationName(result.kind), outcomeColor, outcomeName(result.outcome),
+              LOG_COLOR_RESET,
               effectName(result.effect), errName(result.status.code),
               static_cast<unsigned>(result.callbacksUsed),
               result.reconciliationRequired ? "yes" : "no");
+  std::printf("timing started=%lu completed=%lu deadline=%lu phase=%u epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
+              static_cast<unsigned long>(result.startedMs),
+              static_cast<unsigned long>(result.completedMs),
+              static_cast<unsigned long>(result.deadlineMs),
+              static_cast<unsigned>(result.finalPhase),
+              static_cast<unsigned long>(result.sensorEpoch),
+              modeName(result.operatingMode), evidenceName(result.modeEvidence),
+              static_cast<unsigned>(result.completedFieldMask));
   if (result.kind == SCD41::OperationKind::ATTACH ||
       result.kind == SCD41::OperationKind::READ_IDENTITY ||
+      result.kind == SCD41::OperationKind::READ_SENSOR_VARIANT ||
       result.kind == SCD41::OperationKind::WAKE_UP ||
       result.kind == SCD41::OperationKind::REINIT ||
       result.kind == SCD41::OperationKind::FACTORY_RESET) {
-    std::printf("identity valid=%s serial=0x%012llX variant=%s epoch=%lu\n",
+    std::printf("identity valid=%s serial=0x%012llX variant=%s variant_word=0x%04X epoch=%lu\n",
                 result.value.identity.valid ? "yes" : "no",
                 static_cast<unsigned long long>(result.value.identity.serialNumber),
                 variantName(result.value.identity.variant),
+                static_cast<unsigned>(result.value.identity.variantWord),
                 static_cast<unsigned long>(result.value.identity.sensorEpoch));
   } else if (result.kind == SCD41::OperationKind::FETCH_SAMPLE ||
              result.kind == SCD41::OperationKind::SINGLE_SHOT ||
@@ -413,6 +424,29 @@ void printResult(const SCD41::OperationResult& result) {
       std::printf("word[%u]=0x%04X\n", static_cast<unsigned>(i),
                   static_cast<unsigned>(result.value.rawWords[i]));
     }
+  }
+
+  switch (result.kind) {
+    case SCD41::OperationKind::READ_TEMPERATURE_OFFSET:
+    case SCD41::OperationKind::SET_TEMPERATURE_OFFSET:
+    case SCD41::OperationKind::READ_SENSOR_ALTITUDE:
+    case SCD41::OperationKind::SET_SENSOR_ALTITUDE:
+    case SCD41::OperationKind::READ_AMBIENT_PRESSURE:
+    case SCD41::OperationKind::SET_AMBIENT_PRESSURE:
+    case SCD41::OperationKind::READ_ASC_ENABLED:
+    case SCD41::OperationKind::SET_ASC_ENABLED:
+    case SCD41::OperationKind::READ_ASC_TARGET:
+    case SCD41::OperationKind::SET_ASC_TARGET:
+    case SCD41::OperationKind::READ_ASC_INITIAL_PERIOD:
+    case SCD41::OperationKind::SET_ASC_INITIAL_PERIOD:
+    case SCD41::OperationKind::READ_ASC_STANDARD_PERIOD:
+    case SCD41::OperationKind::SET_ASC_STANDARD_PERIOD:
+    case SCD41::OperationKind::PERSIST_SETTINGS:
+    case SCD41::OperationKind::FACTORY_RESET:
+      printConfiguration(result.value.configuration);
+      break;
+    default:
+      break;
   }
 }
 
@@ -462,42 +496,68 @@ void startOperation(const SCD41::OperationRequest& request) {
 void printRuntime() {
   const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
   const SCD41::HealthSnapshot health = device.healthSnapshot();
-  std::printf("runtime bound=%s attached=%s state=%s mode=%s operation=%s next_due=%lu reconcile=%s sample=%s\n",
+  const char* stateColor = runtime.driverState == SCD41::DriverState::READY
+                               ? LOG_COLOR_GREEN
+                               : (runtime.driverState == SCD41::DriverState::DEGRADED
+                                      ? LOG_COLOR_YELLOW
+                                      : LOG_COLOR_RED);
+  std::printf("runtime bound=%s attached=%s state=%s%s%s mode=%s evidence=%s epoch=%lu reconcile=%s sample=%s\n",
               runtime.bound ? "yes" : "no", runtime.attached ? "yes" : "no",
-              stateName(runtime.driverState), modeName(runtime.operatingMode),
-              operationName(runtime.operationKind),
-              static_cast<unsigned long>(runtime.nextDueMs),
+              stateColor, stateName(runtime.driverState), LOG_COLOR_RESET,
+              modeName(runtime.operatingMode), evidenceName(runtime.modeEvidence),
+              static_cast<unsigned long>(runtime.sensorEpoch),
               runtime.reconciliationRequired ? "yes" : "no",
               runtime.sampleAvailable ? "yes" : "no");
-  std::printf("health transfer_ok=%lu transfer_fail=%lu expected_nack=%lu protocol_fail=%lu operation_ok=%lu operation_fail=%lu cancelled=%lu\n",
+  std::printf("slot state=%s request=%lu generation=%lu operation=%s next_due=%lu next_safe=%s%lu\n",
+              operationStateName(runtime.operationState),
+              static_cast<unsigned long>(runtime.operationId.requestId),
+              static_cast<unsigned long>(runtime.operationId.generation),
+              operationName(runtime.operationKind),
+              static_cast<unsigned long>(runtime.nextDueMs),
+              runtime.nextSafeCommandValid ? "" : "invalid/",
+              static_cast<unsigned long>(runtime.nextSafeCommandMs));
+  std::printf("health transfer_ok=%lu transfer_fail=%lu consecutive=%u expected_nack=%lu protocol_fail=%lu crc_fail=%lu operation_ok=%lu operation_fail=%lu cancelled=%lu\n",
               static_cast<unsigned long>(health.totalTransferSuccess),
               static_cast<unsigned long>(health.totalTransferFailures),
+              static_cast<unsigned>(health.consecutiveTransferFailures),
               static_cast<unsigned long>(health.expectedNacks),
               static_cast<unsigned long>(health.totalProtocolFailures),
+              static_cast<unsigned long>(health.totalCrcFailures),
               static_cast<unsigned long>(health.totalOperationSuccess),
               static_cast<unsigned long>(health.totalOperationFailures),
               static_cast<unsigned long>(health.totalOperationCancelled));
+  std::printf("last_errors transfer=%s@%lu protocol=%s@%lu operation=%s@%lu op=%s request=%lu generation=%lu\n",
+              errName(health.lastTransferError.code),
+              static_cast<unsigned long>(health.lastTransferErrorMs),
+              errName(health.lastProtocolError.code),
+              static_cast<unsigned long>(health.lastProtocolErrorMs),
+              errName(health.lastOperationError.code),
+              static_cast<unsigned long>(health.lastOperationErrorMs),
+              operationName(health.lastOperationErrorKind),
+              static_cast<unsigned long>(health.lastOperationErrorId.requestId),
+              static_cast<unsigned long>(health.lastOperationErrorId.generation));
 }
 
 void printHelp() {
   printHelpHeader("SCD41 Owner-Safe CLI v1");
   printHelpSection("Lifecycle");
-  printHelpItem("help/?", "Show this help");
-  printHelpItem("version", "Show library version");
+  printHelpItem("help / ?", "Show this help");
+  printHelpItem("version / ver", "Show library version");
   printHelpItem("scan", "Scan the example-owned I2C bus while idle");
   printHelpItem("begin", "Zero-I2C bind, then start attach");
   printHelpItem("end", "Cancel active work and unbind without I2C");
-  printHelpItem("status", "Show cache-only runtime and health");
+  printHelpItem("status / drv / health", "Show cache-only runtime and health");
   printHelpItem("result", "Show the example's last consumed result");
   printHelpItem("cancel", "Cancel the active operation without I2C");
   printHelpSection("Measurement");
   printHelpItem("identity", "Read serial number and variant");
+  printHelpItem("variant", "Read the dedicated sensor-variant word");
   printHelpItem("periodic on|lp|off", "Change periodic mode");
   printHelpItem("dataready", "Read data-ready status");
   printHelpItem("read", "Fetch one periodic sample");
   printHelpItem("single full|rht", "Run one bounded single-shot job");
   printHelpItem("sample", "Show the latest cached fixed-point sample");
-  printHelpItem("settings", "Read all live configuration fields");
+  printHelpItem("settings / cfg", "Read all live configuration fields");
   printHelpItem("sleep", "Enter sensor power-down mode");
   printHelpItem("wake", "Wake and verify the sensor");
   printHelpSection("Configuration");
@@ -516,6 +576,8 @@ void printHelp() {
   printHelpItem("factory_reset confirm", "Reset persisted sensor state");
   printHelpSection("Diagnostics");
   printHelpItem("command read_words <cmd> <count>", "CRC-check 1..3 words; then reattach");
+  printHelpItem("command write <cmd> confirm", "Write a raw command; then reattach");
+  printHelpItem("command write_word <cmd> <word> confirm", "Write a CRC word; then reattach");
 }
 
 void scanBus() {
@@ -536,7 +598,7 @@ void processCommand(const Line& line) {
   Line tail;
   if (!splitHeadTail(line, head, tail)) return;
   if (head == "help" || head == "?") printHelp();
-  else if (head == "version") std::printf("SCD41 version=%s\n", SCD41::VERSION);
+  else if (head == "version" || head == "ver") std::printf("SCD41 version=%s\n", SCD41::VERSION);
   else if (head == "scan") {
     if (device.operationState() != SCD41::OperationState::IDLE) printStatus(SCD41::Status::Error(SCD41::Err::BUSY, "Operation active"));
     else scanBus();
@@ -549,13 +611,14 @@ void processCommand(const Line& line) {
     const SCD41::RuntimeSnapshot before = device.runtimeSnapshot();
     device.end();
     if (before.operationState != SCD41::OperationState::IDLE) takeAndPrint(before.operationId);
-  } else if (head == "status") printRuntime();
+  } else if (head == "status" || head == "drv" || head == "health") printRuntime();
   else if (head == "result") { if (lastResultValid) printResult(lastResult); else std::printf("result=none\n"); }
   else if (head == "cancel") {
     const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
     const SCD41::Status status = device.cancel(runtime.operationId, idfNowMs());
     printStatus(status); if (status.ok()) takeAndPrint(runtime.operationId);
   } else if (head == "identity") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_IDENTITY));
+  else if (head == "variant") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_SENSOR_VARIANT));
   else if (head == "periodic") {
     if (tail == "on") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::START_PERIODIC));
     else if (tail == "lp") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::START_LOW_POWER_PERIODIC));
@@ -571,7 +634,7 @@ void processCommand(const Line& line) {
     SCD41::FixedSample sample;
     const SCD41::Status status = device.peekLatestSample(sample);
     if (status.ok()) printSample(sample); else printStatus(status);
-  } else if (head == "settings") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_CONFIGURATION));
+  } else if (head == "settings" || head == "cfg") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_CONFIGURATION));
   else if (head == "sleep") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::POWER_DOWN));
   else if (head == "wake") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::WAKE_UP));
   else if (head == "toffset") {
@@ -610,11 +673,40 @@ void processCommand(const Line& line) {
     if (tail != "confirm") LOGW("use 'factory_reset confirm' to erase/reset settings");
     else startOperation(SCD41::OperationRequest::factoryReset());
   } else if (head == "command") {
-    Line sub; Line args; Line commandText; Line countText; uint16_t command = 0; uint32_t count = 0;
-    if (!splitHeadTail(tail, sub, args) || sub != "read_words" ||
-        !splitHeadTail(args, commandText, countText) || !parseU16(commandText, command) ||
-        !parseU32(countText, count) || count == 0U || count > 3U) LOGW("Usage: command read_words <cmd> <count>");
-    else startOperation(SCD41::OperationRequest::diagnosticReadWords(command, static_cast<uint8_t>(count)));
+    Line sub; Line args; Line commandText; uint16_t command = 0;
+    if (!splitHeadTail(tail, sub, args)) {
+      LOGW("Usage: command read_words|write|write_word ...");
+    } else if (sub == "read_words") {
+      Line countText; uint32_t count = 0;
+      if (!splitHeadTail(args, commandText, countText) ||
+          !parseU16(commandText, command) || !parseU32(countText, count) ||
+          count == 0U || count > 3U) {
+        LOGW("Usage: command read_words <cmd> <count>");
+      } else {
+        startOperation(SCD41::OperationRequest::diagnosticReadWords(
+            command, static_cast<uint8_t>(count)));
+      }
+    } else if (sub == "write") {
+      Line confirm;
+      if (!splitHeadTail(args, commandText, confirm) ||
+          !parseU16(commandText, command) || confirm != "confirm") {
+        LOGW("use 'command write <cmd> confirm' for a raw command");
+      } else {
+        startOperation(SCD41::OperationRequest::diagnosticWriteCommand(command));
+      }
+    } else if (sub == "write_word") {
+      Line remainder; Line wordText; Line confirm; uint16_t word = 0;
+      if (!splitHeadTail(args, commandText, remainder) ||
+          !splitHeadTail(remainder, wordText, confirm) ||
+          !parseU16(commandText, command) || !parseU16(wordText, word) ||
+          confirm != "confirm") {
+        LOGW("use 'command write_word <cmd> <word> confirm' for raw data");
+      } else {
+        startOperation(SCD41::OperationRequest::diagnosticWriteWord(command, word));
+      }
+    } else {
+      LOGW("Usage: command read_words|write|write_word ...");
+    }
   } else LOGW("Unknown command: %s", head.c_str());
 }
 

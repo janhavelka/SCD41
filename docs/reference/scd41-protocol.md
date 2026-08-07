@@ -1,8 +1,10 @@
 # SCD41 Protocol Reference
 
-Source: Sensirion SCD4x datasheet, version 1.5, July 2023, plus this
-repository's command table. The local vendor PDF is
-`docs/reference/vendor/SCD41_datasheet.pdf`.
+Source: Sensirion SCD4x datasheet, version 1.7, April 2025, from the
+[official SCD41 product page](https://sensirion.com/products/catalog/SCD41?show_inventory=SCD41-D-R2),
+plus this repository's command table. The local vendor PDF is
+`docs/reference/vendor/SCD41_datasheet.pdf` and is deliberately synchronized
+to that current vendor revision.
 
 This file is the compact device-behavior reference for implementation work. It
 is not a replacement for the vendor datasheet.
@@ -18,17 +20,22 @@ is not a replacement for the vendor datasheet.
 | I2C levels | Follow VDD |
 | Operating range | -10 C to 60 C, 0 %RH to 95 %RH non-condensing |
 | CO2 output range | 0 ppm to 40000 ppm |
-| Variant ID | Serial-number word 0 bits `[15:12]`; SCD41 is `0x1` |
+| Variant ID | `get_sensor_variant` (`0x202F`) word bits `[15:12]`; SCD41 is `0x1` |
 | Package | LGA SMD, 10.1 mm x 10.1 mm x 6.5 mm, about 0.6 g |
 
-Variant encodings observed through the serial-number word:
+Variant encodings in the dedicated CRC-protected response:
 
 | Variant | ID bits `[15:12]` | Notes |
 | --- | --- | --- |
 | SCD40 | `0x0` | Periodic CO2/T/RH, no SCD41-only low-power or single-shot commands |
 | SCD41 | `0x1` | Target device for this library |
-| SCD42 | `0x2` | Not targeted by this library |
+| SCD42 | not defined | Compatibility enum only; datasheet v1.7 does not assign `0x2` to SCD42 |
 | SCD43 | `0x5` | Not targeted by this library |
+
+Bits `[11:0]` are not a family discriminator and may differ. Vendor examples
+are SCD40 `0x0440`/CRC `0x3F`, SCD41 `0x1440`/CRC `0x51`, and SCD43
+`0x5441`/CRC `0xE9`. The driver retains the full CRC-verified word in
+`Identity::variantWord` while policy uses only bits `[15:12]`.
 
 Recommended board design:
 
@@ -99,7 +106,8 @@ Absolute and handling limits to preserve in board/application docs:
 - SDA/SCL/GND input current: -280 mA to 100 mA.
 - Short-term storage: -40 C to 70 C; recommended storage: 10 C to 50 C.
 - ESD: 2 kV HBM, 500 V CDM.
-- MSL level: 3. Treat open bags according to MSL3 floor-life and baking rules.
+- MSL level: 1, per IPC/JEDEC J-STD-033B1. Follow the vendor's MSL1 handling
+  and out-of-bag manufacturing conditions.
 - Expected lifetime is greater than 10 years under typical indoor conditions.
 - Device is REACH/RoHS compliant.
 
@@ -215,9 +223,11 @@ interval; the sensor empties the buffer on readout. If no data is available,
 the sensor can NACK the read. Poll `get_data_ready_status` first when the
 application wants to avoid no-data NACKs.
 
-For power-cycled single-shot operation, discard the first single-shot CO2 value
-after startup to maximize accuracy. Averaging several single-shot measurements
-can reduce noise. ASC is not available for power-cycled single-shot operation.
+The shortest single-shot measurement interval is 5 seconds. Averaging several
+single-shot measurements can reduce noise. ASC is not available for
+power-cycled single-shot operation. Datasheet v1.7 removed the older
+recommendation to discard the first single-shot value after a power cycle; any
+warm-up/publication filter is application policy.
 
 ## Data-Ready And Conversion
 
@@ -285,6 +295,7 @@ conditions and airflow.
 | `perform_self_test` | `0x3639` | 1 word result | 10000 ms | no |
 | `perform_factory_reset` | `0x3632` | none | 1200 ms | no |
 | `reinit` | `0x3646` | none | 30 ms | no |
+| `get_sensor_variant` | `0x202F` | 1 word; variant in bits `[15:12]` | 1 ms | no |
 | `set_asc_initial_period` | `0x2445` | 1 word write | short | no |
 | `get_asc_initial_period` | `0x2340` | 1 word | short | no |
 | `set_asc_standard_period` | `0x244E` | 1 word write | short | no |
@@ -299,10 +310,12 @@ conditions and airflow.
 - Automatic self-calibration (ASC) is enabled by default and assumes regular
   exposure to fresh-air CO2 near the configured target.
 - Forced recalibration requires a stable known reference concentration.
-- FRC should be performed in the operation mode later used by the application
-  after at least 3 minutes in a homogeneous, stable CO2 concentration and at the
-  intended application voltage. Stop periodic measurement and wait 500 ms before
-  issuing the FRC command.
+- FRC should be performed in the operation mode later used by the application,
+  at the intended application voltage, in a homogeneous and constant CO2
+  concentration. Operate for at least 3 minutes in periodic modes, or for more
+  than 3 single shots at a 1-minute interval. Apply any altitude or pressure
+  compensation beforehand, then stop periodic measurement and wait 500 ms
+  before issuing the FRC command.
 - FRC returns `word[0] - 0x8000` as the correction in ppm, or `0xFFFF` when FRC
   failed.
 - Self-test returns `0x0000` when no malfunction is detected; any nonzero word

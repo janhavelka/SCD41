@@ -26,9 +26,17 @@ uint32_t operationBudgetMs(app_driver::OperationKind kind) {
 }
 
 void printStatus(const app_driver::Status& status) {
-  LOG_SERIAL.printf("status=%s detail=%ld msg=%s\n",
+  const char* color = status.ok()
+                          ? LOG_COLOR_GREEN
+                          : (status.inProgress()
+                                 ? LOG_COLOR_CYAN
+                                 : ((status.code == app_driver::Err::BUSY ||
+                                     status.code == app_driver::Err::MEASUREMENT_NOT_READY)
+                                        ? LOG_COLOR_YELLOW
+                                        : LOG_COLOR_RED));
+  LOG_SERIAL.printf("status=%s%s%s detail=%ld msg=%s\n", color,
                     app_driver::errToString(status.code),
-                    static_cast<long>(status.detail), status.msg);
+                    LOG_COLOR_RESET, static_cast<long>(status.detail), status.msg);
 }
 
 void printSample(const app_driver::FixedSample& sample) {
@@ -59,27 +67,49 @@ void printConfiguration(const app_driver::ConfigurationSnapshot& snapshot) {
 }
 
 void printResult(const app_driver::OperationResult& result) {
+  const bool successful = result.outcome == app_driver::OperationOutcome::SUCCEEDED;
+  const char* outcomeColor = successful
+                                 ? LOG_COLOR_GREEN
+                                 : ((result.outcome == app_driver::OperationOutcome::NO_DATA ||
+                                     result.outcome == app_driver::OperationOutcome::PARTIAL ||
+                                     result.outcome == app_driver::OperationOutcome::CANCELLED)
+                                        ? LOG_COLOR_YELLOW
+                                        : LOG_COLOR_RED);
   LOG_SERIAL.printf(
-      "result request=%lu generation=%lu op=%s outcome=%s effect=%s status=%s callbacks=%u reconcile=%s\n",
+      "result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
       static_cast<unsigned long>(result.id.requestId),
       static_cast<unsigned long>(result.id.generation),
       app_driver::operationToString(result.kind),
+      outcomeColor,
       app_driver::outcomeToString(result.outcome),
+      LOG_COLOR_RESET,
       app_driver::effectToString(result.effect),
       app_driver::errToString(result.status.code),
       static_cast<unsigned>(result.callbacksUsed),
       result.reconciliationRequired ? "yes" : "no");
+  LOG_SERIAL.printf(
+      "timing started=%lu completed=%lu deadline=%lu phase=%u epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
+      static_cast<unsigned long>(result.startedMs),
+      static_cast<unsigned long>(result.completedMs),
+      static_cast<unsigned long>(result.deadlineMs),
+      static_cast<unsigned>(result.finalPhase),
+      static_cast<unsigned long>(result.sensorEpoch),
+      app_driver::modeToString(result.operatingMode),
+      app_driver::evidenceToString(result.modeEvidence),
+      static_cast<unsigned>(result.completedFieldMask));
 
   switch (result.kind) {
     case app_driver::OperationKind::ATTACH:
     case app_driver::OperationKind::READ_IDENTITY:
+    case app_driver::OperationKind::READ_SENSOR_VARIANT:
     case app_driver::OperationKind::WAKE_UP:
     case app_driver::OperationKind::REINIT:
     case app_driver::OperationKind::FACTORY_RESET:
-      LOG_SERIAL.printf("identity valid=%s serial=0x%012llX variant=%s epoch=%lu\n",
+      LOG_SERIAL.printf("identity valid=%s serial=0x%012llX variant=%s variant_word=0x%04X epoch=%lu\n",
                         result.value.identity.valid ? "yes" : "no",
                         static_cast<unsigned long long>(result.value.identity.serialNumber),
                         app_driver::variantToString(result.value.identity.variant),
+                        static_cast<unsigned>(result.value.identity.variantWord),
                         static_cast<unsigned long>(result.value.identity.sensorEpoch));
       break;
     case app_driver::OperationKind::FETCH_SAMPLE:
@@ -134,6 +164,29 @@ void printResult(const app_driver::OperationResult& result) {
         LOG_SERIAL.printf("word[%u]=0x%04X\n", static_cast<unsigned>(i),
                           static_cast<unsigned>(result.value.rawWords[i]));
       }
+      break;
+    default:
+      break;
+  }
+
+  switch (result.kind) {
+    case app_driver::OperationKind::READ_TEMPERATURE_OFFSET:
+    case app_driver::OperationKind::SET_TEMPERATURE_OFFSET:
+    case app_driver::OperationKind::READ_SENSOR_ALTITUDE:
+    case app_driver::OperationKind::SET_SENSOR_ALTITUDE:
+    case app_driver::OperationKind::READ_AMBIENT_PRESSURE:
+    case app_driver::OperationKind::SET_AMBIENT_PRESSURE:
+    case app_driver::OperationKind::READ_ASC_ENABLED:
+    case app_driver::OperationKind::SET_ASC_ENABLED:
+    case app_driver::OperationKind::READ_ASC_TARGET:
+    case app_driver::OperationKind::SET_ASC_TARGET:
+    case app_driver::OperationKind::READ_ASC_INITIAL_PERIOD:
+    case app_driver::OperationKind::SET_ASC_INITIAL_PERIOD:
+    case app_driver::OperationKind::READ_ASC_STANDARD_PERIOD:
+    case app_driver::OperationKind::SET_ASC_STANDARD_PERIOD:
+    case app_driver::OperationKind::PERSIST_SETTINGS:
+    case app_driver::OperationKind::FACTORY_RESET:
+      printConfiguration(result.value.configuration);
       break;
     default:
       break;
@@ -195,45 +248,75 @@ void startOperation(const app_driver::OperationRequest& request) {
 void printRuntime() {
   const app_driver::RuntimeSnapshot runtime = device.runtimeSnapshot();
   const app_driver::HealthSnapshot health = device.healthSnapshot();
+  const char* stateColor = runtime.driverState == app_driver::DriverState::READY
+                               ? LOG_COLOR_GREEN
+                               : (runtime.driverState == app_driver::DriverState::DEGRADED
+                                      ? LOG_COLOR_YELLOW
+                                      : LOG_COLOR_RED);
   LOG_SERIAL.printf(
-      "runtime bound=%s attached=%s state=%s mode=%s operation=%s next_due=%lu reconcile=%s sample=%s\n",
+      "runtime bound=%s attached=%s state=%s%s%s mode=%s evidence=%s epoch=%lu reconcile=%s sample=%s\n",
       runtime.bound ? "yes" : "no", runtime.attached ? "yes" : "no",
+      stateColor,
       app_driver::stateToString(runtime.driverState),
+      LOG_COLOR_RESET,
       app_driver::modeToString(runtime.operatingMode),
-      app_driver::operationToString(runtime.operationKind),
-      static_cast<unsigned long>(runtime.nextDueMs),
+      app_driver::evidenceToString(runtime.modeEvidence),
+      static_cast<unsigned long>(runtime.sensorEpoch),
       runtime.reconciliationRequired ? "yes" : "no",
       runtime.sampleAvailable ? "yes" : "no");
   LOG_SERIAL.printf(
-      "health transfer_ok=%lu transfer_fail=%lu expected_nack=%lu protocol_fail=%lu operation_ok=%lu operation_fail=%lu cancelled=%lu\n",
+      "slot state=%s request=%lu generation=%lu operation=%s next_due=%lu next_safe=%s%lu\n",
+      app_driver::operationStateToString(runtime.operationState),
+      static_cast<unsigned long>(runtime.operationId.requestId),
+      static_cast<unsigned long>(runtime.operationId.generation),
+      app_driver::operationToString(runtime.operationKind),
+      static_cast<unsigned long>(runtime.nextDueMs),
+      runtime.nextSafeCommandValid ? "" : "invalid/",
+      static_cast<unsigned long>(runtime.nextSafeCommandMs));
+  LOG_SERIAL.printf(
+      "health transfer_ok=%lu transfer_fail=%lu consecutive=%u expected_nack=%lu protocol_fail=%lu crc_fail=%lu operation_ok=%lu operation_fail=%lu cancelled=%lu\n",
       static_cast<unsigned long>(health.totalTransferSuccess),
       static_cast<unsigned long>(health.totalTransferFailures),
+      static_cast<unsigned>(health.consecutiveTransferFailures),
       static_cast<unsigned long>(health.expectedNacks),
       static_cast<unsigned long>(health.totalProtocolFailures),
+      static_cast<unsigned long>(health.totalCrcFailures),
       static_cast<unsigned long>(health.totalOperationSuccess),
       static_cast<unsigned long>(health.totalOperationFailures),
       static_cast<unsigned long>(health.totalOperationCancelled));
+  LOG_SERIAL.printf(
+      "last_errors transfer=%s@%lu protocol=%s@%lu operation=%s@%lu op=%s request=%lu generation=%lu\n",
+      app_driver::errToString(health.lastTransferError.code),
+      static_cast<unsigned long>(health.lastTransferErrorMs),
+      app_driver::errToString(health.lastProtocolError.code),
+      static_cast<unsigned long>(health.lastProtocolErrorMs),
+      app_driver::errToString(health.lastOperationError.code),
+      static_cast<unsigned long>(health.lastOperationErrorMs),
+      app_driver::operationToString(health.lastOperationErrorKind),
+      static_cast<unsigned long>(health.lastOperationErrorId.requestId),
+      static_cast<unsigned long>(health.lastOperationErrorId.generation));
 }
 
 void printHelp() {
   cli::printHelpHeader("SCD41 Owner-Safe CLI v1");
   cli::printHelpSection("Lifecycle");
-  cli::printHelpItem("help/?", "Show this help");
-  cli::printHelpItem("version", "Show library version");
+  cli::printHelpItem("help / ?", "Show this help");
+  cli::printHelpItem("version / ver", "Show library version");
   cli::printHelpItem("scan", "Scan the example-owned I2C bus while idle");
   cli::printHelpItem("begin", "Zero-I2C bind, then start attach");
   cli::printHelpItem("end", "Cancel active work and unbind without I2C");
-  cli::printHelpItem("status", "Show cache-only runtime and health");
+  cli::printHelpItem("status / drv / health", "Show cache-only runtime and health");
   cli::printHelpItem("result", "Show the example's last consumed result");
   cli::printHelpItem("cancel", "Cancel the active operation without I2C");
   cli::printHelpSection("Measurement");
   cli::printHelpItem("identity", "Read serial number and variant");
+  cli::printHelpItem("variant", "Read the dedicated sensor-variant word");
   cli::printHelpItem("periodic on|lp|off", "Change periodic mode");
   cli::printHelpItem("dataready", "Read data-ready status");
   cli::printHelpItem("read", "Fetch one periodic sample");
   cli::printHelpItem("single full|rht", "Run one bounded single-shot job");
   cli::printHelpItem("sample", "Show the latest cached fixed-point sample");
-  cli::printHelpItem("settings", "Read all live configuration fields");
+  cli::printHelpItem("settings / cfg", "Read all live configuration fields");
   cli::printHelpItem("sleep", "Enter sensor power-down mode");
   cli::printHelpItem("wake", "Wake and verify the sensor");
   cli::printHelpSection("Configuration");
@@ -252,6 +335,8 @@ void printHelp() {
   cli::printHelpItem("factory_reset confirm", "Reset persisted sensor state");
   cli::printHelpSection("Diagnostics");
   cli::printHelpItem("command read_words <cmd> <count>", "CRC-check 1..3 words; then reattach");
+  cli::printHelpItem("command write <cmd> confirm", "Write a raw command; then reattach");
+  cli::printHelpItem("command write_word <cmd> <word> confirm", "Write a CRC word; then reattach");
 }
 
 bool parseOptionalU32(const String& text, uint32_t& value) {
@@ -267,7 +352,7 @@ void processCommand(const String& line) {
 
   if (head == "help" || head == "?") {
     printHelp();
-  } else if (head == "version") {
+  } else if (head == "version" || head == "ver") {
     LOG_SERIAL.printf("SCD41 version=%s\n", SCD41::VERSION);
   } else if (head == "scan") {
     if (device.operationState() != app_driver::OperationState::IDLE) {
@@ -290,7 +375,7 @@ void processCommand(const String& line) {
     if (before.operationState != app_driver::OperationState::IDLE) {
       takeAndPrint(before.operationId);
     }
-  } else if (head == "status") {
+  } else if (head == "status" || head == "drv" || head == "health") {
     printRuntime();
   } else if (head == "result") {
     if (lastResultValid) printResult(lastResult); else LOG_SERIAL.println("result=none");
@@ -301,6 +386,8 @@ void processCommand(const String& line) {
     if (status.ok()) takeAndPrint(runtime.operationId);
   } else if (head == "identity") {
     startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::READ_IDENTITY));
+  } else if (head == "variant") {
+    startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::READ_SENSOR_VARIANT));
   } else if (head == "periodic") {
     if (tail == "on") startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::START_PERIODIC));
     else if (tail == "lp") startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::START_LOW_POWER_PERIODIC));
@@ -320,7 +407,7 @@ void processCommand(const String& line) {
     app_driver::FixedSample sample;
     const app_driver::Status status = device.peekLatestSample(sample);
     if (status.ok()) printSample(sample); else printStatus(status);
-  } else if (head == "settings") {
+  } else if (head == "settings" || head == "cfg") {
     startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::READ_CONFIGURATION));
   } else if (head == "sleep") {
     startOperation(app_driver::OperationRequest::make(app_driver::OperationKind::POWER_DOWN));
@@ -370,15 +457,46 @@ void processCommand(const String& line) {
     String sub;
     String args;
     String commandText;
-    String countText;
     uint16_t command = 0;
-    uint32_t count = 0;
-    if (!cmd::splitHeadTail(tail, sub, args) || sub != "read_words" ||
-        !cmd::splitHeadTail(args, commandText, countText) ||
-        !cmd::parseU16(commandText, command) || !cmd::parseU32(countText, count) ||
-        count == 0U || count > 3U) {
-      LOGW("Usage: command read_words <cmd> <count>");
-    } else startOperation(app_driver::OperationRequest::diagnosticReadWords(command, static_cast<uint8_t>(count)));
+    if (!cmd::splitHeadTail(tail, sub, args)) {
+      LOGW("Usage: command read_words|write|write_word ...");
+    } else if (sub == "read_words") {
+      String countText;
+      uint32_t count = 0;
+      if (!cmd::splitHeadTail(args, commandText, countText) ||
+          !cmd::parseU16(commandText, command) ||
+          !cmd::parseU32(countText, count) || count == 0U || count > 3U) {
+        LOGW("Usage: command read_words <cmd> <count>");
+      } else {
+        startOperation(app_driver::OperationRequest::diagnosticReadWords(
+            command, static_cast<uint8_t>(count)));
+      }
+    } else if (sub == "write") {
+      String confirm;
+      if (!cmd::splitHeadTail(args, commandText, confirm) ||
+          !cmd::parseU16(commandText, command) || confirm != "confirm") {
+        LOGW("use 'command write <cmd> confirm' for a raw command");
+      } else {
+        startOperation(
+            app_driver::OperationRequest::diagnosticWriteCommand(command));
+      }
+    } else if (sub == "write_word") {
+      String remainder;
+      String wordText;
+      String confirm;
+      uint16_t word = 0;
+      if (!cmd::splitHeadTail(args, commandText, remainder) ||
+          !cmd::splitHeadTail(remainder, wordText, confirm) ||
+          !cmd::parseU16(commandText, command) ||
+          !cmd::parseU16(wordText, word) || confirm != "confirm") {
+        LOGW("use 'command write_word <cmd> <word> confirm' for raw data");
+      } else {
+        startOperation(
+            app_driver::OperationRequest::diagnosticWriteWord(command, word));
+      }
+    } else {
+      LOGW("Usage: command read_words|write|write_word ...");
+    }
   } else {
     cli::printUnknownCommand(head.c_str());
   }

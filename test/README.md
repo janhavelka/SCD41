@@ -12,6 +12,8 @@ Coverage includes:
 - successful execution and per-transfer fault injection for every public
   `OperationKind`
 - attach convergence, mode admission, expected NACKs, and retained safety gates
+- dedicated sensor-variant command/CRC decoding, exact attach/identity phase
+  counts, the vendor serial example, and strict SCD40/SCD43/unknown rejection
 - CRC-atomic sample/config publication, cache epochs, dirty/verified settings,
   EEPROM uncertainty, and passive health channels
 - contradictory transport results, completion-clock failures, and command

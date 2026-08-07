@@ -56,6 +56,7 @@ scan
 begin
 status
 identity
+variant
 settings
 dataready
 periodic on
@@ -80,7 +81,8 @@ Pass criteria:
 
 - Scan finds address `0x62`.
 - `begin` produces a terminal successful `ATTACH` result.
-- Identity is valid, serial is nonzero, and variant is SCD41.
+- Identity is valid, serial is nonzero, and both the composite identity and
+  standalone dedicated variant read report SCD41 with a CRC-valid raw word.
 - Settings read completes with verified fields and no unexplained dirty state.
 - Periodic and low-power samples arrive at their device cadence.
 - Full single shot reports CO2/T/RH valid; RHT-only does not report CO2 valid.

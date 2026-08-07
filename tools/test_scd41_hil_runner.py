@@ -85,12 +85,13 @@ def test_help_contract_detection() -> None:
     scan           Scan the I2C bus
     begin          Bind and attach the SCD41
     identity       Read sensor identity
+    variant        Read sensor variant
     settings       Read settings
     status         Print driver health
     """
     assert_equal(hil.missing_minimum_help_commands(help_text), (), "help covers common commands")
     assert_equal(
-        hil.missing_minimum_help_commands("scan\nbegin\nidentity\nsettings\nstatus\n"),
+        hil.missing_minimum_help_commands("scan\nbegin\nidentity\nvariant\nsettings\nstatus\n"),
         ("version",),
         "missing version is reported",
     )

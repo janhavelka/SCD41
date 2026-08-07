@@ -78,9 +78,10 @@ latency budget. The driver enforces the fixed 1 ms SCD41 inter-command spacing.
 
 Start `OperationKind::ATTACH` after power becomes available. Attach applies the
 power-up timing gate, reconciles an unknown retained sensor mode, reads the
-serial number, CRC-checks it, and requires the SCD41 variant when strict variant
-checking is enabled. Do not publish samples or verified settings before attach
-succeeds.
+serial number and dedicated sensor-variant word, CRC-checks both responses, and
+requires the SCD41 variant when strict variant checking is enabled. Serial words
+are never interpreted as variant evidence. Do not publish samples or verified
+settings before attach succeeds.
 
 An MCU restart does not imply a sensor restart. Treat mode as unknown until the
 attach result establishes usable driver state. If the application interrupts
@@ -183,8 +184,9 @@ Current per-operation limits are:
 
 | Operation group | Class | Max callbacks | Max wait ms | Completion evidence |
 | --- | --- | ---: | ---: | --- |
-| `ATTACH` | runtime | 4 | 1531 | configurable power-up bound, retained-mode reconciliation, and CRC-checked identity |
-| identity, data-ready, individual setting reads | steady | 2 | 1 | CRC-checked typed response |
+| `ATTACH` | runtime | 6 | 1533 | configurable power-up bound, retained-mode reconciliation, and CRC-checked serial plus variant identity |
+| full identity read | steady | 4 | 3 | CRC-checked serial plus dedicated variant response |
+| variant, data-ready, individual setting reads | steady | 2 | 1 | CRC-checked typed response |
 | periodic start, low-power start, power-down | runtime | 1 | 1 | acknowledged command and resulting mode evidence |
 | stop periodic | runtime | 1 | 500 | acknowledged command plus zero-I2C settle |
 | fetch periodic sample | steady | 4 | 3 | ready result and, when ready, complete CRC-checked sample |
@@ -192,11 +194,11 @@ Current per-operation limits are:
 | RHT-only single shot | runtime | 5 | 53 | complete RHT read with CO2 invalid |
 | individual setting write | runtime | 5 | 4 | write plus readback verification |
 | full configuration read | runtime, idle only | 14 | 13 | up to seven verified fields; partial mask on failure |
-| wake-up, reinit | runtime | 3 | 31 | settle plus identity/reconciliation read |
+| wake-up, reinit | runtime | 5 | 33 | settle plus serial/variant reconciliation read |
 | self-test | maintenance | 2 | 10000 | returned self-test word |
 | forced recalibration | maintenance | 2 | 400 | nonvolatile calibration history plus returned result word |
 | persist settings | maintenance | 1 | 800 | zero-write no-op when clean; otherwise acknowledged write and settle |
-| factory reset | maintenance | 3 | 1201 | reset settle plus identity/reconciliation read |
+| factory reset | maintenance | 5 | 1203 | reset settle plus serial/variant reconciliation read |
 | diagnostic word read | diagnostic | 2 | 1 | 1-3 CRC-checked words; state then requires attach |
 | diagnostic command/word write | diagnostic | 1 | 1 | acknowledged transfer; state then requires attach |
 
@@ -207,6 +209,12 @@ Managed command words are rejected from the diagnostic API. Unknown command
 words can still have unknown side effects, so even a diagnostic read command
 marks reconciliation required and invalidates managed mode/config evidence.
 Consume the diagnostic result, then run `ATTACH` before production work.
+
+A standalone sensor-variant read does not reread the serial number. Matching
+family evidence refreshes the cached variant word; changed or strictly
+unsupported family evidence invalidates the composite identity and requires
+`ATTACH`. Do not pair a newly observed variant with an older cached serial as a
+verified identity.
 
 ## Outcome and effect rules
 
@@ -232,7 +240,7 @@ Use `OperationResult::kind` to select the authoritative value member:
 | Kind group | Result value |
 | --- | --- |
 | sample fetch/single shot | `sample` |
-| attach, identity, wake, reinit | `identity` |
+| attach, identity, sensor variant, wake, reinit | `identity`; variant-only also uses raw `value` |
 | factory reset | `identity` and reconciled `configuration` |
 | setting read | scalar member below plus `configuration` |
 | setting write, configuration read, persistence | `configuration` |

@@ -4,8 +4,8 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
-Release status: `library.json` is staged at `1.0.0` for compatibility and
-release-candidate validation, but no `v1.0.0` release/tag or current physical
+Release status: `library.json` is staged at `1.1.0` for compatibility and
+release-candidate validation, but no `v1.1.0` release/tag or current physical
 HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
 [hardware validation guide](docs/validation/hardware-hil.md).
 
@@ -153,14 +153,16 @@ The public API is fixed-size and allocation-free:
   terminal record.
 - `RuntimeSnapshot`, `HealthSnapshot`, `Identity`, `ConfigurationSnapshot`, and
   `FixedSample` are cache-only views and never perform I2C.
-- `Status` carries a stable `Err`, optional detail, and static-lifetime message.
+- `Status` carries a stable `Err`, optional detail, and static-lifetime message;
+  `errorName` / `driverStateName` and their `toString` aliases provide
+  allocation-free stable enum names.
 
 Interpret `OperationResult::value` by `OperationResult::kind`; other value
 members remain default or are secondary raw evidence:
 
 | Operation kind/group | Authoritative value member |
 | --- | --- |
-| `ATTACH`, `READ_IDENTITY`, `WAKE_UP`, `REINIT` | `identity` |
+| `ATTACH`, `READ_IDENTITY`, `READ_SENSOR_VARIANT`, `WAKE_UP`, `REINIT` | `identity` (`value` also contains the raw word for `READ_SENSOR_VARIANT`) |
 | `FACTORY_RESET` | `identity` and reconciled `configuration` |
 | `READ_DATA_READY` | `dataReady` |
 | `FETCH_SAMPLE`, `SINGLE_SHOT`, `SINGLE_SHOT_RHT_ONLY` | `sample` |
@@ -224,6 +226,12 @@ dirty field is unverified. Persistence is a zero-write success when this
 instance has no known unpersisted field. That no-op does not read or prove
 EEPROM contents after a fresh bind.
 
+`READ_SENSOR_VARIANT` refreshes the decoded family and raw variant word without
+rereading the serial number. When the family still agrees, the already verified
+composite identity remains valid. A different or strictly unsupported family
+invalidates the composite identity, publishes only the newly observed variant
+evidence, and requires a new `ATTACH` before managed work.
+
 `FixedSample` contains fixed-width CO2 ppm, temperature in milli-degrees C,
 humidity in milli-percent, capture time, sensor epoch, sequence, mode, and
 validity/freshness flags. Sequence is 1-based since the latest sensor epoch or
@@ -232,7 +240,9 @@ RHT-only operation does not mark CO2 valid.
 
 ## Supported device functionality
 
-- SCD41 identity and variant validation at fixed address `0x62`.
+- CRC-protected serial identity plus dedicated `get_sensor_variant` validation
+  at fixed address `0x62`; typed serial-plus-variant and variant-only reads are
+  available.
 - Periodic measurement at 5 s and low-power periodic measurement at 30 s.
 - Full 5 s single-shot and 50 ms RHT-only single-shot measurement.
 - Data-ready and CRC-checked sample reads.
@@ -294,7 +304,8 @@ invent address/data precision. Timeouts and bus errors are not expected NACKs.
   persistence require explicit request confirmation.
 - FRC/ASC calibration history is stored automatically in a separate EEPROM
   dimensioned for sensor lifetime; FRC is still nonvolatile maintenance.
-- Warm-up discard and measurement-quality policy belong to the product.
+- Warm-up and measurement-quality policy belong to the product; the current
+  vendor datasheet no longer prescribes discarding the first single-shot result.
 
 `Config::strictVariantCheck` defaults to true. Setting it false is a diagnostic
 escape hatch that can attach to another observed SCD4x identity; it is not a
@@ -314,26 +325,31 @@ callback per poll and automatically consumes and prints terminal results.
 EEPROM, calibration, and factory-reset commands require an explicit `confirm`
 token.
 
-Host checks:
+Host checks on Windows (using the repository's approved PlatformIO wrapper):
 
-```bash
+```powershell
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
 python tools/test_scd41_hil_runner.py
-python -m platformio test -e native
+.\scripts\pio.cmd test -e native
 doxygen Doxyfile
 ```
 
 Doxygen writes the generated reference to `.doxygen/html/index.html`; do
 not commit generated HTML under `docs/`.
 
+Ubuntu CI additionally runs the `native_ubsan` environment; the Windows MinGW
+toolchain commonly used by PlatformIO does not provide the required UBSan
+runtime.
+
 PlatformIO 6.1.19 or newer builds the Arduino examples for ESP32-S2 and
 ESP32-S3 on the exact-pinned pioarduino `platform-espressif32` `55.03.311`
 stack (Arduino-ESP32 `3.3.11`, ESP-IDF `5.5.5`). This pin controls only this
 repository's examples; consuming applications retain control of their own
-platform version. CI also builds the native ESP-IDF example for both targets
+platform version. Native host tests use exact-pinned `native@1.2.1`. CI also
+builds the native ESP-IDF example for both targets
 and validates a packed-library consumer. A separate compatibility job
 compile-links that package for TunnelMonitor-node's integration target
 `esp32-s3-wroom-n16r8` on its retained pioarduino `54.03.20` stack.
@@ -342,9 +358,10 @@ compile-links that package for TunnelMonitor-node's integration target
 
 `library.json` is the version source of truth. `include/SCD41/Version.h`,
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
-from it. The staged 1.0.0 candidate is a breaking API change because it
-replaces direct device calls and dual transport callbacks with the externally
-scheduled operation model.
+from it. Version 1.1.0 adds source-compatible variant/status/CLI functionality
+on top of the staged 1.0.0 operation model. That 1.0.0 baseline was the breaking
+API change replacing direct calls and dual transport callbacks with the
+externally scheduled operation model.
 
 ## License
 

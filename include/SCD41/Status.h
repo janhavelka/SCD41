@@ -44,6 +44,48 @@ enum class Err : uint8_t {
   I2C_SHORT_TRANSFER                   ///< Fewer bytes completed than requested.
 };
 
+/// Return a stable allocation-free diagnostic name for an error code.
+/// @param code Error code to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* errorName(Err code) {
+  switch (code) {
+    case Err::OK: return "OK";
+    case Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
+    case Err::INVALID_CONFIG: return "INVALID_CONFIG";
+    case Err::I2C_ERROR: return "I2C_ERROR";
+    case Err::TIMEOUT: return "TIMEOUT";
+    case Err::INVALID_PARAM: return "INVALID_PARAM";
+    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
+    case Err::CRC_MISMATCH: return "CRC_MISMATCH";
+    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
+    case Err::BUSY: return "BUSY";
+    case Err::IN_PROGRESS: return "IN_PROGRESS";
+    case Err::COMMAND_FAILED: return "COMMAND_FAILED";
+    case Err::UNSUPPORTED: return "UNSUPPORTED";
+    case Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
+    case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
+    case Err::I2C_NACK_READ: return "I2C_NACK_READ";
+    case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
+    case Err::I2C_BUS: return "I2C_BUS";
+    case Err::OFFLINE: return "OFFLINE";
+    case Err::RESULT_NOT_READY: return "RESULT_NOT_READY";
+    case Err::STALE_RESULT: return "STALE_RESULT";
+    case Err::CANCELLED: return "CANCELLED";
+    case Err::PARTIAL: return "PARTIAL";
+    case Err::INDETERMINATE: return "INDETERMINATE";
+    case Err::CONFIRMATION_REQUIRED: return "CONFIRMATION_REQUIRED";
+    case Err::RECONCILIATION_REQUIRED: return "RECONCILIATION_REQUIRED";
+    case Err::I2C_NACK: return "I2C_NACK";
+    case Err::I2C_SHORT_TRANSFER: return "I2C_SHORT_TRANSFER";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling shared by the mature sibling driver APIs.
+/// @param code Error code to name.
+/// @return The same static-lifetime string as `errorName(code)`.
+constexpr const char* toString(Err code) { return errorName(code); }
+
 /// Allocation-free status with a stable code, adapter/device detail, and
 /// static-lifetime message.
 struct Status {

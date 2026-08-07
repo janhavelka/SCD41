@@ -21,9 +21,10 @@ REQUIRED_COMMON = {
     "Log.h",
 }
 MANDATORY_COMMANDS = {
-    "?", "help", "version", "scan", "begin", "end", "status", "result",
-    "cancel", "identity", "periodic", "dataready", "read", "single", "sample",
-    "settings", "sleep", "wake", "toffset", "altitude", "pressure",
+    "?", "help", "version", "ver", "scan", "begin", "end", "status", "drv",
+    "health", "result", "cancel", "identity", "variant", "periodic",
+    "dataready", "read", "single", "sample",
+    "settings", "cfg", "sleep", "wake", "toffset", "altitude", "pressure",
     "asc_enabled", "asc_target", "asc_initial", "asc_standard", "reinit",
     "selftest", "frc", "persist", "factory_reset", "command",
 }
@@ -35,6 +36,8 @@ REQUIRED_OWNER_TOKENS = (
     "device.cancel(runtime.operationId, millis())",
     "device.takeResult(id, result)",
     "Device::limits(kind)",
+    "OperationRequest::diagnosticWriteCommand(command)",
+    "OperationRequest::diagnosticWriteWord(command, word)",
 )
 FORBIDDEN_DRIVER_CALLS = (
     ".tick(", ".probe(", ".recover(", ".readMeasurement(",
@@ -93,6 +96,11 @@ def check_confirmation_guards(text: str) -> None:
                    "OperationRequest::factoryReset()", "factory_reset")
     require_before(command_block(text, "frc"), 'confirm != "confirm"',
                    "OperationRequest::forcedRecalibration", "forced recalibration")
+    raw = command_block(text, "command")
+    require_before(raw, 'confirm != "confirm"',
+                   "OperationRequest::diagnosticWriteCommand", "diagnostic command write")
+    require_before(raw, 'confirm != "confirm"',
+                   "OperationRequest::diagnosticWriteWord", "diagnostic word write")
 
 
 def check_framework_boundaries() -> None:

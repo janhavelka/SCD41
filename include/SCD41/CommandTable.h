@@ -68,6 +68,7 @@ static constexpr uint16_t CMD_GET_SERIAL_NUMBER = 0x3682; ///< Read 48-bit seria
 static constexpr uint16_t CMD_PERFORM_SELF_TEST = 0x3639; ///< Start the 10 s self-test
 static constexpr uint16_t CMD_PERFORM_FACTORY_RESET = 0x3632; ///< Restore factory defaults
 static constexpr uint16_t CMD_REINIT = 0x3646; ///< Reload persisted settings into runtime state
+static constexpr uint16_t CMD_GET_SENSOR_VARIANT = 0x202F; ///< Read the CRC-protected sensor-variant word
 static constexpr uint16_t CMD_SET_ASC_INITIAL_PERIOD = 0x2445; ///< Write ASC initial period
 static constexpr uint16_t CMD_GET_ASC_INITIAL_PERIOD = 0x2340; ///< Read ASC initial period
 static constexpr uint16_t CMD_SET_ASC_STANDARD_PERIOD = 0x244E; ///< Write ASC standard period
@@ -86,12 +87,21 @@ static constexpr uint16_t FRC_FAILED = 0xFFFF; ///< Forced-recalibration failure
 static constexpr uint16_t FRC_OFFSET_BIAS = 0x8000; ///< Bias used to decode FRC correction result
 static constexpr uint16_t SELF_TEST_PASS = 0x0000; ///< Self-test pass code
 
-static constexpr uint16_t SERIAL_VARIANT_MASK = 0xF000; ///< Variant bits in serial-number word 0
-static constexpr uint16_t SERIAL_VARIANT_SHIFT = 12; ///< Shift for serial-number variant bits
-static constexpr uint8_t SERIAL_VARIANT_SCD40 = 0x0; ///< Serial-number encoding for SCD40
-static constexpr uint8_t SERIAL_VARIANT_SCD41 = 0x1; ///< Serial-number encoding for SCD41
-static constexpr uint8_t SERIAL_VARIANT_SCD42 = 0x2; ///< Serial-number encoding for SCD42
-static constexpr uint8_t SERIAL_VARIANT_SCD43 = 0x5; ///< Serial-number encoding for SCD43
+static constexpr uint16_t SENSOR_VARIANT_MASK = 0xF000; ///< Variant bits in `get_sensor_variant`
+static constexpr uint16_t SENSOR_VARIANT_SHIFT = 12; ///< Shift for sensor-variant bits
+static constexpr uint8_t SENSOR_VARIANT_SCD40 = 0x0; ///< `get_sensor_variant` encoding for SCD40
+static constexpr uint8_t SENSOR_VARIANT_SCD41 = 0x1; ///< `get_sensor_variant` encoding for SCD41
+static constexpr uint8_t SENSOR_VARIANT_SCD43 = 0x5; ///< `get_sensor_variant` encoding for SCD43
+
+// Compatibility aliases retained for source compatibility with the pre-1.1
+// command table. These values always describe the dedicated sensor-variant
+// response; serial-number words carry no variant contract.
+static constexpr uint16_t SERIAL_VARIANT_MASK = SENSOR_VARIANT_MASK; ///< Compatibility alias
+static constexpr uint16_t SERIAL_VARIANT_SHIFT = SENSOR_VARIANT_SHIFT; ///< Compatibility alias
+static constexpr uint8_t SERIAL_VARIANT_SCD40 = SENSOR_VARIANT_SCD40; ///< Compatibility alias
+static constexpr uint8_t SERIAL_VARIANT_SCD41 = SENSOR_VARIANT_SCD41; ///< Compatibility alias
+static constexpr uint8_t SERIAL_VARIANT_SCD42 = 0x2; ///< Legacy value; not decoded by v1.7 protocol
+static constexpr uint8_t SERIAL_VARIANT_SCD43 = SENSOR_VARIANT_SCD43; ///< Compatibility alias
 
 // ============================================================================
 // Value ranges / defaults

@@ -27,6 +27,7 @@ using OperationResult = api::OperationResult;
 using OperationState = api::OperationState;
 using PollResult = api::PollResult;
 using EffectState = api::EffectState;
+using ModeEvidence = api::ModeEvidence;
 using FixedSample = api::FixedSample;
 using RuntimeSnapshot = api::RuntimeSnapshot;
 using HealthSnapshot = api::HealthSnapshot;
@@ -34,45 +35,27 @@ using ConfigurationSnapshot = api::ConfigurationSnapshot;
 using Identity = api::Identity;
 
 inline const char* errToString(Err value) {
+  return api::errorName(value);
+}
+
+inline const char* stateToString(DriverState value) {
+  return api::driverStateName(value);
+}
+
+inline const char* operationStateToString(OperationState value) {
   switch (value) {
-    case Err::OK: return "OK";
-    case Err::NOT_INITIALIZED: return "NOT_INITIALIZED";
-    case Err::INVALID_CONFIG: return "INVALID_CONFIG";
-    case Err::INVALID_PARAM: return "INVALID_PARAM";
-    case Err::BUSY: return "BUSY";
-    case Err::IN_PROGRESS: return "IN_PROGRESS";
-    case Err::RESULT_NOT_READY: return "RESULT_NOT_READY";
-    case Err::STALE_RESULT: return "STALE_RESULT";
-    case Err::DEVICE_NOT_FOUND: return "DEVICE_NOT_FOUND";
-    case Err::MEASUREMENT_NOT_READY: return "MEASUREMENT_NOT_READY";
-    case Err::CRC_MISMATCH: return "CRC_MISMATCH";
-    case Err::COMMAND_FAILED: return "COMMAND_FAILED";
-    case Err::UNSUPPORTED: return "UNSUPPORTED";
-    case Err::TIMEOUT: return "TIMEOUT";
-    case Err::CANCELLED: return "CANCELLED";
-    case Err::PARTIAL: return "PARTIAL";
-    case Err::INDETERMINATE: return "INDETERMINATE";
-    case Err::CONFIRMATION_REQUIRED: return "CONFIRMATION_REQUIRED";
-    case Err::RECONCILIATION_REQUIRED: return "RECONCILIATION_REQUIRED";
-    case Err::I2C_ERROR: return "I2C_ERROR";
-    case Err::I2C_NACK_ADDR: return "I2C_NACK_ADDR";
-    case Err::I2C_NACK_DATA: return "I2C_NACK_DATA";
-    case Err::I2C_NACK_READ: return "I2C_NACK_READ";
-    case Err::I2C_NACK: return "I2C_NACK";
-    case Err::I2C_TIMEOUT: return "I2C_TIMEOUT";
-    case Err::I2C_BUS: return "I2C_BUS";
-    case Err::I2C_SHORT_TRANSFER: return "I2C_SHORT_TRANSFER";
-    case Err::OFFLINE: return "OFFLINE";
+    case OperationState::IDLE: return "IDLE";
+    case OperationState::ACTIVE: return "ACTIVE";
+    case OperationState::RESULT_PENDING: return "RESULT_PENDING";
   }
   return "UNKNOWN";
 }
 
-inline const char* stateToString(DriverState value) {
+inline const char* evidenceToString(ModeEvidence value) {
   switch (value) {
-    case DriverState::UNINIT: return "UNINIT";
-    case DriverState::READY: return "READY";
-    case DriverState::DEGRADED: return "DEGRADED";
-    case DriverState::OFFLINE: return "OFFLINE";
+    case ModeEvidence::UNKNOWN: return "UNKNOWN";
+    case ModeEvidence::ACKNOWLEDGED: return "ACKNOWLEDGED";
+    case ModeEvidence::VERIFIED: return "VERIFIED";
   }
   return "UNKNOWN";
 }
@@ -125,6 +108,7 @@ inline const char* operationToString(OperationKind value) {
     case OperationKind::DIAGNOSTIC_READ_WORDS: return "DIAGNOSTIC_READ_WORDS";
     case OperationKind::DIAGNOSTIC_WRITE_COMMAND: return "DIAGNOSTIC_WRITE_COMMAND";
     case OperationKind::DIAGNOSTIC_WRITE_WORD: return "DIAGNOSTIC_WRITE_WORD";
+    case OperationKind::READ_SENSOR_VARIANT: return "READ_SENSOR_VARIANT";
   }
   return "UNKNOWN";
 }
