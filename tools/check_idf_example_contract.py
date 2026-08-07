@@ -14,6 +14,7 @@ IDF_TRANSPORT = IDF_ROOT / "main" / "IdfI2cTransport.cpp"
 IDF_TRANSPORT_HEADER = IDF_ROOT / "main" / "IdfI2cTransport.h"
 IDF_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
 ARDUINO_COMMAND_HANDLER = ROOT / "examples" / "common" / "CommandHandler.h"
+WORKFLOW_HEADER = ROOT / "examples" / "common" / "DiagnosticWorkflow.h"
 
 MANDATORY_COMMANDS = {
     "?", "help", "version", "ver", "scan", "begin", "end", "status", "drv",
@@ -21,7 +22,8 @@ MANDATORY_COMMANDS = {
     "dataready", "read", "single", "sample",
     "settings", "cfg", "sleep", "wake", "toffset", "altitude", "pressure",
     "asc_enabled", "asc_target", "asc_initial", "asc_standard", "reinit",
-    "selftest", "frc", "persist", "factory_reset", "command",
+    "selftest", "frc", "persist", "factory_reset", "command", "probe",
+    "attach", "recover", "selfcheck", "stress", "stress_mix",
 }
 REQUIRED_IDF_TOKENS = (
     "driver/i2c_master.h",
@@ -45,6 +47,11 @@ REQUIRED_IDF_TOKENS = (
     "!timeReached(nowMs, runtime.nextSafeCommandMs)",
     "static_cast<int32_t>(nowMs - targetMs) >= 0",
     "errno == ERANGE",
+    "diagnosticWorkflow.acceptResult(result)",
+    "serviceWorkflow();",
+    "WorkflowKind::SELFCHECK",
+    "WorkflowKind::STRESS_MIX",
+    "MAX_STRESS_CYCLES",
 )
 REQUIRED_TRANSPORT_TOKENS = (
     "SCD41::TransferResult idfI2cTransfer",
@@ -97,11 +104,21 @@ def help_items(text: str) -> list[str]:
     return re.findall(r'printHelpItem\("([^"]+)"', text)
 
 
+def help_command_names(text: str) -> set[str]:
+    items = help_items(text)
+    return {
+        command
+        for command in MANDATORY_COMMANDS
+        if any(
+            re.search(rf"(?:^|[\s/]){re.escape(command)}(?:$|[\s<\[])", item)
+            for item in items
+        )
+    }
+
+
 def command_names(text: str) -> set[str]:
-    commands = set(re.findall(r'\bhead\s*==\s*"([^"]+)"', text))
-    for item in help_items(text):
-        commands.update(alias for alias in item.split(" ", 1)[0].split("/") if alias)
-    return commands
+    return set(re.findall(r'\bhead\s*==\s*"([^"]+)"',
+                          function_body(text, "processCommand")))
 
 
 def command_block(text: str, command: str) -> str:
@@ -117,7 +134,8 @@ HANDLER_ENTRIES = (
     "scan", "begin", "end", "health", "result", "cancel", "identity",
     "variant", "periodic", "dataready", "read", "single", "sample", "cfg",
     "sleep", "wake", "toffset", "asc_standard", "asc_enabled", "reinit",
-    "selftest", "frc", "persist", "factory_reset",
+    "selftest", "selfcheck", "frc", "persist", "factory_reset", "probe",
+    "recover", "stress_mix",
 )
 
 
@@ -135,7 +153,10 @@ def handler_signature(text: str, command: str) -> tuple[frozenset[str], frozense
 
 
 def function_body(text: str, function_name: str) -> str:
-    match = re.search(rf"\bbool\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{", text)
+    match = re.search(
+        rf"\b(?:void|bool)\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{",
+        text,
+    )
     if match is None:
         fail(f"missing parser function: {function_name}")
     depth = 1
@@ -192,6 +213,8 @@ def check_confirmations(text: str) -> None:
                    "OperationRequest::forcedRecalibration", "forced recalibration")
     raw = command_block(text, "command")
     require_before(raw, 'confirm != "confirm"',
+                   "OperationRequest::diagnosticReadWords", "diagnostic word read")
+    require_before(raw, 'confirm != "confirm"',
                    "OperationRequest::diagnosticWriteCommand", "diagnostic command write")
     require_before(raw, 'confirm != "confirm"',
                    "OperationRequest::diagnosticWriteWord", "diagnostic word write")
@@ -202,6 +225,7 @@ def main() -> int:
     idf = read(IDF_MAIN)
     transport = read(IDF_TRANSPORT) + "\n" + read(IDF_TRANSPORT_HEADER)
     cmake = read(IDF_CMAKE)
+    workflow = read(WORKFLOW_HEADER)
 
     if help_sections(arduino) != help_sections(idf):
         fail("Arduino and IDF help sections differ")
@@ -214,7 +238,24 @@ def main() -> int:
     missing = sorted(MANDATORY_COMMANDS - idf_commands)
     if missing:
         fail(f"mandatory commands missing: {missing}")
+    missing_help = sorted(MANDATORY_COMMANDS - help_command_names(idf))
+    if missing_help:
+        fail(f"mandatory commands missing from help: {missing_help}")
     check_handler_parity(arduino, idf)
+
+    for source_name, source in (("Arduino", arduino), ("IDF", idf)):
+        process = function_body(source, "processCommand")
+        executable_workflows = {
+            "probe": ("OperationKind::READ_IDENTITY", "OperationKind::ATTACH"),
+            "attach/recover": ('head == "attach"', 'head == "recover"',
+                               "OperationKind::ATTACH"),
+            "selfcheck": ('head == "selfcheck"', "WorkflowKind::SELFCHECK"),
+            "stress": ('head == "stress"', "WorkflowKind::STRESS"),
+            "stress_mix": ('head == "stress_mix"', "WorkflowKind::STRESS_MIX"),
+        }
+        for label, tokens in executable_workflows.items():
+            if any(token not in process for token in tokens):
+                fail(f"{source_name} executable workflow incomplete: {label}")
 
     combined = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")
@@ -226,6 +267,11 @@ def main() -> int:
         target = combined if "header" in label else code
         if pattern.search(target):
             fail(f"IDF example uses forbidden {label}")
+    workflow_code = strip_non_code(workflow)
+    for label, pattern in FORBIDDEN_PATTERNS.items():
+        target = workflow if "header" in label else workflow_code
+        if pattern.search(target):
+            fail(f"shared diagnostic workflow uses forbidden {label}")
     for token in REQUIRED_IDF_TOKENS:
         if token not in combined:
             fail(f"IDF example missing owner-safe token: {token}")

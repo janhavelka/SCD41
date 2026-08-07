@@ -15,6 +15,14 @@ core driver cannot determine by itself.
   `SensorVariant::UNKNOWN`.
 - Ambient pressure is supplied in Pa at the public API and encoded as `Pa / 100`
   for the device. The documented useful input range is 70000-120000 Pa.
+- Temperature-offset encoding spans the complete uint16 formula domain,
+  0-175 C. Datasheet v1.7 recommends 0-20 C but does not define that
+  recommendation as a protocol-validity boundary.
+- ASC target and forced-recalibration reference are uint16 ppm command words;
+  datasheet v1.7 states no narrower valid subrange. Selecting a physically
+  useful target/reference remains application policy.
+- ASC initial and standard periods are uint16 hours in integer multiples of
+  four; zero requests immediate correction.
 - A generic write NACK for a request marked `EXPECTED_WRITE_NACK` is sufficient
   evidence for the documented wake-up behavior. Timeout, bus error, short
   transfer, and generic failure are not accepted as expected wake behavior.

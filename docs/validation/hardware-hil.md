@@ -84,6 +84,9 @@ Pass criteria:
 - Identity is valid, serial is nonzero, and both the composite identity and
   standalone dedicated variant read report SCD41 with a CRC-valid raw word.
 - Settings read completes with verified fields and no unexplained dirty state.
+- `probe` and `recover` produce protocol-qualified SCD41 identity evidence;
+  `selfcheck`, five readiness-stress iterations, and two idle mixed-stress cycles
+  finish with colored `PASS` summaries and zero failures.
 - Periodic and low-power samples arrive at their device cadence.
 - Full single shot reports CO2/T/RH valid; RHT-only does not report CO2 valid.
 - Stop-periodic includes the 500 ms settle without owner-task blocking.

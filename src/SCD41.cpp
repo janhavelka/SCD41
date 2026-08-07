@@ -561,7 +561,7 @@ uint32_t SCD41::convertHumidityMilliPercent(uint16_t raw) {
 }
 
 Status SCD41::encodeTemperatureOffsetC(float offsetC, uint16_t& out) {
-  if (!std::isfinite(offsetC) || offsetC < 0.0F || offsetC > 20.0F) {
+  if (!std::isfinite(offsetC) || offsetC < 0.0F || offsetC > 175.0F) {
     return Status::Error(Err::INVALID_PARAM, "Temperature offset out of range");
   }
   const int32_t milli = static_cast<int32_t>(offsetC * 1000.0F + 0.5F);
@@ -570,7 +570,7 @@ Status SCD41::encodeTemperatureOffsetC(float offsetC, uint16_t& out) {
 
 Status SCD41::encodeTemperatureOffsetMilliC(int32_t offsetMilliC,
                                              uint16_t& out) {
-  if (offsetMilliC < 0 || offsetMilliC > 20000) {
+  if (offsetMilliC < 0 || offsetMilliC > 175000) {
     return Status::Error(Err::INVALID_PARAM, "Temperature offset out of range");
   }
   const uint64_t numerator = static_cast<uint64_t>(offsetMilliC) * 65535ULL +
@@ -666,7 +666,7 @@ Status SCD41::_validateRequestValue(const OperationRequest& request) const {
       }
       break;
     case OperationKind::SET_ASC_TARGET:
-      if (request.value == 0U || request.value > cmd::CO2_MAX_PPM) {
+      if (request.value > std::numeric_limits<uint16_t>::max()) {
         return Status::Error(Err::INVALID_PARAM, "ASC target out of range");
       }
       break;
@@ -682,7 +682,7 @@ Status SCD41::_validateRequestValue(const OperationRequest& request) const {
         return Status::Error(Err::CONFIRMATION_REQUIRED,
                              "FRC confirmation required");
       }
-      if (request.value == 0U || request.value > cmd::CO2_MAX_PPM) {
+      if (request.value > std::numeric_limits<uint16_t>::max()) {
         return Status::Error(Err::INVALID_PARAM, "FRC reference out of range");
       }
       break;
@@ -780,6 +780,46 @@ Status SCD41::_validateAdmission(OperationKind kind) const {
   }
   if (kind == OperationKind::FETCH_SAMPLE) {
     return Status::Error(Err::BUSY, "Periodic measurement is not active");
+  }
+  if (kind == OperationKind::STOP_PERIODIC) {
+    return Status::Error(Err::BUSY, "Periodic measurement is not active");
+  }
+  return Status::Ok();
+}
+
+Status SCD41::_validateReturnedSetting(OperationKind kind,
+                                       uint16_t value) const {
+  switch (_fieldFor(kind)) {
+    case ConfigurationField::SENSOR_ALTITUDE:
+      if (value > cmd::ALTITUDE_MAX_M) {
+        return Status::Error(Err::COMMAND_FAILED,
+                             "Invalid sensor altitude response", value);
+      }
+      break;
+    case ConfigurationField::AMBIENT_PRESSURE:
+      if (value < cmd::AMBIENT_PRESSURE_MIN_WORD ||
+          value > cmd::AMBIENT_PRESSURE_MAX_WORD) {
+        return Status::Error(Err::COMMAND_FAILED,
+                             "Invalid ambient pressure response", value);
+      }
+      break;
+    case ConfigurationField::ASC_ENABLED:
+      if (value > 1U) {
+        return Status::Error(Err::COMMAND_FAILED,
+                             "Invalid ASC enable response", value);
+      }
+      break;
+    case ConfigurationField::ASC_INITIAL_PERIOD:
+    case ConfigurationField::ASC_STANDARD_PERIOD:
+      if ((value % cmd::ASC_PERIOD_STEP_HOURS) != 0U) {
+        return Status::Error(Err::COMMAND_FAILED,
+                             "Invalid ASC period response", value);
+      }
+      break;
+    case ConfigurationField::TEMPERATURE_OFFSET:
+    case ConfigurationField::ASC_TARGET:
+    case ConfigurationField::NONE:
+      break;
   }
   return Status::Ok();
 }
@@ -1098,11 +1138,21 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _workingValue.dataReady.ready = isDataReady(words[0]);
         _workingValue.boolValue = _workingValue.dataReady.ready;
       } else {
-        if (readKind == OperationKind::READ_ASC_ENABLED && words[0] > 1U) {
-          _recordProtocolFailure(
-              Status::Error(Err::COMMAND_FAILED, "Invalid ASC enable word"),
-              nowMs);
-          return Status::Error(Err::COMMAND_FAILED, "Invalid ASC enable word");
+        const Status validation = _validateReturnedSetting(readKind, words[0]);
+        if (!validation.ok()) {
+          const uint16_t fieldMask =
+              configurationFieldMask(_fieldFor(readKind));
+          _configuration.verifiedMask &=
+              static_cast<uint16_t>(~fieldMask);
+          _recordProtocolFailure(validation, nowMs);
+          if (_active.request.kind == OperationKind::READ_CONFIGURATION &&
+              _active.completedFieldMask != 0U) {
+            _workingValue.configuration = _configuration;
+            _finish(OperationOutcome::PARTIAL, EffectState::NONE, validation,
+                    nowMs);
+            return Status::Ok();
+          }
+          return validation;
         }
         _applyReadValue(readKind, words[0], nowMs);
       }
@@ -1262,8 +1312,20 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         if (status.inProgress()) return status;
         if (!status.ok()) return status;
         if (_active.fieldIndex == 0U) {
-          _applyReadValue(kind, word, nowMs);
+          const Status validation = _validateReturnedSetting(kind, word);
+          if (validation.ok()) {
+            _applyReadValue(kind, word, nowMs);
+          } else {
+            const uint16_t fieldMask =
+                configurationFieldMask(_fieldFor(kind));
+            _configuration.verifiedMask &=
+                static_cast<uint16_t>(~fieldMask);
+            _recordProtocolFailure(validation, nowMs);
+          }
           if (word == _active.desiredRaw) {
+            if (!validation.ok()) {
+              return validation;
+            }
             _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
                     nowMs);
             return Status::Ok();
@@ -1272,6 +1334,17 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           _active.phase = OperationPhase::SEND_COMMAND;
           _active.nextDueMs = nowMs;
           return Status::Error(Err::IN_PROGRESS, "Setting write required");
+        }
+        const Status validation = _validateReturnedSetting(kind, word);
+        if (!validation.ok()) {
+          const uint16_t fieldMask =
+              configurationFieldMask(_fieldFor(kind));
+          _configuration.verifiedMask &=
+              static_cast<uint16_t>(~fieldMask);
+          _recordProtocolFailure(validation, nowMs);
+          _finish(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
+                  validation, nowMs);
+          return Status::Ok();
         }
         _applyVerifiedSetting(kind, word);
         if (word != _active.desiredRaw) {

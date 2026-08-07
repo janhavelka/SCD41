@@ -1,6 +1,6 @@
 idf_component_register(
   SRCS "main.cpp" "IdfI2cTransport.cpp"
-  INCLUDE_DIRS "."
+  INCLUDE_DIRS "." "../../../common"
   REQUIRES SCD41 esp_driver_i2c esp_driver_gpio esp_timer freertos vfs
 )
 

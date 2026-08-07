@@ -6,8 +6,44 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.1.1` for compatibility validation. No release tag
+The manifest is staged at `1.2.0` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
+
+### Planned 1.2.0
+
+#### Added
+
+- Matching Arduino and native ESP-IDF `probe`, `attach` / `recover`, bounded
+  cooperative `stress`, mode-safe `stress_mix`, and aggregate `selfcheck`
+  commands. Workflows use only existing typed operations, fixed memory, one
+  operation at a time, and colored pass/warn/fail summaries.
+- Datasheet v1.7 feature matrix covering every command through core, both CLIs,
+  tests, documentation, and remaining physical evidence.
+
+#### Changed
+
+- Temperature-offset requests now expose the command's complete encoded
+  0..175 C domain while both CLIs warn when a value exceeds the datasheet's
+  recommended 0..20 C range. ASC target and FRC reference accept their complete
+  documented uint16 word domains instead of reusing the CO2 output range.
+- Raw diagnostic reads now require the same explicit confirmation as raw
+  writes, because an unknown command can have side effects even when a response
+  is expected.
+- CLI contracts now derive commands from executable handlers, enforce workflow
+  dispatch and confirmation, compare Arduino/native-IDF semantics, and check the
+  shared fixed-memory workflow against native-IDF framework boundaries.
+- External-owner documentation now states console/scan scheduling,
+  serialization, non-reentry, result-copy, and owner-task recovery boundaries.
+
+#### Fixed
+
+- CRC-valid but semantically invalid altitude, pressure, ASC-enable, and ASC
+  period responses no longer enter verified caches. The driver reports a
+  protocol/operation failure, preserves the last usable value, clears the
+  affected verified bit, and retains correct partial-read evidence.
+- Typed stop-periodic requests while already idle now fail with zero I2C;
+  attach retains its intentional expected-NACK stop phase for unknown-mode
+  reconciliation.
 
 ### Planned 1.1.1
 

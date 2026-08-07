@@ -18,6 +18,7 @@
 
 #include "IdfI2cTransport.h"
 #include "SCD41/SCD41.h"
+#include "DiagnosticWorkflow.h"
 
 #ifndef SCD41_IDF_I2C_SDA
 #define SCD41_IDF_I2C_SDA 8
@@ -32,7 +33,7 @@
 namespace {
 
 constexpr size_t CLI_LINE_CAPACITY = 128U;
-constexpr size_t HELP_COMMAND_WIDTH = 32U;
+constexpr size_t HELP_COMMAND_WIDTH = 44U;
 constexpr uint8_t SCD41_ADDRESS = SCD41::cmd::I2C_ADDRESS;
 constexpr gpio_num_t I2C_SDA = static_cast<gpio_num_t>(SCD41_IDF_I2C_SDA);
 constexpr gpio_num_t I2C_SCL = static_cast<gpio_num_t>(SCD41_IDF_I2C_SCL);
@@ -311,6 +312,7 @@ SCD41::Config config;
 SCD41::OperationResult lastResult;
 bool lastResultValid = false;
 uint32_t nextRequestId = 1U;
+scd41_cli::DiagnosticWorkflow diagnosticWorkflow;
 IdfI2cContext i2cContext;
 i2c_master_bus_handle_t bus = nullptr;
 i2c_master_dev_handle_t sensorHandle = nullptr;
@@ -468,6 +470,36 @@ void printResult(const SCD41::OperationResult& result) {
   }
 }
 
+void printWorkflowUpdate() {
+  if (diagnosticWorkflow.kind() == scd41_cli::WorkflowKind::NONE) return;
+  const char* color = diagnosticWorkflow.failed() != 0U
+                          ? LOG_COLOR_RED
+                          : (diagnosticWorkflow.warnings() != 0U
+                                 ? LOG_COLOR_YELLOW
+                                 : LOG_COLOR_GREEN);
+  std::printf(
+      "workflow name=%s progress=%lu/%lu cycles=%lu/%lu pass=%lu warn=%lu fail=%lu\n",
+      scd41_cli::workflowName(diagnosticWorkflow.kind()),
+      static_cast<unsigned long>(diagnosticWorkflow.completedSteps()),
+      static_cast<unsigned long>(diagnosticWorkflow.totalSteps()),
+      static_cast<unsigned long>(diagnosticWorkflow.completedCycles()),
+      static_cast<unsigned long>(diagnosticWorkflow.totalCycles()),
+      static_cast<unsigned long>(diagnosticWorkflow.passed()),
+      static_cast<unsigned long>(diagnosticWorkflow.warnings()),
+      static_cast<unsigned long>(diagnosticWorkflow.failed()));
+  if (diagnosticWorkflow.finished()) {
+    const char* outcome = diagnosticWorkflow.failed() != 0U
+                              ? "FAIL"
+                              : (diagnosticWorkflow.warnings() != 0U
+                                     ? "WARN"
+                                     : "PASS");
+    std::printf("workflow_summary name=%s outcome=%s%s%s\n",
+                scd41_cli::workflowName(diagnosticWorkflow.kind()), color,
+                outcome, LOG_COLOR_RESET);
+    diagnosticWorkflow.clear();
+  }
+}
+
 void takeAndPrint(const SCD41::OperationId& id) {
   SCD41::OperationResult result;
   const SCD41::Status status = device.takeResult(id, result);
@@ -475,6 +507,7 @@ void takeAndPrint(const SCD41::OperationId& id) {
   lastResult = result;
   lastResultValid = true;
   printResult(result);
+  if (diagnosticWorkflow.acceptResult(result)) printWorkflowUpdate();
 }
 
 void pollDriver() {
@@ -493,7 +526,15 @@ bool bindDriver() {
   return status.ok();
 }
 
-void startOperation(const SCD41::OperationRequest& request) {
+SCD41::Status startOperation(const SCD41::OperationRequest& request,
+                             bool workflowRequest = false,
+                             SCD41::OperationId* assignedId = nullptr) {
+  if (diagnosticWorkflow.active() && !workflowRequest) {
+    const SCD41::Status status = SCD41::Status::Error(
+        SCD41::Err::BUSY, "Diagnostic workflow active");
+    printStatus(status);
+    return status;
+  }
   const uint32_t now = idfNowMs();
   SCD41::OperationOptions options;
   options.requestId = nextRequestId++;
@@ -504,11 +545,55 @@ void startOperation(const SCD41::OperationRequest& request) {
   const SCD41::Status status = device.start(request, options, id);
   printStatus(status);
   if (status.inProgress()) {
+    if (assignedId != nullptr) *assignedId = id;
     std::printf("started request=%lu generation=%lu op=%s deadline=%lu\n",
                 static_cast<unsigned long>(id.requestId),
                 static_cast<unsigned long>(id.generation), operationName(request.kind),
                 static_cast<unsigned long>(options.deadlineMs));
   }
+  return status;
+}
+
+void serviceWorkflow() {
+  if (!diagnosticWorkflow.active() || diagnosticWorkflow.waiting()) return;
+  const uint32_t nowMs = idfNowMs();
+  const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
+  if (runtime.operationState != SCD41::OperationState::IDLE ||
+      (runtime.nextSafeCommandValid &&
+       !timeReached(nowMs, runtime.nextSafeCommandMs))) {
+    return;
+  }
+  SCD41::OperationRequest request;
+  if (!diagnosticWorkflow.nextRequest(request)) return;
+  SCD41::OperationId id;
+  const SCD41::Status status = startOperation(request, true, &id);
+  if (status.inProgress()) {
+    (void)diagnosticWorkflow.markStarted(id, request.kind);
+  } else {
+    diagnosticWorkflow.markStartFailure();
+    printWorkflowUpdate();
+  }
+}
+
+void startWorkflow(scd41_cli::WorkflowKind kind, uint32_t cycles) {
+  const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
+  if (runtime.operationState != SCD41::OperationState::IDLE) {
+    printStatus(SCD41::Status::Error(SCD41::Err::BUSY, "Operation active"));
+    return;
+  }
+  if (!diagnosticWorkflow.begin(kind, cycles, runtime.operatingMode)) {
+    printStatus(SCD41::Status::Error(
+        SCD41::Err::BUSY,
+        kind == scd41_cli::WorkflowKind::SELFCHECK
+            ? "Selfcheck requires attached idle mode"
+            : "Workflow requires an attached active sensor"));
+    return;
+  }
+  std::printf("workflow_start name=%s cycles=%lu steps=%lu\n",
+              scd41_cli::workflowName(kind),
+              static_cast<unsigned long>(diagnosticWorkflow.totalCycles()),
+              static_cast<unsigned long>(diagnosticWorkflow.totalSteps()));
+  serviceWorkflow();
 }
 
 void printRuntime() {
@@ -557,12 +642,14 @@ void printRuntime() {
 }
 
 void printHelp() {
-  printHelpHeader("SCD41 Owner-Safe CLI v1");
+  printHelpHeader("SCD41 Owner-Safe CLI v2");
   printHelpSection("Lifecycle");
   printHelpItem("help / ?", "Show this help");
   printHelpItem("version / ver", "Show library version");
   printHelpItem("scan", "Scan the example-owned I2C bus while idle");
+  printHelpItem("probe", "CRC-check identity, attaching first when needed");
   printHelpItem("begin", "Zero-I2C bind, then start attach");
+  printHelpItem("attach / recover", "Wake/stop and verify identity/state");
   printHelpItem("end", "Cancel active work and unbind without I2C");
   printHelpItem("status / drv / health", "Show cache-only runtime and health");
   printHelpItem("result", "Show the example's last consumed result");
@@ -589,11 +676,14 @@ void printHelp() {
   printHelpSection("Maintenance");
   printHelpItem("reinit", "Reload persisted sensor settings");
   printHelpItem("selftest", "Run the 10-second sensor self-test");
+  printHelpItem("selfcheck", "Run identity/config/variant/sensor checks");
   printHelpItem("frc confirm <reference_ppm>", "Run forced recalibration");
   printHelpItem("persist confirm", "Write current settings to EEPROM");
   printHelpItem("factory_reset confirm", "Reset persisted sensor state");
   printHelpSection("Diagnostics");
-  printHelpItem("command read_words <cmd> <count>", "CRC-check 1..3 words; then reattach");
+  printHelpItem("stress [N]", "Run 1..1000 cooperative readiness reads (default 50)");
+  printHelpItem("stress_mix [N]", "Run 1..1000 cooperative mixed read cycles (default 50)");
+  printHelpItem("command read_words <cmd> <count> confirm", "CRC-check 1..3 words; then reattach");
   printHelpItem("command write <cmd> confirm", "Write a raw command; then reattach");
   printHelpItem("command write_word <cmd> <word> confirm", "Write a CRC word; then reattach");
 }
@@ -615,6 +705,14 @@ void processCommand(const Line& line) {
   Line head;
   Line tail;
   if (!splitHeadTail(line, head, tail)) return;
+  if (diagnosticWorkflow.active() && head != "help" && head != "?" &&
+      head != "version" && head != "ver" && head != "status" &&
+      head != "drv" && head != "health" && head != "result" &&
+      head != "cancel") {
+    printStatus(SCD41::Status::Error(SCD41::Err::BUSY,
+                                     "Diagnostic workflow active"));
+    return;
+  }
   if (head == "help" || head == "?") printHelp();
   else if (head == "version" || head == "ver") std::printf("SCD41 version=%s\n", SCD41::VERSION);
   else if (head == "scan") {
@@ -634,6 +732,18 @@ void processCommand(const Line& line) {
     device.end();
     if (before.operationState != SCD41::OperationState::IDLE) takeAndPrint(before.operationId);
     if (bindDriver()) startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::ATTACH));
+  } else if (head == "probe") {
+    SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
+    if (!runtime.bound && !bindDriver()) return;
+    runtime = device.runtimeSnapshot();
+    const SCD41::OperationKind kind =
+        runtime.attached && !runtime.reconciliationRequired
+            ? SCD41::OperationKind::READ_IDENTITY
+            : SCD41::OperationKind::ATTACH;
+    startOperation(SCD41::OperationRequest::make(kind));
+  } else if (head == "attach" || head == "recover") {
+    startOperation(SCD41::OperationRequest::make(
+        SCD41::OperationKind::ATTACH));
   } else if (head == "end") {
     const SCD41::RuntimeSnapshot before = device.runtimeSnapshot();
     device.end();
@@ -642,6 +752,13 @@ void processCommand(const Line& line) {
   else if (head == "result") { if (lastResultValid) printResult(lastResult); else std::printf("result=none\n"); }
   else if (head == "cancel") {
     const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
+    if (diagnosticWorkflow.active()) {
+      diagnosticWorkflow.requestStop();
+      if (!diagnosticWorkflow.waiting()) {
+        printWorkflowUpdate();
+        return;
+      }
+    }
     const SCD41::Status status = device.cancel(runtime.operationId, idfNowMs());
     printStatus(status); if (status.ok()) takeAndPrint(runtime.operationId);
   } else if (head == "identity") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_IDENTITY));
@@ -667,7 +784,12 @@ void processCommand(const Line& line) {
   else if (head == "toffset") {
     int32_t value = 0;
     if (tail.empty()) startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::READ_TEMPERATURE_OFFSET));
-    else if (parseI32(tail, value)) startOperation(SCD41::OperationRequest::setTemperatureOffsetMilliC(value));
+    else if (parseI32(tail, value)) {
+      if (value > 20000 && value <= 175000) {
+        LOGW("Temperature offset exceeds datasheet-recommended 0..20000 mC");
+      }
+      startOperation(SCD41::OperationRequest::setTemperatureOffsetMilliC(value));
+    }
     else LOGW("Usage: toffset [mC]");
   } else if (head == "altitude" || head == "pressure" || head == "asc_target" || head == "asc_initial" || head == "asc_standard") {
     uint32_t value = 0;
@@ -689,6 +811,10 @@ void processCommand(const Line& line) {
     else LOGW("Usage: asc_enabled [0|1]");
   } else if (head == "reinit") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::REINIT));
   else if (head == "selftest") startOperation(SCD41::OperationRequest::make(SCD41::OperationKind::SELF_TEST));
+  else if (head == "selfcheck") {
+    if (!tail.empty()) LOGW("Usage: selfcheck");
+    else startWorkflow(scd41_cli::WorkflowKind::SELFCHECK, 1U);
+  }
   else if (head == "frc") {
     Line confirm; Line reference; uint16_t ppm = 0;
     if (!splitHeadTail(tail, confirm, reference) || confirm != "confirm" || !parseU16(reference, ppm)) LOGW("use 'frc confirm <reference_ppm>' to update calibration history");
@@ -704,11 +830,12 @@ void processCommand(const Line& line) {
     if (!splitHeadTail(tail, sub, args)) {
       LOGW("Usage: command read_words|write|write_word ...");
     } else if (sub == "read_words") {
-      Line countText; uint32_t count = 0;
-      if (!splitHeadTail(args, commandText, countText) ||
+      Line remainder; Line countText; Line confirm; uint32_t count = 0;
+      if (!splitHeadTail(args, commandText, remainder) ||
+          !splitHeadTail(remainder, countText, confirm) ||
           !parseU16(commandText, command) || !parseU32(countText, count) ||
-          count == 0U || count > 3U) {
-        LOGW("Usage: command read_words <cmd> <count>");
+          count == 0U || count > 3U || confirm != "confirm") {
+        LOGW("use 'command read_words <cmd> <count> confirm' for a raw read");
       } else {
         startOperation(SCD41::OperationRequest::diagnosticReadWords(
             command, static_cast<uint8_t>(count)));
@@ -733,6 +860,17 @@ void processCommand(const Line& line) {
       }
     } else {
       LOGW("Usage: command read_words|write|write_word ...");
+    }
+  } else if (head == "stress" || head == "stress_mix") {
+    uint32_t cycles = scd41_cli::DEFAULT_STRESS_CYCLES;
+    if (!tail.empty() && !parseU32(tail, cycles)) {
+      LOGW("Usage: stress [1..1000] / stress_mix [1..1000]");
+    } else if (cycles == 0U || cycles > scd41_cli::MAX_STRESS_CYCLES) {
+      LOGW("Stress cycle count must be 1..1000");
+    } else {
+      startWorkflow(head == "stress" ? scd41_cli::WorkflowKind::STRESS
+                                      : scd41_cli::WorkflowKind::STRESS_MIX,
+                    cycles);
     }
   } else LOGW("Unknown command: %s", head.c_str());
 }
@@ -769,6 +907,7 @@ extern "C" void app_main(void) {
   printPrompt();
   for (;;) {
     pollDriver();
+    serviceWorkflow();
     Line line;
     if (readLine(line)) { processCommand(line); printPrompt(); }
     vTaskDelay(pdMS_TO_TICKS(1));

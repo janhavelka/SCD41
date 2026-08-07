@@ -623,12 +623,17 @@ public:
   /// @param raw Complete 16-bit sensor word.
   /// @return Datasheet-scaled humidity, rounded to nearest milli-percent RH.
   static uint32_t convertHumidityMilliPercent(uint16_t raw);
-  /// Encode a finite temperature offset in the supported 0..20 C range.
+  /// Encode a finite temperature offset in the protocol 0..175 C range.
+  ///
+  /// Datasheet v1.7 recommends 0..20 C for normal applications, but the
+  /// command's encoded domain spans the complete unsigned 16-bit word.
   /// @param offsetC Offset in degrees Celsius.
   /// @param out Encoded word; unchanged when validation fails.
   /// @return `OK` or `INVALID_PARAM`.
   static Status encodeTemperatureOffsetC(float offsetC, uint16_t& out);
-  /// Encode a temperature offset in the supported 0..20000 milli-C range.
+  /// Encode a temperature offset in the protocol 0..175000 milli-C range.
+  ///
+  /// Datasheet v1.7 recommends values no greater than 20000 milli-C.
   /// @param offsetMilliC Offset in milli-degrees Celsius.
   /// @param out Encoded word; unchanged when validation fails.
   /// @return `OK` or `INVALID_PARAM`.
@@ -672,6 +677,7 @@ private:
                         const OperationOptions& options) const;
   Status _validateRequestValue(const OperationRequest& request) const;
   Status _validateAdmission(OperationKind kind) const;
+  Status _validateReturnedSetting(OperationKind kind, uint16_t value) const;
   Status _beginOperation(const OperationRequest& request,
                          const OperationOptions& options,
                          const OperationId& id);

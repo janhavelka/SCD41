@@ -84,14 +84,22 @@ def test_help_contract_detection() -> None:
     version        Print firmware and library version
     scan           Scan the I2C bus
     begin          Bind and attach the SCD41
+    probe          Protocol-qualified probe
+    recover        Attach/reconcile
     identity       Read sensor identity
     variant        Read sensor variant
     settings       Read settings
+    selfcheck      Aggregate checks
+    stress         Bounded readiness stress
+    stress_mix     Bounded mixed stress
     status         Print driver health
     """
     assert_equal(hil.missing_minimum_help_commands(help_text), (), "help covers common commands")
     assert_equal(
-        hil.missing_minimum_help_commands("scan\nbegin\nidentity\nvariant\nsettings\nstatus\n"),
+        hil.missing_minimum_help_commands(
+            "scan\nbegin\nprobe\nrecover\nidentity\nvariant\nsettings\n"
+            "selfcheck\nstress\nstress_mix\nstatus\n"
+        ),
         ("version",),
         "missing version is reported",
     )
@@ -134,6 +142,16 @@ def test_step_pattern_matching() -> None:
     assert_false(
         hil.step_output_matches(scan_step, "No I2C devices found"),
         "scan pattern rejects no-device output",
+    )
+    workflow_step = next(
+        step for step in hil.SAFE_STEPS if step.command == "selfcheck"
+    )
+    assert_true(
+        hil.step_output_matches(
+            workflow_step,
+            "workflow_summary name=selfcheck outcome=\x1b[32mPASS\x1b[0m",
+        ),
+        "colored workflow summary matches after ANSI removal",
     )
 
 

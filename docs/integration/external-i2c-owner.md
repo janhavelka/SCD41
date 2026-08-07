@@ -28,6 +28,12 @@ The driver owns:
 No core method takes a platform lock. Call the instance only from the owner task
 or serialize it externally. Public APIs are not ISR-safe.
 
+Transport callbacks are synchronous leaves: they must not call `begin`,
+`start`, `poll`, `cancel`, `takeResult`, `end`, or any cache accessor on the
+same instance. The owner may copy a completed `OperationResult` into its own
+bounded snapshot/queue after `takeResult`; consumer tasks must not call the
+driver directly.
+
 ## Transfer adapter
 
 Configure exactly one callback:
@@ -210,6 +216,12 @@ words can still have unknown side effects, so even a diagnostic read command
 marks reconciliation required and invalidates managed mode/config evidence.
 Consume the diagnostic result, then run `ATTACH` before production work.
 
+Typed `STOP_PERIODIC` is admitted only when the driver's reconciled mode is
+periodic or low-power periodic. Asking to stop while already idle is a zero-I2C
+`BUSY` precondition result. The internal stop phase of `ATTACH` is deliberately
+different: retained hardware mode is unknown, so attach uses the documented
+expected-NACK reconciliation sequence before identity verification.
+
 A standalone sensor-variant read does not reread the serial number. Matching
 family evidence refreshes the cached variant word; changed or strictly
 unsupported family evidence invalidates the composite identity and requires
@@ -287,6 +299,31 @@ If an operation is known to have no effect, the application may submit a new
 request after its own delay. If the effect is unknown, first use a safe typed
 readback, `ATTACH`, or an application-controlled rail recovery. Give every new
 request a new identity. Never resume polling an old timed-out or cancelled ID.
+
+## Scheduling CLI and diagnostic work
+
+The repository CLIs are bring-up examples whose loop/task owns their example
+bus. Their direct `scan` implementation is valid only inside that boundary. In
+a product with one I2C-owner task:
+
+1. Parse operator commands outside or inside the owner as product architecture
+   requires, but submit only fixed command/request data to the owner queue.
+2. Let the owner translate the request to a typed `OperationRequest`, assign
+   its ID/deadline, and call `start`.
+3. Advance it only from the owner context, normally with `poll(nowMs, 1)`, and
+   schedule from `nextDueMs` / `nextSafeCommandMs` while serving other devices.
+4. Consume the terminal result in the owner and publish a copy to the requester.
+5. Implement a bus scan as another bounded owner request. Never call a raw scan
+   or the SCD41 transport from a console/network task in parallel with the
+   owner.
+
+The example `stress`, `stress_mix`, and `selfcheck` commands demonstrate this
+cooperative shape: they schedule one existing typed operation, wait for its
+exact terminal result, then admit the next step. They do not create a task,
+hold a bus lock across a sensor wait, or run a blocking operation loop. Raw
+diagnostic commands require explicit confirmation and must be followed by an
+owner-scheduled `ATTACH`/`recover`; that operation reconciles sensor protocol
+state, not the controller, bus, or power rail.
 
 `HealthSnapshot` separates transfer, protocol/CRC, and operation counters. Its
 `OFFLINE` state is a diagnostic threshold, not a hidden transport gate and not a

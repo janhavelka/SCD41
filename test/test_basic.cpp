@@ -11,6 +11,7 @@
 #include <type_traits>
 
 #include "SCD41/SCD41.h"
+#include "common/DiagnosticWorkflow.h"
 
 using namespace SCD41;
 using Device = SCD41::SCD41;
@@ -1300,6 +1301,123 @@ void test_configuration_read_marks_fields_only_after_complete_crc() {
   }
 }
 
+void test_invalid_returned_settings_are_not_published_or_cached() {
+  struct InvalidSettingCase {
+    OperationKind kind;
+    ConfigurationField field;
+    uint16_t invalidWord;
+  };
+  const InvalidSettingCase cases[] = {
+      {OperationKind::READ_SENSOR_ALTITUDE,
+       ConfigurationField::SENSOR_ALTITUDE, 3001U},
+      {OperationKind::READ_AMBIENT_PRESSURE,
+       ConfigurationField::AMBIENT_PRESSURE, 699U},
+      {OperationKind::READ_AMBIENT_PRESSURE,
+       ConfigurationField::AMBIENT_PRESSURE, 1201U},
+      {OperationKind::READ_ASC_ENABLED, ConfigurationField::ASC_ENABLED, 2U},
+      {OperationKind::READ_ASC_INITIAL_PERIOD,
+       ConfigurationField::ASC_INITIAL_PERIOD, 2U},
+      {OperationKind::READ_ASC_STANDARD_PERIOD,
+       ConfigurationField::ASC_STANDARD_PERIOD, 65535U},
+  };
+
+  uint32_t requestId = 5000U;
+  for (const InvalidSettingCase& item : cases) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs, requestId++);
+    completeJob(device, bus,
+                OperationRequest::make(OperationKind::READ_CONFIGURATION),
+                nowMs, 1000U, requestId++);
+    const ConfigurationSnapshot before = device.configurationSnapshot();
+    const HealthSnapshot healthBefore = device.healthSnapshot();
+
+    switch (item.field) {
+      case ConfigurationField::SENSOR_ALTITUDE:
+        bus.sensorAltitudeM = item.invalidWord;
+        break;
+      case ConfigurationField::AMBIENT_PRESSURE:
+        bus.ambientPressureRaw = item.invalidWord;
+        break;
+      case ConfigurationField::ASC_ENABLED:
+        bus.ascEnabled = item.invalidWord;
+        break;
+      case ConfigurationField::ASC_INITIAL_PERIOD:
+        bus.ascInitialPeriod = item.invalidWord;
+        break;
+      case ConfigurationField::ASC_STANDARD_PERIOD:
+        bus.ascStandardPeriod = item.invalidWord;
+        break;
+      default:
+        TEST_FAIL_MESSAGE("invalid test field");
+        break;
+    }
+
+    const OperationResult result = completeJob(
+        device, bus, OperationRequest::make(item.kind), nowMs, 100U,
+        requestId++);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::FAILED),
+                      static_cast<uint8_t>(result.outcome));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::COMMAND_FAILED),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_EQUAL_INT32(item.invalidWord, result.status.detail);
+    TEST_ASSERT_EQUAL_UINT32(2U, operationCalls(bus));
+
+    ConfigurationSnapshot expected = before;
+    expected.verifiedMask &= static_cast<uint16_t>(
+        ~configurationFieldMask(item.field));
+    const ConfigurationSnapshot after = device.configurationSnapshot();
+    TEST_ASSERT_EQUAL_MEMORY(&expected, &after, sizeof(after));
+    TEST_ASSERT_EQUAL_UINT32(healthBefore.totalProtocolFailures + 1U,
+                             device.healthSnapshot().totalProtocolFailures);
+  }
+
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs, requestId++);
+  completeJob(device, bus,
+              OperationRequest::make(OperationKind::READ_CONFIGURATION),
+              nowMs, 1000U, requestId++);
+  const ConfigurationSnapshot before = device.configurationSnapshot();
+  bus.ambientPressureRaw = 699U;
+  const OperationResult partial = completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_CONFIGURATION),
+      nowMs, 1000U, requestId++);
+  const uint16_t precedingFields =
+      configurationFieldMask(ConfigurationField::TEMPERATURE_OFFSET) |
+      configurationFieldMask(ConfigurationField::SENSOR_ALTITUDE);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::PARTIAL),
+                    static_cast<uint8_t>(partial.outcome));
+  TEST_ASSERT_EQUAL_HEX16(precedingFields, partial.completedFieldMask);
+  TEST_ASSERT_EQUAL_UINT32(before.ambientPressurePa,
+                           device.configurationSnapshot().ambientPressurePa);
+  TEST_ASSERT_EQUAL_HEX16(
+      0U, device.configurationSnapshot().verifiedMask &
+              configurationFieldMask(ConfigurationField::AMBIENT_PRESSURE));
+
+  ModelTransport fullDomainBus;
+  fullDomainBus.temperatureOffsetRaw = 0xFFFFU;
+  fullDomainBus.ascTarget = 0xFFFFU;
+  Device fullDomainDevice;
+  bindDevice(fullDomainDevice, fullDomainBus);
+  uint32_t fullDomainNowMs = 10U;
+  attachDevice(fullDomainDevice, fullDomainBus, fullDomainNowMs, requestId++);
+  const OperationResult fullDomain = completeJob(
+      fullDomainDevice, fullDomainBus,
+      OperationRequest::make(OperationKind::READ_CONFIGURATION),
+      fullDomainNowMs, 1000U, requestId++);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(fullDomain.outcome));
+  TEST_ASSERT_EQUAL_INT32(175000,
+                          fullDomain.value.configuration.temperatureOffsetMilliC);
+  TEST_ASSERT_EQUAL_UINT16(65535U,
+                           fullDomain.value.configuration.ascTargetPpm);
+}
+
 void test_setting_write_readback_dirty_and_no_unchanged_rewrite() {
   ModelTransport bus;
   Device device;
@@ -1581,6 +1699,24 @@ void test_periodic_admission_rejects_idle_only_work_without_io() {
                       static_cast<uint8_t>(result.outcome));
     TEST_ASSERT_TRUE(device.isAttached());
   }
+}
+
+void test_typed_stop_while_idle_is_zero_io_precondition_failure() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs);
+  const size_t before = bus.calls;
+  OperationId id = {};
+  assertNoIoStatus(
+      device.start(OperationRequest::make(OperationKind::STOP_PERIODIC),
+                   OperationOptions{99U, nowMs, nowMs + 1000U}, id),
+      bus, before, Err::BUSY);
+  TEST_ASSERT_TRUE(device.isAttached());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::IDLE),
+                    static_cast<uint8_t>(
+                        device.runtimeSnapshot().operatingMode));
 }
 
 void test_maintenance_confirmation_limits_and_no_retry() {
@@ -2553,9 +2689,16 @@ void test_helper_boundaries_and_extreme_float_inputs() {
   TEST_ASSERT_EQUAL_HEX16(0x05DA, encoded);
   TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetMilliC(20000, encoded).ok());
   TEST_ASSERT_EQUAL_HEX16(0x1D42, encoded);
+  TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetMilliC(175000, encoded).ok());
+  TEST_ASSERT_EQUAL_HEX16(0xFFFF, encoded);
+  TEST_ASSERT_TRUE(Device::encodeTemperatureOffsetC(175.0F, encoded).ok());
+  TEST_ASSERT_EQUAL_HEX16(0xFFFF, encoded);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
                     static_cast<uint8_t>(
-                        Device::encodeTemperatureOffsetMilliC(20001, encoded).code));
+                        Device::encodeTemperatureOffsetMilliC(175001, encoded).code));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
+                    static_cast<uint8_t>(
+                        Device::encodeTemperatureOffsetC(175.001F, encoded).code));
 
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
                     static_cast<uint8_t>(Device::encodeAmbientPressurePa(69999, encoded).code));
@@ -2569,6 +2712,92 @@ void test_helper_boundaries_and_extreme_float_inputs() {
   TEST_ASSERT_EQUAL_UINT16(1200U, encoded);
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
                     static_cast<uint8_t>(Device::encodeAmbientPressurePa(120001, encoded).code));
+
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs, 9000U);
+  completeJob(device, bus, OperationRequest::setAscTargetPpm(0U), nowMs,
+              100U, 9001U);
+  TEST_ASSERT_EQUAL_UINT16(0U, bus.ascTarget);
+  completeJob(device, bus, OperationRequest::setAscTargetPpm(65535U), nowMs,
+              100U, 9002U);
+  TEST_ASSERT_EQUAL_UINT16(65535U, bus.ascTarget);
+  const OperationResult frc = completeJob(
+      device, bus, OperationRequest::forcedRecalibration(0U), nowMs, 1000U,
+      9003U);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(frc.outcome));
+  const OperationResult frcMax = completeJob(
+      device, bus, OperationRequest::forcedRecalibration(65535U), nowMs,
+      1000U, 9004U);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
+                    static_cast<uint8_t>(frcMax.outcome));
+}
+
+void test_cli_diagnostic_workflows_are_bounded_and_deterministic() {
+  scd41_cli::DiagnosticWorkflow workflow;
+  TEST_ASSERT_FALSE(workflow.begin(
+      scd41_cli::WorkflowKind::STRESS, 0U, OperatingMode::IDLE));
+  TEST_ASSERT_FALSE(workflow.begin(
+      scd41_cli::WorkflowKind::STRESS,
+      scd41_cli::MAX_STRESS_CYCLES + 1U, OperatingMode::IDLE));
+  TEST_ASSERT_FALSE(workflow.begin(
+      scd41_cli::WorkflowKind::SELFCHECK, 1U,
+      OperatingMode::PERIODIC));
+
+  TEST_ASSERT_TRUE(workflow.begin(
+      scd41_cli::WorkflowKind::STRESS_MIX, 2U,
+      OperatingMode::PERIODIC));
+  TEST_ASSERT_EQUAL_UINT32(6U, workflow.totalSteps());
+  const OperationKind periodicSequence[] = {
+      OperationKind::READ_DATA_READY, OperationKind::FETCH_SAMPLE,
+      OperationKind::READ_AMBIENT_PRESSURE, OperationKind::READ_DATA_READY,
+      OperationKind::FETCH_SAMPLE, OperationKind::READ_AMBIENT_PRESSURE};
+  for (uint32_t i = 0U; i < 6U; ++i) {
+    OperationRequest request;
+    TEST_ASSERT_TRUE(workflow.nextRequest(request));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(periodicSequence[i]),
+                      static_cast<uint8_t>(request.kind));
+    const OperationId id{100U + i, 200U + i};
+    TEST_ASSERT_TRUE(workflow.markStarted(id, request.kind));
+    OperationResult result;
+    result.id = id;
+    result.kind = request.kind;
+    result.outcome = request.kind == OperationKind::FETCH_SAMPLE
+                         ? OperationOutcome::NO_DATA
+                         : OperationOutcome::SUCCEEDED;
+    TEST_ASSERT_TRUE(workflow.acceptResult(result));
+  }
+  TEST_ASSERT_TRUE(workflow.finished());
+  TEST_ASSERT_EQUAL_UINT32(4U, workflow.passed());
+  TEST_ASSERT_EQUAL_UINT32(2U, workflow.warnings());
+  TEST_ASSERT_EQUAL_UINT32(0U, workflow.failed());
+  TEST_ASSERT_EQUAL_UINT32(2U, workflow.completedCycles());
+
+  workflow.clear();
+  TEST_ASSERT_TRUE(workflow.begin(
+      scd41_cli::WorkflowKind::SELFCHECK, 1U, OperatingMode::IDLE));
+  TEST_ASSERT_EQUAL_UINT32(4U, workflow.totalSteps());
+  const OperationKind selfcheckSequence[] = {
+      OperationKind::READ_IDENTITY, OperationKind::READ_SENSOR_VARIANT,
+      OperationKind::READ_CONFIGURATION, OperationKind::SELF_TEST};
+  for (uint32_t i = 0U; i < 4U; ++i) {
+    OperationRequest request;
+    TEST_ASSERT_TRUE(workflow.nextRequest(request));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(selfcheckSequence[i]),
+                      static_cast<uint8_t>(request.kind));
+    const OperationId id{300U + i, 400U + i};
+    TEST_ASSERT_TRUE(workflow.markStarted(id, request.kind));
+    OperationResult result;
+    result.id = id;
+    result.kind = request.kind;
+    result.outcome = OperationOutcome::SUCCEEDED;
+    TEST_ASSERT_TRUE(workflow.acceptResult(result));
+  }
+  TEST_ASSERT_TRUE(workflow.finished());
+  TEST_ASSERT_EQUAL_UINT32(4U, workflow.passed());
 }
 
 int main(int, char**) {
@@ -2595,12 +2824,14 @@ int main(int, char**) {
   RUN_TEST(test_not_ready_fetch_is_terminal_no_data_without_hidden_retry);
   RUN_TEST(test_fixed_point_sample_take_and_peek_contract);
   RUN_TEST(test_configuration_read_marks_fields_only_after_complete_crc);
+  RUN_TEST(test_invalid_returned_settings_are_not_published_or_cached);
   RUN_TEST(test_setting_write_readback_dirty_and_no_unchanged_rewrite);
   RUN_TEST(test_ambiguous_setting_write_is_not_retried_and_cache_is_invalid);
   RUN_TEST(test_setting_verification_fault_does_not_reclassify_the_mutation);
   RUN_TEST(test_setting_write_crossing_deadline_retains_dirty_evidence);
   RUN_TEST(test_runtime_pressure_does_not_create_eeprom_work);
   RUN_TEST(test_periodic_admission_rejects_idle_only_work_without_io);
+  RUN_TEST(test_typed_stop_while_idle_is_zero_io_precondition_failure);
   RUN_TEST(test_maintenance_confirmation_limits_and_no_retry);
   RUN_TEST(test_transport_contract_failures_are_observable_and_passive);
   RUN_TEST(test_transport_contradictions_and_spacing_are_conservative);
@@ -2621,5 +2852,6 @@ int main(int, char**) {
   RUN_TEST(test_end_is_zero_io_and_cancels_active_work);
   RUN_TEST(test_rebind_uses_only_new_transport_context);
   RUN_TEST(test_helper_boundaries_and_extreme_float_inputs);
+  RUN_TEST(test_cli_diagnostic_workflows_are_bounded_and_deterministic);
   return UNITY_END();
 }

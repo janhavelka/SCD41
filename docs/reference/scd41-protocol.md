@@ -266,13 +266,20 @@ Compensation ranges and effects:
 
 | Setting | Range / Default | Notes |
 | --- | --- | --- |
-| Temperature offset | recommended 0 C to 20 C, default 4 C | Improves RH/T output; does not affect CO2 accuracy |
+| Temperature offset | encoded 0 C to 175 C; recommended 0 C to 20 C; default 4 C | Improves RH/T output; does not affect CO2 accuracy |
 | Sensor altitude | 0 m to 3000 m, default 0 m | Idle-only setting; persist if it must survive power cycle |
 | Ambient pressure | 70000 Pa to 120000 Pa, default 101300 Pa | May be set/read during periodic measurement; overrides altitude compensation |
 
 Pressure or altitude compensation improves CO2 accuracy across pressure
 changes. Determine temperature offset in the final device under typical thermal
 conditions and airflow.
+
+The 0..20 C offset guidance is a recommendation, not the protocol domain. The
+ASC target and FRC reference are uint16 ppm words with no narrower valid range
+stated in datasheet v1.7. Returned settings with explicit domains are accepted
+only for altitude 0..3000 m, pressure words 700..1200, ASC enable 0/1, and ASC
+periods divisible by 4. A CRC-valid word outside one of those explicit domains
+is still a protocol failure and must not enter a verified cache.
 
 ## Command Summary
 
@@ -355,5 +362,8 @@ conditions and airflow.
   and not driver-owned recovery authority.
 - Diagnostic helpers have explicit word/command shapes. Returned words remain
   CRC-checked, and diagnostic effects invalidate or dirty managed cache state.
+- Typed stop-periodic is rejected without I2C when the reconciled mode is
+  already idle. Only attach uses stop with expected-NACK semantics because its
+  purpose is to reconcile an unknown retained hardware mode.
 - `SCD41::limits(OperationKind)` publishes the bounded callback, retry, sensor
   wait, nonvolatile, and destructive contract for every operation.

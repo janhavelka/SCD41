@@ -14,6 +14,7 @@ too detailed for the README.
 | [ESP-IDF porting](porting/esp-idf.md) | ESP-IDF component, transport adapter, and build guidance. |
 | [External I2C owner integration](integration/external-i2c-owner.md) | Applications where one external I2C task owns bounded driver progress. |
 | [Hardware/HIL validation](validation/hardware-hil.md) | Hardware evidence rules and smoke-test matrix. |
+| [Feature coverage](validation/feature-coverage.md) | Datasheet v1.7 command-to-core/CLI/test matrix and remaining evidence. |
 
 ## Generated API Reference
 

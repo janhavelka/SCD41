@@ -1,6 +1,6 @@
 {
   "name": "SCD41",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Production-grade SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor driver.",
   "keywords": [
     "scd41",
@@ -71,6 +71,7 @@
       "docs/porting/esp-idf.md",
       "docs/integration/external-i2c-owner.md",
       "docs/validation/hardware-hil.md",
+      "docs/validation/feature-coverage.md",
       "CMakeLists.txt",
       "idf_component.yml",
       "include",

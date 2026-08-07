@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import os
 import pathlib
 import shutil
 import subprocess
@@ -129,8 +130,9 @@ def main(arguments: list[str]) -> int:
         return fail("provide exactly one packed .tar.gz library")
     if not BOARD_FIXTURE.is_file():
         return fail(f"missing exact-target board fixture: {BOARD_FIXTURE}")
-    if shutil.which("python") is None and not sys.executable:
-        return fail("Python executable is unavailable")
+    wrapper = ROOT / "scripts" / "pio.cmd"
+    if not wrapper.is_file():
+        return fail(f"missing prescribed PlatformIO wrapper: {wrapper}")
 
     with tempfile.TemporaryDirectory(prefix="scd41-target-consumer-") as tmp:
         root = pathlib.Path(tmp)
@@ -151,7 +153,18 @@ def main(arguments: list[str]) -> int:
         (project / "platformio.ini").write_text(PLATFORMIO_INI, encoding="utf-8", newline="\n")
         (project / "src" / "main.cpp").write_text(CONSUMER, encoding="utf-8", newline="\n")
 
-        command = [sys.executable, "-m", "platformio", "run", "-e", "target_consumer"]
+        command = [
+            os.environ.get("COMSPEC", "cmd.exe"),
+            "/d",
+            "/s",
+            "/c",
+            str(wrapper),
+            "run",
+            "-d",
+            str(project),
+            "-e",
+            "target_consumer",
+        ]
         result = subprocess.run(command, cwd=project, text=True, capture_output=True)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)

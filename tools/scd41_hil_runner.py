@@ -17,9 +17,14 @@ MINIMUM_SAFE_COMMANDS = (
     "version",
     "scan",
     "begin",
+    "probe",
+    "recover",
     "identity",
     "variant",
     "settings",
+    "selfcheck",
+    "stress",
+    "stress_mix",
     "status",
 )
 HEALTH_COMMAND_ALIASES = ("status", "health", "drv")
@@ -54,14 +59,19 @@ class Step:
 
 
 SAFE_STEPS: tuple[Step, ...] = (
-    Step("help surface", "help", r"SCD41 Owner-Safe CLI v1"),
+    Step("help surface", "help", r"SCD41 Owner-Safe CLI v2"),
     Step("version", "version", r"SCD41 version=[0-9]+\.[0-9]+\.[0-9]+"),
     Step("i2c scan", "scan", r"Found device at 0x62", timeout_s=12.0),
     Step("bind and attach", "begin", r"op=ATTACH outcome=SUCCEEDED", timeout_s=12.0),
+    Step("protocol-qualified probe", "probe", r"op=READ_IDENTITY outcome=SUCCEEDED.*variant=SCD41", timeout_s=12.0),
+    Step("explicit attach recovery", "recover", r"op=ATTACH outcome=SUCCEEDED.*variant=SCD41", timeout_s=12.0),
     Step("attached health", "status", r"runtime bound=yes attached=yes state=READY"),
     Step("identity", "identity", r"op=READ_IDENTITY outcome=SUCCEEDED.*serial=0x[0-9A-Fa-f]{12}.*variant=SCD41", timeout_s=12.0),
     Step("sensor variant", "variant", r"op=READ_SENSOR_VARIANT outcome=SUCCEEDED.*variant=SCD41.*variant_word=0x[0-9A-Fa-f]{4}", timeout_s=12.0),
     Step("settings", "settings", r"op=READ_CONFIGURATION outcome=SUCCEEDED.*config offset_mC=", timeout_s=15.0),
+    Step("aggregate selfcheck", "selfcheck", r"workflow_summary name=selfcheck outcome=PASS", timeout_s=25.0),
+    Step("bounded readiness stress", "stress 5", r"workflow_summary name=stress outcome=PASS", timeout_s=15.0),
+    Step("bounded mixed stress", "stress_mix 2", r"workflow_summary name=stress_mix outcome=PASS", timeout_s=15.0),
     Step("dataready idle", "dataready", r"op=READ_DATA_READY outcome=SUCCEEDED.*data_ready=(yes|no)", timeout_s=12.0),
     Step("periodic start", "periodic on", r"op=START_PERIODIC outcome=SUCCEEDED", timeout_s=12.0),
     Step("periodic sample", "read", r"op=FETCH_SAMPLE outcome=SUCCEEDED.*sample seq=", timeout_s=15.0, settle_s=6.0),
@@ -188,7 +198,9 @@ def destructive_confirmation_valid(include_destructive: bool, confirmation: str)
 
 
 def step_output_matches(step: Step, output: str) -> bool:
-    return re.search(step.expect, output, re.IGNORECASE | re.DOTALL) is not None
+    return re.search(
+        step.expect, strip_ansi(output), re.IGNORECASE | re.DOTALL
+    ) is not None
 
 
 def step_passed(matched: bool, output: str) -> bool:
@@ -240,7 +252,10 @@ def run_parser_self_test() -> None:
     require(parse_serial_number("serial_number: 100ABCDEF012") == "100ABCDEF012", "serial parser rejected plain form")
     require(parse_serial_number("serial=0x1234") is None, "serial parser accepted short serial")
     require(missing_minimum_safe_steps(SAFE_STEPS) == (), "safe HIL step contract is incomplete")
-    help_text = "version\nscan\nbegin\nidentity\nvariant\nsettings\nstatus\n"
+    help_text = (
+        "version\nscan\nbegin\nprobe\nrecover\nidentity\nvariant\nsettings\n"
+        "selfcheck\nstress\nstress_mix\nstatus\n"
+    )
     require(missing_minimum_help_commands(help_text) == (), "help command contract parser failed")
     require(
         classify_failure_tokens("Status: I2C_TIMEOUT; fail=1; errors=2")

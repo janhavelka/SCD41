@@ -4,8 +4,8 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
-Release status: `library.json` is staged at `1.1.1` for compatibility and
-release-candidate validation, but no `v1.1.1` release/tag or current physical
+Release status: `library.json` is staged at `1.2.0` for compatibility and
+release-candidate validation, but no `v1.2.0` release/tag or current physical
 HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
 [hardware validation guide](docs/validation/hardware-hil.md).
 
@@ -232,6 +232,15 @@ composite identity remains valid. A different or strictly unsupported family
 invalidates the composite identity, publishes only the newly observed variant
 evidence, and requires a new `ATTACH` before managed work.
 
+CRC-valid configuration responses are also checked against every explicit
+datasheet domain before publication: altitude 0..3000 m, pressure word
+700..1200, ASC enable 0/1, and ASC periods in 4-hour steps. A violating response
+records a protocol failure, clears the affected verified bit, and does not
+overwrite the prior cached value. Temperature offset spans the full encoded
+0..175 C domain; the datasheet's 0..20 C range is a recommendation. ASC target
+and FRC reference use the complete uint16 ppm command-word domain because v1.7
+does not state a narrower valid range.
+
 `FixedSample` contains fixed-width CO2 ppm, temperature in milli-degrees C,
 humidity in milli-percent, capture time, sensor epoch, sequence, mode, and
 validity/freshness flags. Sequence is 1-based since the latest sensor epoch or
@@ -260,6 +269,8 @@ While periodic measurement is active, the driver enforces the SCD41 command
 restriction: only measurement read, data-ready status, ambient pressure access,
 and stop-periodic are admitted. Stop-periodic includes the required 500 ms
 zero-I2C settle phase.
+Typed stop while already idle is rejected without I2C. Unknown retained mode is
+handled only by the explicit `ATTACH` reconciliation sequence.
 
 ## Transport result contract
 
@@ -322,8 +333,19 @@ Detailed device facts are in
 
 The CLIs use the same command contract. Each loop advances the driver with one
 callback per poll and automatically consumes and prints terminal results.
-EEPROM, calibration, and factory-reset commands require an explicit `confirm`
-token.
+`probe` performs a CRC/variant-qualified identity check (attaching first when
+needed), while `attach` / `recover` reconcile sensor protocol state. Cooperative
+`stress`, mode-safe `stress_mix`, and aggregate `selfcheck` workflows schedule
+one typed operation at a time and emit matching colored summaries in Arduino
+and native ESP-IDF. EEPROM, calibration, factory-reset, and all raw diagnostic
+commands require an explicit `confirm` token. Raw reads are not assumed safe
+merely because a response is expected.
+
+In a product with a separate console/network task, submit these commands to the
+sole I2C owner; do not call the example's raw bus scan or a transport callback
+from another task. See the
+[feature coverage matrix](docs/validation/feature-coverage.md) and
+[external-owner scheduling contract](docs/integration/external-i2c-owner.md).
 
 Host checks on Windows (using the repository's approved PlatformIO wrapper):
 
@@ -358,9 +380,9 @@ compile-links that package for TunnelMonitor-node's integration target
 
 `library.json` is the version source of truth. `include/SCD41/Version.h`,
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
-from it. Version 1.1.1 includes the source-compatible variant/status/CLI
-functionality and fixed-point/CLI hardening on top of the staged 1.0.0 operation
-model. That 1.0.0 baseline was the breaking API change replacing direct calls
+from it. Version 1.2.0 adds compatible CLI diagnostic workflows and
+datasheet-domain hardening on top of the staged 1.0.0 operation model. That
+1.0.0 baseline was the breaking API change replacing direct calls
 and dual transport callbacks with the
 externally scheduled operation model.
 
