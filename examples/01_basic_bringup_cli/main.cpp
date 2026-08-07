@@ -343,6 +343,10 @@ bool parseOptionalU32(const String& text, uint32_t& value) {
   return text.length() > 0U && cmd::parseU32(text, value);
 }
 
+bool timeReached(uint32_t nowMs, uint32_t targetMs) {
+  return static_cast<int32_t>(nowMs - targetMs) >= 0;
+}
+
 void processCommand(const String& line) {
   String head;
   String tail;
@@ -355,8 +359,14 @@ void processCommand(const String& line) {
   } else if (head == "version" || head == "ver") {
     LOG_SERIAL.printf("SCD41 version=%s\n", SCD41::VERSION);
   } else if (head == "scan") {
-    if (device.operationState() != app_driver::OperationState::IDLE) {
+    const uint32_t nowMs = millis();
+    const app_driver::RuntimeSnapshot runtime = device.runtimeSnapshot();
+    if (runtime.operationState != app_driver::OperationState::IDLE) {
       printStatus(app_driver::Status::Error(app_driver::Err::BUSY, "Operation active"));
+    } else if (runtime.nextSafeCommandValid &&
+               !timeReached(nowMs, runtime.nextSafeCommandMs)) {
+      printStatus(app_driver::Status::Error(
+          app_driver::Err::BUSY, "Sensor safety window active"));
     } else {
       (void)bus_diag::scan();
     }

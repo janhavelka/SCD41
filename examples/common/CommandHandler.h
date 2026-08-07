@@ -6,7 +6,9 @@
 #pragma once
 
 #include <Arduino.h>
+#include <cerrno>
 #include <cstdlib>
+#include <limits>
 
 namespace cmd {
 
@@ -31,9 +33,12 @@ inline bool parseInt32(const String& token, int32_t& outValue) {
     return false;
   }
 
+  errno = 0;
   char* end = nullptr;
   const long value = std::strtol(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0') {
+  if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
+      value < static_cast<long>(std::numeric_limits<int32_t>::min()) ||
+      value > static_cast<long>(std::numeric_limits<int32_t>::max())) {
     return false;
   }
 
@@ -42,13 +47,15 @@ inline bool parseInt32(const String& token, int32_t& outValue) {
 }
 
 inline bool parseU16(const String& token, uint16_t& outValue) {
-  if (token.length() == 0U) {
+  if (token.length() == 0U || token[0] == '-') {
     return false;
   }
 
+  errno = 0;
   char* end = nullptr;
   const unsigned long value = std::strtoul(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0' || value > 0xFFFFUL) {
+  if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
+      value > 0xFFFFUL) {
     return false;
   }
 
@@ -57,13 +64,16 @@ inline bool parseU16(const String& token, uint16_t& outValue) {
 }
 
 inline bool parseU32(const String& token, uint32_t& outValue) {
-  if (token.length() == 0U) {
+  if (token.length() == 0U || token[0] == '-') {
     return false;
   }
 
+  errno = 0;
   char* end = nullptr;
   const unsigned long value = std::strtoul(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0') {
+  if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
+      value > static_cast<unsigned long>(
+                  std::numeric_limits<uint32_t>::max())) {
     return false;
   }
 

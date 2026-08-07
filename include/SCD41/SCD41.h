@@ -617,11 +617,11 @@ public:
   static float convertHumidityPct(uint16_t raw);
   /// Convert a raw temperature word to milli-degrees Celsius.
   /// @param raw Complete 16-bit sensor word.
-  /// @return Deterministic fixed-point temperature.
+  /// @return Datasheet-scaled fixed-point temperature, rounded to nearest mC.
   static int32_t convertTemperatureMilliC(uint16_t raw);
   /// Convert a raw humidity word to milli-percent relative humidity.
   /// @param raw Complete 16-bit sensor word.
-  /// @return Deterministic fixed-point relative humidity.
+  /// @return Datasheet-scaled humidity, rounded to nearest milli-percent RH.
   static uint32_t convertHumidityMilliPercent(uint16_t raw);
   /// Encode a finite temperature offset in the supported 0..20 C range.
   /// @param offsetC Offset in degrees Celsius.

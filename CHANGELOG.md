@@ -6,8 +6,19 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.1.0` for compatibility validation. No release tag
+The manifest is staged at `1.1.1` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
+
+### Planned 1.1.1
+
+#### Fixed
+
+- Fixed-point temperature and humidity conversion now use the datasheet's exact
+  `65535` denominator and round to the nearest published milli-unit, including
+  exact full-scale endpoints.
+- Arduino and ESP-IDF bus scans now respect an unexpired driver safety window,
+  CLI integer parsing rejects overflow consistently, and the parity gate checks
+  operation handlers and accepted boolean tokens rather than help text alone.
 
 ### Planned 1.1.0
 

@@ -2,9 +2,11 @@
 /// @brief Native ESP-IDF owner-safe SCD41 CLI example.
 
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #include <driver/i2c_master.h>
 #include <esp_err.h>
@@ -101,9 +103,14 @@ bool splitHeadTail(const Line& input, Line& head, Line& tail) {
 
 bool parseU32(const Line& token, uint32_t& value) {
   if (token.empty() || token[0] == '-') return false;
+  errno = 0;
   char* end = nullptr;
   const unsigned long parsed = std::strtoul(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0') return false;
+  if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
+      parsed > static_cast<unsigned long>(
+                   std::numeric_limits<uint32_t>::max())) {
+    return false;
+  }
   value = static_cast<uint32_t>(parsed);
   return true;
 }
@@ -117,16 +124,23 @@ bool parseU16(const Line& token, uint16_t& value) {
 
 bool parseI32(const Line& token, int32_t& value) {
   if (token.empty()) return false;
+  errno = 0;
   char* end = nullptr;
   const long parsed = std::strtol(token.c_str(), &end, 0);
-  if (end == token.c_str() || *end != '\0') return false;
+  if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
+      parsed < static_cast<long>(std::numeric_limits<int32_t>::min()) ||
+      parsed > static_cast<long>(std::numeric_limits<int32_t>::max())) {
+    return false;
+  }
   value = static_cast<int32_t>(parsed);
   return true;
 }
 
 bool parseBool(const Line& token, bool& value) {
-  if (token == "1" || token == "on" || token == "true") { value = true; return true; }
-  if (token == "0" || token == "off" || token == "false") { value = false; return true; }
+  if (token == "1" || token == "on" || token == "true" ||
+      token == "enable") { value = true; return true; }
+  if (token == "0" || token == "off" || token == "false" ||
+      token == "disable") { value = false; return true; }
   return false;
 }
 
@@ -302,6 +316,10 @@ i2c_master_bus_handle_t bus = nullptr;
 i2c_master_dev_handle_t sensorHandle = nullptr;
 
 uint32_t idfNowMs() { return static_cast<uint32_t>(esp_timer_get_time() / 1000LL); }
+
+bool timeReached(uint32_t nowMs, uint32_t targetMs) {
+  return static_cast<int32_t>(nowMs - targetMs) >= 0;
+}
 
 uint32_t operationBudgetMs(SCD41::OperationKind kind) {
   const SCD41::OperationLimits limits = SCD41::SCD41::limits(kind);
@@ -600,8 +618,17 @@ void processCommand(const Line& line) {
   if (head == "help" || head == "?") printHelp();
   else if (head == "version" || head == "ver") std::printf("SCD41 version=%s\n", SCD41::VERSION);
   else if (head == "scan") {
-    if (device.operationState() != SCD41::OperationState::IDLE) printStatus(SCD41::Status::Error(SCD41::Err::BUSY, "Operation active"));
-    else scanBus();
+    const uint32_t nowMs = idfNowMs();
+    const SCD41::RuntimeSnapshot runtime = device.runtimeSnapshot();
+    if (runtime.operationState != SCD41::OperationState::IDLE) {
+      printStatus(SCD41::Status::Error(SCD41::Err::BUSY, "Operation active"));
+    } else if (runtime.nextSafeCommandValid &&
+               !timeReached(nowMs, runtime.nextSafeCommandMs)) {
+      printStatus(SCD41::Status::Error(
+          SCD41::Err::BUSY, "Sensor safety window active"));
+    } else {
+      scanBus();
+    }
   } else if (head == "begin") {
     const SCD41::RuntimeSnapshot before = device.runtimeSnapshot();
     device.end();

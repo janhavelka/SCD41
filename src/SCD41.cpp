@@ -551,11 +551,13 @@ float SCD41::convertHumidityPct(uint16_t raw) {
 }
 
 int32_t SCD41::convertTemperatureMilliC(uint16_t raw) {
-  return ((21875 * static_cast<int32_t>(raw)) >> 13) - 45000;
+  const uint64_t scaled = static_cast<uint64_t>(raw) * 175000ULL;
+  return static_cast<int32_t>((scaled + 32767ULL) / 65535ULL) - 45000;
 }
 
 uint32_t SCD41::convertHumidityMilliPercent(uint16_t raw) {
-  return (12500U * static_cast<uint32_t>(raw)) >> 13;
+  const uint64_t scaled = static_cast<uint64_t>(raw) * 100000ULL;
+  return static_cast<uint32_t>((scaled + 32767ULL) / 65535ULL);
 }
 
 Status SCD41::encodeTemperatureOffsetC(float offsetC, uint16_t& out) {

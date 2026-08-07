@@ -248,9 +248,12 @@ warm-up/publication filter is application policy.
 Fixed-point conversions used by this library:
 
 ```cpp
-temperature_mdegC = ((21875 * raw) >> 13) - 45000;
-humidity_milliPct = (12500 * raw) >> 13;
+temperature_mdegC = round(175000 * raw / 65535) - 45000;
+humidity_milliPct = round(100000 * raw / 65535);
 ```
+
+The 64-bit intermediates preserve the datasheet denominator exactly, including
+the full-scale endpoints of 130000 mC and 100000 milli-percent RH.
 
 Temperature offset command encoding uses the datasheet scale:
 

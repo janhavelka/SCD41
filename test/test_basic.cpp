@@ -2528,9 +2528,13 @@ void test_helper_boundaries_and_extreme_float_inputs() {
   TEST_ASSERT_FALSE(Device::isDataReady(0x8000));
 
   TEST_ASSERT_EQUAL_INT32(-45000, Device::convertTemperatureMilliC(0));
-  TEST_ASSERT_EQUAL_INT32(129997, Device::convertTemperatureMilliC(65535));
+  TEST_ASSERT_EQUAL_INT32(25003, Device::convertTemperatureMilliC(0x6667U));
+  TEST_ASSERT_EQUAL_INT32(130000, Device::convertTemperatureMilliC(65535));
   TEST_ASSERT_EQUAL_UINT32(0U, Device::convertHumidityMilliPercent(0));
-  TEST_ASSERT_EQUAL_UINT32(99998U, Device::convertHumidityMilliPercent(65535));
+  TEST_ASSERT_EQUAL_UINT32(37002U,
+                           Device::convertHumidityMilliPercent(0x5EB9U));
+  TEST_ASSERT_EQUAL_UINT32(100000U,
+                           Device::convertHumidityMilliPercent(65535));
   TEST_ASSERT_FLOAT_WITHIN(0.001F, -45.0F, Device::convertTemperatureC(0));
   TEST_ASSERT_FLOAT_WITHIN(0.001F, 100.0F, Device::convertHumidityPct(65535));
 

@@ -13,6 +13,7 @@ IDF_MAIN = IDF_ROOT / "main" / "main.cpp"
 IDF_TRANSPORT = IDF_ROOT / "main" / "IdfI2cTransport.cpp"
 IDF_TRANSPORT_HEADER = IDF_ROOT / "main" / "IdfI2cTransport.h"
 IDF_CMAKE = IDF_ROOT / "main" / "CMakeLists.txt"
+ARDUINO_COMMAND_HANDLER = ROOT / "examples" / "common" / "CommandHandler.h"
 
 MANDATORY_COMMANDS = {
     "?", "help", "version", "ver", "scan", "begin", "end", "status", "drv",
@@ -39,6 +40,11 @@ REQUIRED_IDF_TOKENS = (
     "SCD41::errorName(value)",
     "OperationRequest::diagnosticWriteCommand(command)",
     "OperationRequest::diagnosticWriteWord(command, word)",
+    "OperationRequest::diagnosticReadWords(",
+    "runtime.nextSafeCommandValid",
+    "!timeReached(nowMs, runtime.nextSafeCommandMs)",
+    "static_cast<int32_t>(nowMs - targetMs) >= 0",
+    "errno == ERANGE",
 )
 REQUIRED_TRANSPORT_TOKENS = (
     "SCD41::TransferResult idfI2cTransfer",
@@ -107,6 +113,69 @@ def command_block(text: str, command: str) -> str:
     return text[match.start():end]
 
 
+HANDLER_ENTRIES = (
+    "scan", "begin", "end", "health", "result", "cancel", "identity",
+    "variant", "periodic", "dataready", "read", "single", "sample", "cfg",
+    "sleep", "wake", "toffset", "asc_standard", "asc_enabled", "reinit",
+    "selftest", "frc", "persist", "factory_reset",
+)
+
+
+def handler_signature(text: str, command: str) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    block = command_block(text, command)
+    operation_kinds = frozenset(re.findall(r"OperationKind::([A-Z0-9_]+)", block))
+    builders = frozenset(re.findall(r"OperationRequest::([A-Za-z0-9_]+)\s*\(", block))
+    routing_literals = frozenset(
+        value
+        for _, value in re.findall(
+            r'\b(tail|sub|confirm)\s*(?:==|!=)\s*"([^"]*)"', block
+        )
+    )
+    return operation_kinds, builders, routing_literals
+
+
+def function_body(text: str, function_name: str) -> str:
+    match = re.search(rf"\bbool\s+{re.escape(function_name)}\s*\([^)]*\)\s*\{{", text)
+    if match is None:
+        fail(f"missing parser function: {function_name}")
+    depth = 1
+    index = match.end()
+    while index < len(text) and depth > 0:
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        index += 1
+    if depth != 0:
+        fail(f"unterminated parser function: {function_name}")
+    return text[match.end():index - 1]
+
+
+def check_handler_parity(arduino: str, idf: str) -> None:
+    for command in HANDLER_ENTRIES:
+        arduino_signature = handler_signature(arduino, command)
+        idf_signature = handler_signature(idf, command)
+        if arduino_signature != idf_signature:
+            fail(
+                f"handler semantics differ for '{command}': "
+                f"arduino={arduino_signature}, idf={idf_signature}"
+            )
+
+    arduino_parser = read(ARDUINO_COMMAND_HANDLER)
+    arduino_bool_tokens = set(
+        re.findall(r'"([^"]+)"', function_body(arduino_parser, "parseBool01"))
+    )
+    idf_bool_tokens = set(
+        re.findall(r'"([^"]+)"', function_body(idf, "parseBool"))
+    )
+    if arduino_bool_tokens != idf_bool_tokens:
+        fail(
+            "boolean parser vocabulary differs: "
+            f"arduino={sorted(arduino_bool_tokens)}, "
+            f"idf={sorted(idf_bool_tokens)}"
+        )
+
+
 def require_before(block: str, guard: str, operation: str, label: str) -> None:
     guard_pos = block.find(guard)
     operation_pos = block.find(operation)
@@ -145,6 +214,7 @@ def main() -> int:
     missing = sorted(MANDATORY_COMMANDS - idf_commands)
     if missing:
         fail(f"mandatory commands missing: {missing}")
+    check_handler_parity(arduino, idf)
 
     combined = "\n".join(
         path.read_text(encoding="utf-8", errors="replace")

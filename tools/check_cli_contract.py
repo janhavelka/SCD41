@@ -36,8 +36,12 @@ REQUIRED_OWNER_TOKENS = (
     "device.cancel(runtime.operationId, millis())",
     "device.takeResult(id, result)",
     "Device::limits(kind)",
+    "OperationRequest::diagnosticReadWords(",
     "OperationRequest::diagnosticWriteCommand(command)",
     "OperationRequest::diagnosticWriteWord(command, word)",
+    "runtime.nextSafeCommandValid",
+    "!timeReached(nowMs, runtime.nextSafeCommandMs)",
+    "static_cast<int32_t>(nowMs - targetMs) >= 0",
 )
 FORBIDDEN_DRIVER_CALLS = (
     ".tick(", ".probe(", ".recover(", ".readMeasurement(",
@@ -136,6 +140,12 @@ def main() -> int:
     for token in REQUIRED_OWNER_TOKENS:
         if token not in text:
             fail(f"owner-safe lifecycle token missing: {token}")
+    parser_text = (COMMON / "CommandHandler.h").read_text(
+        encoding="utf-8", errors="replace"
+    )
+    for token in ("errno == ERANGE", "numeric_limits<uint32_t>::max()"):
+        if token not in parser_text:
+            fail(f"bounded numeric parser token missing: {token}")
     for token in FORBIDDEN_DRIVER_CALLS:
         if token in text:
             fail(f"obsolete direct/blocking driver call present: {token}")

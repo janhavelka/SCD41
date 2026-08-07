@@ -1,6 +1,6 @@
 {
   "name": "SCD41",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Production-grade SCD41 photoacoustic NDIR CO2, temperature, and humidity sensor driver.",
   "keywords": [
     "scd41",
