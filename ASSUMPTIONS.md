@@ -54,6 +54,12 @@ core driver cannot determine by itself.
   reconciliation when required.
 - Bus locking, arbitration with other devices, aggregate health, reset policy,
   sensor rail control, scheduling, and watchdog policy remain application-owned.
+- `isInitialized()` means only that a valid non-owning configuration is bound.
+  `isOnline()` is the passive transfer-health view and does not probe, verify
+  attachment, or supersede protocol/operation health. Direct health accessors
+  map only to `HealthSnapshot` transfer fields; protocol/CRC and logical-job
+  channels remain separate. Successful `begin()` starts a fresh health session;
+  rejected `begin()` and `end()` preserve the current session counters.
 
 ## State and product-policy assumptions
 

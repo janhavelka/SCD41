@@ -248,7 +248,7 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
       break;
     }
     if (!stepStatus.ok() && !stepStatus.inProgress()) {
-      _finishTransferFailure(stepStatus, driverNowMs);
+      _finishOperationFailure(stepStatus, driverNowMs);
       break;
     }
     if (callbacksRemaining == 0U) {
@@ -1154,7 +1154,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           }
           return validation;
         }
-        _applyReadValue(readKind, words[0], nowMs);
+        _applyReadValue(readKind, words[0]);
       }
 
       if (_active.request.kind == OperationKind::READ_CONFIGURATION) {
@@ -1314,7 +1314,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         if (_active.fieldIndex == 0U) {
           const Status validation = _validateReturnedSetting(kind, word);
           if (validation.ok()) {
-            _applyReadValue(kind, word, nowMs);
+            _applyReadValue(kind, word);
           } else {
             const uint16_t fieldMask =
                 configurationFieldMask(_fieldFor(kind));
@@ -2067,7 +2067,8 @@ void SCD41::_finish(OperationOutcome outcome, EffectState effect,
   _recordOperationOutcome(_terminal);
 }
 
-void SCD41::_finishTransferFailure(const Status& status, uint32_t completedMs) {
+void SCD41::_finishOperationFailure(const Status& status,
+                                    uint32_t completedMs) {
   if (!_activeValid) {
     return;
   }
@@ -2109,9 +2110,7 @@ void SCD41::_finishTransferFailure(const Status& status, uint32_t completedMs) {
   _finish(outcome, effect, status, completedMs);
 }
 
-void SCD41::_applyReadValue(OperationKind kind, uint16_t value,
-                            uint32_t nowMs) {
-  (void)nowMs;
+void SCD41::_applyReadValue(OperationKind kind, uint16_t value) {
   const ConfigurationField field = _fieldFor(kind);
   switch (field) {
     case ConfigurationField::TEMPERATURE_OFFSET:
@@ -2152,7 +2151,7 @@ void SCD41::_applyReadValue(OperationKind kind, uint16_t value,
 }
 
 void SCD41::_applyVerifiedSetting(OperationKind kind, uint16_t value) {
-  _applyReadValue(kind, value, 0);
+  _applyReadValue(kind, value);
 }
 
 void SCD41::_storeSample(const uint16_t words[3], bool co2Valid,

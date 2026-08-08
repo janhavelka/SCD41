@@ -183,121 +183,6 @@ bool readLine(Line& output) {
   return false;
 }
 
-const char* errName(SCD41::Err value) {
-  return SCD41::errorName(value);
-}
-
-const char* stateName(SCD41::DriverState value) {
-  return SCD41::driverStateName(value);
-}
-
-const char* operationStateName(SCD41::OperationState value) {
-  switch (value) {
-    case SCD41::OperationState::IDLE: return "IDLE";
-    case SCD41::OperationState::ACTIVE: return "ACTIVE";
-    case SCD41::OperationState::RESULT_PENDING: return "RESULT_PENDING";
-  }
-  return "UNKNOWN";
-}
-
-const char* evidenceName(SCD41::ModeEvidence value) {
-  switch (value) {
-    case SCD41::ModeEvidence::UNKNOWN: return "UNKNOWN";
-    case SCD41::ModeEvidence::ACKNOWLEDGED: return "ACKNOWLEDGED";
-    case SCD41::ModeEvidence::VERIFIED: return "VERIFIED";
-  }
-  return "UNKNOWN";
-}
-
-const char* modeName(SCD41::OperatingMode value) {
-  switch (value) {
-    case SCD41::OperatingMode::UNKNOWN: return "UNKNOWN";
-    case SCD41::OperatingMode::IDLE: return "IDLE";
-    case SCD41::OperatingMode::PERIODIC: return "PERIODIC";
-    case SCD41::OperatingMode::LOW_POWER_PERIODIC: return "LOW_POWER_PERIODIC";
-    case SCD41::OperatingMode::POWER_DOWN: return "POWER_DOWN";
-  }
-  return "UNKNOWN";
-}
-
-const char* operationName(SCD41::OperationKind value) {
-  switch (value) {
-    case SCD41::OperationKind::NONE: return "NONE";
-    case SCD41::OperationKind::ATTACH: return "ATTACH";
-    case SCD41::OperationKind::READ_IDENTITY: return "READ_IDENTITY";
-    case SCD41::OperationKind::START_PERIODIC: return "START_PERIODIC";
-    case SCD41::OperationKind::START_LOW_POWER_PERIODIC: return "START_LOW_POWER_PERIODIC";
-    case SCD41::OperationKind::STOP_PERIODIC: return "STOP_PERIODIC";
-    case SCD41::OperationKind::READ_DATA_READY: return "READ_DATA_READY";
-    case SCD41::OperationKind::FETCH_SAMPLE: return "FETCH_SAMPLE";
-    case SCD41::OperationKind::SINGLE_SHOT: return "SINGLE_SHOT";
-    case SCD41::OperationKind::SINGLE_SHOT_RHT_ONLY: return "SINGLE_SHOT_RHT_ONLY";
-    case SCD41::OperationKind::READ_TEMPERATURE_OFFSET: return "READ_TEMPERATURE_OFFSET";
-    case SCD41::OperationKind::SET_TEMPERATURE_OFFSET: return "SET_TEMPERATURE_OFFSET";
-    case SCD41::OperationKind::READ_SENSOR_ALTITUDE: return "READ_SENSOR_ALTITUDE";
-    case SCD41::OperationKind::SET_SENSOR_ALTITUDE: return "SET_SENSOR_ALTITUDE";
-    case SCD41::OperationKind::READ_AMBIENT_PRESSURE: return "READ_AMBIENT_PRESSURE";
-    case SCD41::OperationKind::SET_AMBIENT_PRESSURE: return "SET_AMBIENT_PRESSURE";
-    case SCD41::OperationKind::READ_ASC_ENABLED: return "READ_ASC_ENABLED";
-    case SCD41::OperationKind::SET_ASC_ENABLED: return "SET_ASC_ENABLED";
-    case SCD41::OperationKind::READ_ASC_TARGET: return "READ_ASC_TARGET";
-    case SCD41::OperationKind::SET_ASC_TARGET: return "SET_ASC_TARGET";
-    case SCD41::OperationKind::READ_ASC_INITIAL_PERIOD: return "READ_ASC_INITIAL_PERIOD";
-    case SCD41::OperationKind::SET_ASC_INITIAL_PERIOD: return "SET_ASC_INITIAL_PERIOD";
-    case SCD41::OperationKind::READ_ASC_STANDARD_PERIOD: return "READ_ASC_STANDARD_PERIOD";
-    case SCD41::OperationKind::SET_ASC_STANDARD_PERIOD: return "SET_ASC_STANDARD_PERIOD";
-    case SCD41::OperationKind::READ_CONFIGURATION: return "READ_CONFIGURATION";
-    case SCD41::OperationKind::POWER_DOWN: return "POWER_DOWN";
-    case SCD41::OperationKind::WAKE_UP: return "WAKE_UP";
-    case SCD41::OperationKind::REINIT: return "REINIT";
-    case SCD41::OperationKind::SELF_TEST: return "SELF_TEST";
-    case SCD41::OperationKind::FORCED_RECALIBRATION: return "FORCED_RECALIBRATION";
-    case SCD41::OperationKind::PERSIST_SETTINGS: return "PERSIST_SETTINGS";
-    case SCD41::OperationKind::FACTORY_RESET: return "FACTORY_RESET";
-    case SCD41::OperationKind::DIAGNOSTIC_READ_WORDS: return "DIAGNOSTIC_READ_WORDS";
-    case SCD41::OperationKind::DIAGNOSTIC_WRITE_COMMAND: return "DIAGNOSTIC_WRITE_COMMAND";
-    case SCD41::OperationKind::DIAGNOSTIC_WRITE_WORD: return "DIAGNOSTIC_WRITE_WORD";
-    case SCD41::OperationKind::READ_SENSOR_VARIANT: return "READ_SENSOR_VARIANT";
-  }
-  return "UNKNOWN";
-}
-
-const char* outcomeName(SCD41::OperationOutcome value) {
-  switch (value) {
-    case SCD41::OperationOutcome::SUCCEEDED: return "SUCCEEDED";
-    case SCD41::OperationOutcome::NO_DATA: return "NO_DATA";
-    case SCD41::OperationOutcome::FAILED: return "FAILED";
-    case SCD41::OperationOutcome::CANCELLED: return "CANCELLED";
-    case SCD41::OperationOutcome::TIMED_OUT: return "TIMED_OUT";
-    case SCD41::OperationOutcome::PARTIAL: return "PARTIAL";
-    case SCD41::OperationOutcome::INDETERMINATE: return "INDETERMINATE";
-  }
-  return "UNKNOWN";
-}
-
-const char* effectName(SCD41::EffectState value) {
-  switch (value) {
-    case SCD41::EffectState::NONE: return "NONE";
-    case SCD41::EffectState::NOT_ATTEMPTED: return "NOT_ATTEMPTED";
-    case SCD41::EffectState::ATTEMPTED: return "ATTEMPTED";
-    case SCD41::EffectState::ACKNOWLEDGED: return "ACKNOWLEDGED";
-    case SCD41::EffectState::VERIFIED: return "VERIFIED";
-    case SCD41::EffectState::UNKNOWN: return "UNKNOWN";
-  }
-  return "UNKNOWN";
-}
-
-const char* variantName(SCD41::SensorVariant value) {
-  switch (value) {
-    case SCD41::SensorVariant::UNKNOWN: return "UNKNOWN";
-    case SCD41::SensorVariant::SCD40: return "SCD40";
-    case SCD41::SensorVariant::SCD41: return "SCD41";
-    case SCD41::SensorVariant::SCD42: return "SCD42";
-    case SCD41::SensorVariant::SCD43: return "SCD43";
-  }
-  return "UNKNOWN";
-}
-
 void printHelpHeader(const char* title) { std::printf("%s=== %s ===%s\n", LOG_COLOR_CYAN, title, LOG_COLOR_RESET); }
 void printHelpSection(const char* title) { std::printf("\n%s[%s]%s\n", LOG_COLOR_GREEN, title, LOG_COLOR_RESET); }
 void printHelpItem(const char* command, const char* description) {
@@ -340,14 +225,15 @@ void printStatus(const SCD41::Status& status) {
                                         ? LOG_COLOR_YELLOW
                                         : LOG_COLOR_RED));
   std::printf("status=%s%s%s detail=%ld msg=%s\n", color,
-              errName(status.code), LOG_COLOR_RESET,
+              SCD41::errorName(status.code), LOG_COLOR_RESET,
               static_cast<long>(status.detail), status.msg);
 }
 
 void printSample(const SCD41::FixedSample& sample) {
   std::printf("sample seq=%lu epoch=%lu mode=%s co2=%u temp_mC=%ld rh_mPct=%lu flags=0x%04X at=%lu\n",
               static_cast<unsigned long>(sample.sequence),
-              static_cast<unsigned long>(sample.sensorEpoch), modeName(sample.mode),
+              static_cast<unsigned long>(sample.sensorEpoch),
+              SCD41::operatingModeName(sample.mode),
               static_cast<unsigned>(sample.co2Ppm),
               static_cast<long>(sample.temperatureMilliC),
               static_cast<unsigned long>(sample.humidityMilliPercent),
@@ -381,18 +267,21 @@ void printResult(const SCD41::OperationResult& result) {
   std::printf("result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
               static_cast<unsigned long>(result.id.requestId),
               static_cast<unsigned long>(result.id.generation),
-              operationName(result.kind), outcomeColor, outcomeName(result.outcome),
+              SCD41::operationKindName(result.kind), outcomeColor,
+              SCD41::operationOutcomeName(result.outcome),
               LOG_COLOR_RESET,
-              effectName(result.effect), errName(result.status.code),
+              SCD41::effectStateName(result.effect),
+              SCD41::errorName(result.status.code),
               static_cast<unsigned>(result.callbacksUsed),
               result.reconciliationRequired ? "yes" : "no");
-  std::printf("timing started=%lu completed=%lu deadline=%lu phase=%u epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
+  std::printf("timing started=%lu completed=%lu deadline=%lu phase=%s epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
               static_cast<unsigned long>(result.startedMs),
               static_cast<unsigned long>(result.completedMs),
               static_cast<unsigned long>(result.deadlineMs),
-              static_cast<unsigned>(result.finalPhase),
+              SCD41::operationPhaseName(result.finalPhase),
               static_cast<unsigned long>(result.sensorEpoch),
-              modeName(result.operatingMode), evidenceName(result.modeEvidence),
+              SCD41::operatingModeName(result.operatingMode),
+              SCD41::modeEvidenceName(result.modeEvidence),
               static_cast<unsigned>(result.completedFieldMask));
   if (result.kind == SCD41::OperationKind::ATTACH ||
       result.kind == SCD41::OperationKind::READ_IDENTITY ||
@@ -403,7 +292,7 @@ void printResult(const SCD41::OperationResult& result) {
     std::printf("identity valid=%s serial=0x%012llX variant=%s variant_word=0x%04X epoch=%lu\n",
                 result.value.identity.valid ? "yes" : "no",
                 static_cast<unsigned long long>(result.value.identity.serialNumber),
-                variantName(result.value.identity.variant),
+                SCD41::sensorVariantName(result.value.identity.variant),
                 static_cast<unsigned>(result.value.identity.variantWord),
                 static_cast<unsigned long>(result.value.identity.sensorEpoch));
   } else if (result.kind == SCD41::OperationKind::FETCH_SAMPLE ||
@@ -548,7 +437,8 @@ SCD41::Status startOperation(const SCD41::OperationRequest& request,
     if (assignedId != nullptr) *assignedId = id;
     std::printf("started request=%lu generation=%lu op=%s deadline=%lu\n",
                 static_cast<unsigned long>(id.requestId),
-                static_cast<unsigned long>(id.generation), operationName(request.kind),
+                static_cast<unsigned long>(id.generation),
+                SCD41::operationKindName(request.kind),
                 static_cast<unsigned long>(options.deadlineMs));
   }
   return status;
@@ -606,16 +496,18 @@ void printRuntime() {
                                       : LOG_COLOR_RED);
   std::printf("runtime bound=%s attached=%s state=%s%s%s mode=%s evidence=%s epoch=%lu reconcile=%s sample=%s\n",
               runtime.bound ? "yes" : "no", runtime.attached ? "yes" : "no",
-              stateColor, stateName(runtime.driverState), LOG_COLOR_RESET,
-              modeName(runtime.operatingMode), evidenceName(runtime.modeEvidence),
+              stateColor, SCD41::driverStateName(runtime.driverState),
+              LOG_COLOR_RESET,
+              SCD41::operatingModeName(runtime.operatingMode),
+              SCD41::modeEvidenceName(runtime.modeEvidence),
               static_cast<unsigned long>(runtime.sensorEpoch),
               runtime.reconciliationRequired ? "yes" : "no",
               runtime.sampleAvailable ? "yes" : "no");
   std::printf("slot state=%s request=%lu generation=%lu operation=%s next_due=%lu next_safe=%s%lu\n",
-              operationStateName(runtime.operationState),
+              SCD41::operationStateName(runtime.operationState),
               static_cast<unsigned long>(runtime.operationId.requestId),
               static_cast<unsigned long>(runtime.operationId.generation),
-              operationName(runtime.operationKind),
+              SCD41::operationKindName(runtime.operationKind),
               static_cast<unsigned long>(runtime.nextDueMs),
               runtime.nextSafeCommandValid ? "" : "invalid/",
               static_cast<unsigned long>(runtime.nextSafeCommandMs));
@@ -630,13 +522,13 @@ void printRuntime() {
               static_cast<unsigned long>(health.totalOperationFailures),
               static_cast<unsigned long>(health.totalOperationCancelled));
   std::printf("last_errors transfer=%s@%lu protocol=%s@%lu operation=%s@%lu op=%s request=%lu generation=%lu\n",
-              errName(health.lastTransferError.code),
+              SCD41::errorName(health.lastTransferError.code),
               static_cast<unsigned long>(health.lastTransferErrorMs),
-              errName(health.lastProtocolError.code),
+              SCD41::errorName(health.lastProtocolError.code),
               static_cast<unsigned long>(health.lastProtocolErrorMs),
-              errName(health.lastOperationError.code),
+              SCD41::errorName(health.lastOperationError.code),
               static_cast<unsigned long>(health.lastOperationErrorMs),
-              operationName(health.lastOperationErrorKind),
+              SCD41::operationKindName(health.lastOperationErrorKind),
               static_cast<unsigned long>(health.lastOperationErrorId.requestId),
               static_cast<unsigned long>(health.lastOperationErrorId.generation));
 }

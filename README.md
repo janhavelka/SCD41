@@ -4,8 +4,8 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
-Release status: `library.json` is staged at `1.2.0` for compatibility and
-release-candidate validation, but no `v1.2.0` release/tag or current physical
+Release status: `library.json` is staged at `1.3.0` for compatibility and
+release-candidate validation, but no `v1.3.0` release/tag or current physical
 HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
 [hardware validation guide](docs/validation/hardware-hil.md).
 
@@ -30,6 +30,8 @@ decides when the driver may use it.
 - All returned SCD41 words are CRC-8 checked. All word payloads include CRC.
 - Core headers and source have no Arduino, ESP-IDF, FreeRTOS, or logging
   dependency.
+- Lifecycle, health, snapshots, and enum-name helpers are cache-only and
+  allocation-free; they never probe or otherwise touch I2C.
 
 ## Minimal owner loop
 
@@ -153,9 +155,21 @@ The public API is fixed-size and allocation-free:
   terminal record.
 - `RuntimeSnapshot`, `HealthSnapshot`, `Identity`, `ConfigurationSnapshot`, and
   `FixedSample` are cache-only views and never perform I2C.
-- `Status` carries a stable `Err`, optional detail, and static-lifetime message;
-  `errorName` / `driverStateName` and their `toString` aliases provide
-  allocation-free stable enum names.
+- `Status` carries a stable `Err`, optional detail, and static-lifetime message.
+  `errorName`, `driverStateName`, and the descriptive helpers for the public
+  CLI-facing enums have `toString` aliases and return allocation-free,
+  static-lifetime names.
+
+`isInitialized()` is a compatibility alias for zero-I2C `isBound()`.
+`isOnline()` reports only the passive transfer state: it is true in `READY` and
+`DEGRADED`, false in `UNINIT` and `OFFLINE`, and does not imply a verified
+sensor attachment. The direct `lastOkMs()`, `lastErrorMs()`, `lastError()`,
+`consecutiveFailures()`, `totalFailures()`, and `totalSuccess()` accessors map
+only to the transfer channel of `HealthSnapshot`; use the snapshot for separate
+protocol/CRC and logical-operation telemetry. A successful `begin()` starts a
+new health session and clears all of those fields. A rejected `begin()` leaves
+the current session unchanged, while `end()` reports `UNINIT` and preserves the
+session history until the next successful bind.
 
 Interpret `OperationResult::value` by `OperationResult::kind`; other value
 members remain default or are secondary raw evidence:
@@ -352,6 +366,7 @@ Host checks on Windows (using the repository's approved PlatformIO wrapper):
 ```powershell
 python scripts/generate_version.py check
 python tools/check_core_timing_guard.py
+python tools/check_repository_hygiene.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
 python tools/test_scd41_hil_runner.py
@@ -380,8 +395,8 @@ compile-links that package for TunnelMonitor-node's integration target
 
 `library.json` is the version source of truth. `include/SCD41/Version.h`,
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
-from it. Version 1.2.0 adds compatible CLI diagnostic workflows and
-datasheet-domain hardening on top of the staged 1.0.0 operation model. That
+from it. Version 1.3.0 adds backward-compatible diagnostic naming and direct
+transfer-health views on top of the staged 1.0.0 operation model. That
 1.0.0 baseline was the breaking API change replacing direct calls
 and dual transport callbacks with the
 externally scheduled operation model.

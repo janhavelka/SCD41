@@ -12,11 +12,10 @@ COMMON = ROOT / "examples" / "common"
 
 REQUIRED_COMMON = {
     "BoardConfig.h",
-    "BusDiag.h",
     "CliShell.h",
     "CliStyle.h",
     "CommandHandler.h",
-    "DriverCompat.h",
+    "I2cScanner.h",
     "I2cTransport.h",
     "Log.h",
 }
@@ -30,13 +29,14 @@ MANDATORY_COMMANDS = {
     "attach", "recover", "selfcheck", "stress", "stress_mix",
 }
 REQUIRED_OWNER_TOKENS = (
+    "namespace app_driver = ::SCD41;",
     "config.transfer = transport::wireTransfer",
     "device.begin(config)",
     "device.start(request, options, id)",
     "device.poll(millis(), 1U)",
     "device.cancel(runtime.operationId, millis())",
     "device.takeResult(id, result)",
-    "Device::limits(kind)",
+    "app_driver::SCD41::limits(kind)",
     "OperationRequest::diagnosticReadWords(",
     "OperationRequest::diagnosticWriteCommand(command)",
     "OperationRequest::diagnosticWriteWord(command, word)",
@@ -48,6 +48,9 @@ REQUIRED_OWNER_TOKENS = (
     "WorkflowKind::SELFCHECK",
     "WorkflowKind::STRESS_MIX",
     "MAX_STRESS_CYCLES",
+    "app_driver::errorName(status.code)",
+    "app_driver::operationKindName(result.kind)",
+    "app_driver::operationPhaseName(result.finalPhase)",
 )
 FORBIDDEN_DRIVER_CALLS = (
     ".tick(", ".probe(", ".recover(", ".readMeasurement(",

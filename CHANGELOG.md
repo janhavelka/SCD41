@@ -6,8 +6,38 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.2.0` for compatibility validation. No release tag
+The manifest is staged at `1.3.0` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
+
+### Planned 1.3.0
+
+#### Added
+
+- Backward-compatible, zero-I2C `isInitialized()` / `isOnline()` lifecycle
+  views and direct transfer-health accessors for the latest timestamps/error,
+  consecutive failures, and current-health-session success/failure counters.
+- Allocation-free descriptive name helpers and `toString()` overloads for the
+  sensor variant, operating mode/evidence, operation kind/state/outcome/effect,
+  and operation phase enums, plus the append-only `Err::CRC_ERROR` compatibility
+  spelling.
+- Exhaustive enum-name/unknown-value and public health-accessor regressions,
+  with a CI-enforced repository naming and hygiene contract.
+
+#### Changed
+
+- Arduino and native ESP-IDF CLIs now render public core enum helpers directly,
+  including descriptive final-phase names, instead of maintaining parallel
+  mappings.
+- Naming, health-channel, sole-owner, contribution, security, and package
+  descriptions now state their exact contracts without implying physical
+  hardware validation.
+- Renamed the private operation failure finalizer to reflect transport and
+  protocol failures and removed an unused private timestamp parameter.
+
+#### Removed
+
+- Proven-unused example-only bus/driver compatibility wrappers, parser, board,
+  color, and logging helpers that duplicated active owners or had no caller.
 
 ### Planned 1.2.0
 

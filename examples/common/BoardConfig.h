@@ -18,8 +18,6 @@ static constexpr int I2C_SDA = 8;
 static constexpr int I2C_SCL = 9;
 static constexpr uint32_t I2C_FREQ_HZ = 400000;
 static constexpr uint16_t I2C_TIMEOUT_MS = 50;
-static constexpr int LED = 47;
-
 inline bool initI2c() {
   return transport::initWire(I2C_SDA, I2C_SCL, I2C_FREQ_HZ, I2C_TIMEOUT_MS);
 }

@@ -500,6 +500,24 @@ void assertNoIoStatus(const Status& status, const ModelTransport& bus, size_t ca
   TEST_ASSERT_EQUAL_UINT32(callsBefore, bus.calls);
 }
 
+template <typename Enum>
+struct EnumNameCase {
+  Enum value;
+  const char* name;
+};
+
+template <typename Enum, size_t N>
+void assertEnumNames(const EnumNameCase<Enum> (&cases)[N],
+                     const char* (*descriptiveName)(Enum),
+                     const char* (*compatibilityName)(Enum), Enum invalid) {
+  for (const EnumNameCase<Enum>& item : cases) {
+    TEST_ASSERT_EQUAL_STRING(item.name, descriptiveName(item.value));
+    TEST_ASSERT_EQUAL_STRING(item.name, compatibilityName(item.value));
+  }
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN", descriptiveName(invalid));
+  TEST_ASSERT_EQUAL_STRING("UNKNOWN", compatibilityName(invalid));
+}
+
 }  // namespace
 
 void setUp() {}
@@ -545,6 +563,10 @@ void test_status_and_public_type_contracts() {
   }
   TEST_ASSERT_EQUAL_STRING("MEASUREMENT_NOT_READY",
                            errorName(Err::CONVERSION_NOT_READY));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                    static_cast<uint8_t>(Err::CRC_ERROR));
+  TEST_ASSERT_EQUAL_STRING("CRC_MISMATCH", errorName(Err::CRC_ERROR));
+  TEST_ASSERT_EQUAL_STRING("CRC_MISMATCH", toString(Err::CRC_ERROR));
   TEST_ASSERT_EQUAL_STRING("UNKNOWN", errorName(static_cast<Err>(0xFFU)));
   TEST_ASSERT_EQUAL_STRING("OK", toString(Err::OK));
   TEST_ASSERT_EQUAL_STRING("UNKNOWN", toString(static_cast<Err>(0xFFU)));
@@ -590,6 +612,237 @@ void test_status_and_public_type_contracts() {
                            Device::limits(OperationKind::SET_AMBIENT_PRESSURE).maxWaitMs);
   TEST_ASSERT_EQUAL_UINT32(13U,
                            Device::limits(OperationKind::READ_CONFIGURATION).maxWaitMs);
+}
+
+void test_public_enum_name_helpers_are_exhaustive() {
+  const EnumNameCase<SensorVariant> variants[] = {
+      {SensorVariant::UNKNOWN, "UNKNOWN"}, {SensorVariant::SCD40, "SCD40"},
+      {SensorVariant::SCD41, "SCD41"},     {SensorVariant::SCD42, "SCD42"},
+      {SensorVariant::SCD43, "SCD43"},
+  };
+  assertEnumNames(variants, sensorVariantName,
+                  static_cast<const char* (*)(SensorVariant)>(toString),
+                  static_cast<SensorVariant>(0xFEU));
+
+  const EnumNameCase<OperatingMode> modes[] = {
+      {OperatingMode::UNKNOWN, "UNKNOWN"},
+      {OperatingMode::IDLE, "IDLE"},
+      {OperatingMode::PERIODIC, "PERIODIC"},
+      {OperatingMode::LOW_POWER_PERIODIC, "LOW_POWER_PERIODIC"},
+      {OperatingMode::POWER_DOWN, "POWER_DOWN"},
+  };
+  assertEnumNames(modes, operatingModeName,
+                  static_cast<const char* (*)(OperatingMode)>(toString),
+                  static_cast<OperatingMode>(0xFFU));
+
+  const EnumNameCase<ModeEvidence> evidence[] = {
+      {ModeEvidence::UNKNOWN, "UNKNOWN"},
+      {ModeEvidence::ACKNOWLEDGED, "ACKNOWLEDGED"},
+      {ModeEvidence::VERIFIED, "VERIFIED"},
+  };
+  assertEnumNames(evidence, modeEvidenceName,
+                  static_cast<const char* (*)(ModeEvidence)>(toString),
+                  static_cast<ModeEvidence>(0xFFU));
+
+  const EnumNameCase<OperationKind> kinds[] = {
+      {OperationKind::NONE, "NONE"},
+      {OperationKind::ATTACH, "ATTACH"},
+      {OperationKind::READ_IDENTITY, "READ_IDENTITY"},
+      {OperationKind::START_PERIODIC, "START_PERIODIC"},
+      {OperationKind::START_LOW_POWER_PERIODIC, "START_LOW_POWER_PERIODIC"},
+      {OperationKind::STOP_PERIODIC, "STOP_PERIODIC"},
+      {OperationKind::READ_DATA_READY, "READ_DATA_READY"},
+      {OperationKind::FETCH_SAMPLE, "FETCH_SAMPLE"},
+      {OperationKind::SINGLE_SHOT, "SINGLE_SHOT"},
+      {OperationKind::SINGLE_SHOT_RHT_ONLY, "SINGLE_SHOT_RHT_ONLY"},
+      {OperationKind::READ_TEMPERATURE_OFFSET, "READ_TEMPERATURE_OFFSET"},
+      {OperationKind::SET_TEMPERATURE_OFFSET, "SET_TEMPERATURE_OFFSET"},
+      {OperationKind::READ_SENSOR_ALTITUDE, "READ_SENSOR_ALTITUDE"},
+      {OperationKind::SET_SENSOR_ALTITUDE, "SET_SENSOR_ALTITUDE"},
+      {OperationKind::READ_AMBIENT_PRESSURE, "READ_AMBIENT_PRESSURE"},
+      {OperationKind::SET_AMBIENT_PRESSURE, "SET_AMBIENT_PRESSURE"},
+      {OperationKind::READ_ASC_ENABLED, "READ_ASC_ENABLED"},
+      {OperationKind::SET_ASC_ENABLED, "SET_ASC_ENABLED"},
+      {OperationKind::READ_ASC_TARGET, "READ_ASC_TARGET"},
+      {OperationKind::SET_ASC_TARGET, "SET_ASC_TARGET"},
+      {OperationKind::READ_ASC_INITIAL_PERIOD, "READ_ASC_INITIAL_PERIOD"},
+      {OperationKind::SET_ASC_INITIAL_PERIOD, "SET_ASC_INITIAL_PERIOD"},
+      {OperationKind::READ_ASC_STANDARD_PERIOD, "READ_ASC_STANDARD_PERIOD"},
+      {OperationKind::SET_ASC_STANDARD_PERIOD, "SET_ASC_STANDARD_PERIOD"},
+      {OperationKind::READ_CONFIGURATION, "READ_CONFIGURATION"},
+      {OperationKind::POWER_DOWN, "POWER_DOWN"},
+      {OperationKind::WAKE_UP, "WAKE_UP"},
+      {OperationKind::REINIT, "REINIT"},
+      {OperationKind::SELF_TEST, "SELF_TEST"},
+      {OperationKind::FORCED_RECALIBRATION, "FORCED_RECALIBRATION"},
+      {OperationKind::PERSIST_SETTINGS, "PERSIST_SETTINGS"},
+      {OperationKind::FACTORY_RESET, "FACTORY_RESET"},
+      {OperationKind::DIAGNOSTIC_READ_WORDS, "DIAGNOSTIC_READ_WORDS"},
+      {OperationKind::DIAGNOSTIC_WRITE_COMMAND, "DIAGNOSTIC_WRITE_COMMAND"},
+      {OperationKind::DIAGNOSTIC_WRITE_WORD, "DIAGNOSTIC_WRITE_WORD"},
+      {OperationKind::READ_SENSOR_VARIANT, "READ_SENSOR_VARIANT"},
+  };
+  assertEnumNames(kinds, operationKindName,
+                  static_cast<const char* (*)(OperationKind)>(toString),
+                  static_cast<OperationKind>(0xFFU));
+
+  const EnumNameCase<OperationState> states[] = {
+      {OperationState::IDLE, "IDLE"},
+      {OperationState::ACTIVE, "ACTIVE"},
+      {OperationState::RESULT_PENDING, "RESULT_PENDING"},
+  };
+  assertEnumNames(states, operationStateName,
+                  static_cast<const char* (*)(OperationState)>(toString),
+                  static_cast<OperationState>(0xFFU));
+
+  const EnumNameCase<OperationOutcome> outcomes[] = {
+      {OperationOutcome::SUCCEEDED, "SUCCEEDED"},
+      {OperationOutcome::NO_DATA, "NO_DATA"},
+      {OperationOutcome::FAILED, "FAILED"},
+      {OperationOutcome::CANCELLED, "CANCELLED"},
+      {OperationOutcome::TIMED_OUT, "TIMED_OUT"},
+      {OperationOutcome::PARTIAL, "PARTIAL"},
+      {OperationOutcome::INDETERMINATE, "INDETERMINATE"},
+  };
+  assertEnumNames(outcomes, operationOutcomeName,
+                  static_cast<const char* (*)(OperationOutcome)>(toString),
+                  static_cast<OperationOutcome>(0xFFU));
+
+  const EnumNameCase<EffectState> effects[] = {
+      {EffectState::NONE, "NONE"},
+      {EffectState::NOT_ATTEMPTED, "NOT_ATTEMPTED"},
+      {EffectState::ATTEMPTED, "ATTEMPTED"},
+      {EffectState::ACKNOWLEDGED, "ACKNOWLEDGED"},
+      {EffectState::VERIFIED, "VERIFIED"},
+      {EffectState::UNKNOWN, "UNKNOWN"},
+  };
+  assertEnumNames(effects, effectStateName,
+                  static_cast<const char* (*)(EffectState)>(toString),
+                  static_cast<EffectState>(0xFFU));
+
+  const EnumNameCase<OperationPhase> phases[] = {
+      {OperationPhase::NONE, "NONE"},
+      {OperationPhase::WAIT_POWER_UP, "WAIT_POWER_UP"},
+      {OperationPhase::SEND_WAKE, "SEND_WAKE"},
+      {OperationPhase::WAIT_WAKE, "WAIT_WAKE"},
+      {OperationPhase::SEND_STOP, "SEND_STOP"},
+      {OperationPhase::WAIT_STOP, "WAIT_STOP"},
+      {OperationPhase::SEND_COMMAND, "SEND_COMMAND"},
+      {OperationPhase::WAIT_EXECUTION, "WAIT_EXECUTION"},
+      {OperationPhase::SEND_READY_COMMAND, "SEND_READY_COMMAND"},
+      {OperationPhase::READ_READY_RESPONSE, "READ_READY_RESPONSE"},
+      {OperationPhase::SEND_READ_COMMAND, "SEND_READ_COMMAND"},
+      {OperationPhase::READ_RESPONSE, "READ_RESPONSE"},
+      {OperationPhase::SEND_VERIFY_COMMAND, "SEND_VERIFY_COMMAND"},
+      {OperationPhase::READ_VERIFY_RESPONSE, "READ_VERIFY_RESPONSE"},
+      {OperationPhase::READ_DEFERRED_RESULT, "READ_DEFERRED_RESULT"},
+  };
+  assertEnumNames(phases, operationPhaseName,
+                  static_cast<const char* (*)(OperationPhase)>(toString),
+                  static_cast<OperationPhase>(0xFFU));
+}
+
+void test_public_health_compatibility_accessors_match_transfer_channel() {
+  ModelTransport bus;
+  Device device;
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.lastErrorMs());
+  TEST_ASSERT_TRUE(device.lastError().ok());
+  TEST_ASSERT_EQUAL_UINT8(0U, device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.calls);
+
+  Config config = makeConfig(bus);
+  config.offlineThreshold = 1U;
+  TEST_ASSERT_TRUE(device.begin(config).ok());
+  TEST_ASSERT_TRUE(device.isInitialized());
+  TEST_ASSERT_TRUE(device.isBound());
+  TEST_ASSERT_TRUE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(0U, bus.calls);
+
+  uint32_t nowMs = 100U;
+  attachDevice(device, bus, nowMs, 600U);
+  HealthSnapshot health = device.healthSnapshot();
+  const size_t afterAttachCalls = bus.calls;
+  TEST_ASSERT_TRUE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(health.lastTransferError.code),
+                    static_cast<uint8_t>(device.lastError().code));
+  TEST_ASSERT_EQUAL_INT32(health.lastTransferError.detail,
+                          device.lastError().detail);
+  TEST_ASSERT_EQUAL_UINT8(health.consecutiveTransferFailures,
+                          device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferFailures,
+                           device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferSuccess, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(afterAttachCalls, bus.calls);
+
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1U, TransferCode::TIMEOUT,
+                    TransferDisposition::NO_EFFECT, false, false, nowMs);
+  const OperationId failed = startJob(
+      device, OperationRequest::make(OperationKind::READ_IDENTITY), nowMs,
+      nowMs + 100U, 601U);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult failure = takeTerminal(device, failed);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                    static_cast<uint8_t>(failure.status.code));
+  health = device.healthSnapshot();
+  const size_t afterFailureCalls = bus.calls;
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
+                    static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(health.lastTransferError.code),
+                    static_cast<uint8_t>(device.lastError().code));
+  TEST_ASSERT_EQUAL_INT32(health.lastTransferError.detail,
+                          device.lastError().detail);
+  TEST_ASSERT_EQUAL_UINT8(health.consecutiveTransferFailures,
+                          device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferFailures,
+                           device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferSuccess, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(afterFailureCalls, bus.calls);
+
+  Config invalid = makeConfig(bus);
+  invalid.transfer = nullptr;
+  const Status rejected = device.begin(invalid);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_CONFIG),
+                    static_cast<uint8_t>(rejected.code));
+  TEST_ASSERT_TRUE(device.isInitialized());
+  TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferFailures,
+                           device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferSuccess, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(afterFailureCalls, bus.calls);
+
+  device.end();
+  TEST_ASSERT_FALSE(device.isInitialized());
+  TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferFailures,
+                           device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(health.totalTransferSuccess, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(afterFailureCalls, bus.calls);
+
+  TEST_ASSERT_TRUE(device.begin(makeConfig(bus)).ok());
+  TEST_ASSERT_TRUE(device.isInitialized());
+  TEST_ASSERT_TRUE(device.isOnline());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.lastOkMs());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.lastErrorMs());
+  TEST_ASSERT_TRUE(device.lastError().ok());
+  TEST_ASSERT_EQUAL_UINT8(0U, device.consecutiveFailures());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.totalFailures());
+  TEST_ASSERT_EQUAL_UINT32(0U, device.totalSuccess());
+  TEST_ASSERT_EQUAL_UINT32(afterFailureCalls, bus.calls);
 }
 
 void test_begin_is_zero_io_and_validates_before_rebinding() {
@@ -2803,6 +3056,8 @@ void test_cli_diagnostic_workflows_are_bounded_and_deterministic() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_status_and_public_type_contracts);
+  RUN_TEST(test_public_enum_name_helpers_are_exhaustive);
+  RUN_TEST(test_public_health_compatibility_accessors_match_transfer_channel);
   RUN_TEST(test_begin_is_zero_io_and_validates_before_rebinding);
   RUN_TEST(test_config_validation_boundaries_are_zero_io);
   RUN_TEST(test_start_is_zero_io_and_result_backpressure_is_exact);

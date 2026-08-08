@@ -113,7 +113,10 @@ def find_package(args: list[str]) -> pathlib.Path | None:
 def main(args: list[str]) -> int:
     package_path = find_package(args)
     if package_path is None:
-        return fail("no package tarball found; run `python -m platformio pkg pack` first")
+        return fail(
+            r"no package tarball found; on Windows run "
+            r"`scripts\pio.cmd pkg pack .` first"
+        )
     if not package_path.is_file():
         return fail(f"package tarball not found: {package_path}")
 

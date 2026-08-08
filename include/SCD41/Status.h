@@ -19,6 +19,7 @@ enum class Err : uint8_t {
   INVALID_PARAM,                       ///< A request value or ID is invalid.
   DEVICE_NOT_FOUND,                    ///< Attach could not verify a supported device.
   CRC_MISMATCH,                        ///< A returned word failed the Sensirion CRC-8 check.
+  CRC_ERROR = CRC_MISMATCH,            ///< Cross-library compatibility alias.
   MEASUREMENT_NOT_READY,               ///< The requested sample is not available yet.
   CONVERSION_NOT_READY = MEASUREMENT_NOT_READY, ///< Compatibility alias.
   BUSY,                                ///< Admission is blocked by active/result/safety state.

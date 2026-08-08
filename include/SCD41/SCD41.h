@@ -49,6 +49,27 @@ enum class SensorVariant : uint8_t {
   SCD43 = 0x05    ///< Observed SCD43 identity; not claimed as supported.
 };
 
+/// Return a stable allocation-free diagnostic name for a sensor variant.
+/// @param variant Variant to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* sensorVariantName(SensorVariant variant) {
+  switch (variant) {
+    case SensorVariant::UNKNOWN: return "UNKNOWN";
+    case SensorVariant::SCD40: return "SCD40";
+    case SensorVariant::SCD41: return "SCD41";
+    case SensorVariant::SCD42: return "SCD42";
+    case SensorVariant::SCD43: return "SCD43";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `sensorVariantName()`.
+/// @param variant Variant to name.
+/// @return The same static-lifetime string as `sensorVariantName(variant)`.
+constexpr const char* toString(SensorVariant variant) {
+  return sensorVariantName(variant);
+}
+
 /// Driver's conservative model of the sensor operating mode.
 enum class OperatingMode : uint8_t {
   UNKNOWN = 0,       ///< Hardware mode is not safely known.
@@ -58,12 +79,52 @@ enum class OperatingMode : uint8_t {
   POWER_DOWN         ///< Sensor has acknowledged entry to power-down mode.
 };
 
+/// Return a stable allocation-free diagnostic name for an operating mode.
+/// @param mode Mode to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* operatingModeName(OperatingMode mode) {
+  switch (mode) {
+    case OperatingMode::UNKNOWN: return "UNKNOWN";
+    case OperatingMode::IDLE: return "IDLE";
+    case OperatingMode::PERIODIC: return "PERIODIC";
+    case OperatingMode::LOW_POWER_PERIODIC: return "LOW_POWER_PERIODIC";
+    case OperatingMode::POWER_DOWN: return "POWER_DOWN";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `operatingModeName()`.
+/// @param mode Mode to name.
+/// @return The same static-lifetime string as `operatingModeName(mode)`.
+constexpr const char* toString(OperatingMode mode) {
+  return operatingModeName(mode);
+}
+
 /// Strength of evidence behind `OperatingMode`.
 enum class ModeEvidence : uint8_t {
   UNKNOWN = 0, ///< No reliable mode claim is available.
   ACKNOWLEDGED,///< An effectful mode command completed successfully.
   VERIFIED     ///< Attach/reconciliation established usable mode state.
 };
+
+/// Return a stable allocation-free diagnostic name for mode evidence.
+/// @param evidence Evidence level to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* modeEvidenceName(ModeEvidence evidence) {
+  switch (evidence) {
+    case ModeEvidence::UNKNOWN: return "UNKNOWN";
+    case ModeEvidence::ACKNOWLEDGED: return "ACKNOWLEDGED";
+    case ModeEvidence::VERIFIED: return "VERIFIED";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `modeEvidenceName()`.
+/// @param evidence Evidence level to name.
+/// @return The same static-lifetime string as `modeEvidenceName(evidence)`.
+constexpr const char* toString(ModeEvidence evidence) {
+  return modeEvidenceName(evidence);
+}
 
 /// Scheduling and policy class published by `SCD41::limits()`.
 enum class OperationClass : uint8_t {
@@ -113,12 +174,89 @@ enum class OperationKind : uint8_t {
   READ_SENSOR_VARIANT        ///< Read the dedicated CRC-protected variant word.
 };
 
+/// Return a stable allocation-free diagnostic name for an operation kind.
+/// @param kind Operation kind to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* operationKindName(OperationKind kind) {
+  switch (kind) {
+    case OperationKind::NONE: return "NONE";
+    case OperationKind::ATTACH: return "ATTACH";
+    case OperationKind::READ_IDENTITY: return "READ_IDENTITY";
+    case OperationKind::START_PERIODIC: return "START_PERIODIC";
+    case OperationKind::START_LOW_POWER_PERIODIC:
+      return "START_LOW_POWER_PERIODIC";
+    case OperationKind::STOP_PERIODIC: return "STOP_PERIODIC";
+    case OperationKind::READ_DATA_READY: return "READ_DATA_READY";
+    case OperationKind::FETCH_SAMPLE: return "FETCH_SAMPLE";
+    case OperationKind::SINGLE_SHOT: return "SINGLE_SHOT";
+    case OperationKind::SINGLE_SHOT_RHT_ONLY: return "SINGLE_SHOT_RHT_ONLY";
+    case OperationKind::READ_TEMPERATURE_OFFSET:
+      return "READ_TEMPERATURE_OFFSET";
+    case OperationKind::SET_TEMPERATURE_OFFSET:
+      return "SET_TEMPERATURE_OFFSET";
+    case OperationKind::READ_SENSOR_ALTITUDE: return "READ_SENSOR_ALTITUDE";
+    case OperationKind::SET_SENSOR_ALTITUDE: return "SET_SENSOR_ALTITUDE";
+    case OperationKind::READ_AMBIENT_PRESSURE: return "READ_AMBIENT_PRESSURE";
+    case OperationKind::SET_AMBIENT_PRESSURE: return "SET_AMBIENT_PRESSURE";
+    case OperationKind::READ_ASC_ENABLED: return "READ_ASC_ENABLED";
+    case OperationKind::SET_ASC_ENABLED: return "SET_ASC_ENABLED";
+    case OperationKind::READ_ASC_TARGET: return "READ_ASC_TARGET";
+    case OperationKind::SET_ASC_TARGET: return "SET_ASC_TARGET";
+    case OperationKind::READ_ASC_INITIAL_PERIOD: return "READ_ASC_INITIAL_PERIOD";
+    case OperationKind::SET_ASC_INITIAL_PERIOD: return "SET_ASC_INITIAL_PERIOD";
+    case OperationKind::READ_ASC_STANDARD_PERIOD:
+      return "READ_ASC_STANDARD_PERIOD";
+    case OperationKind::SET_ASC_STANDARD_PERIOD:
+      return "SET_ASC_STANDARD_PERIOD";
+    case OperationKind::READ_CONFIGURATION: return "READ_CONFIGURATION";
+    case OperationKind::POWER_DOWN: return "POWER_DOWN";
+    case OperationKind::WAKE_UP: return "WAKE_UP";
+    case OperationKind::REINIT: return "REINIT";
+    case OperationKind::SELF_TEST: return "SELF_TEST";
+    case OperationKind::FORCED_RECALIBRATION: return "FORCED_RECALIBRATION";
+    case OperationKind::PERSIST_SETTINGS: return "PERSIST_SETTINGS";
+    case OperationKind::FACTORY_RESET: return "FACTORY_RESET";
+    case OperationKind::DIAGNOSTIC_READ_WORDS: return "DIAGNOSTIC_READ_WORDS";
+    case OperationKind::DIAGNOSTIC_WRITE_COMMAND:
+      return "DIAGNOSTIC_WRITE_COMMAND";
+    case OperationKind::DIAGNOSTIC_WRITE_WORD: return "DIAGNOSTIC_WRITE_WORD";
+    case OperationKind::READ_SENSOR_VARIANT: return "READ_SENSOR_VARIANT";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `operationKindName()`.
+/// @param kind Operation kind to name.
+/// @return The same static-lifetime string as `operationKindName(kind)`.
+constexpr const char* toString(OperationKind kind) {
+  return operationKindName(kind);
+}
+
 /// Ownership state of the single operation/result slot.
 enum class OperationState : uint8_t {
   IDLE = 0,      ///< No active operation or retained terminal result.
   ACTIVE,        ///< An operation is admitted and awaits owner polling.
   RESULT_PENDING///< One terminal result must be consumed.
 };
+
+/// Return a stable allocation-free diagnostic name for operation-slot state.
+/// @param state Slot state to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* operationStateName(OperationState state) {
+  switch (state) {
+    case OperationState::IDLE: return "IDLE";
+    case OperationState::ACTIVE: return "ACTIVE";
+    case OperationState::RESULT_PENDING: return "RESULT_PENDING";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `operationStateName()`.
+/// @param state Slot state to name.
+/// @return The same static-lifetime string as `operationStateName(state)`.
+constexpr const char* toString(OperationState state) {
+  return operationStateName(state);
+}
 
 /// Logical terminal classification independent of low-level error detail.
 enum class OperationOutcome : uint8_t {
@@ -131,6 +269,29 @@ enum class OperationOutcome : uint8_t {
   INDETERMINATE  ///< Hardware effect cannot be determined safely.
 };
 
+/// Return a stable allocation-free diagnostic name for an operation outcome.
+/// @param outcome Outcome to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* operationOutcomeName(OperationOutcome outcome) {
+  switch (outcome) {
+    case OperationOutcome::SUCCEEDED: return "SUCCEEDED";
+    case OperationOutcome::NO_DATA: return "NO_DATA";
+    case OperationOutcome::FAILED: return "FAILED";
+    case OperationOutcome::CANCELLED: return "CANCELLED";
+    case OperationOutcome::TIMED_OUT: return "TIMED_OUT";
+    case OperationOutcome::PARTIAL: return "PARTIAL";
+    case OperationOutcome::INDETERMINATE: return "INDETERMINATE";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `operationOutcomeName()`.
+/// @param outcome Outcome to name.
+/// @return The same static-lifetime string as `operationOutcomeName(outcome)`.
+constexpr const char* toString(OperationOutcome outcome) {
+  return operationOutcomeName(outcome);
+}
+
 /// Best evidence about an operation's effect on sensor state.
 enum class EffectState : uint8_t {
   NONE = 0,     ///< Operation has no effectful write semantics.
@@ -140,6 +301,28 @@ enum class EffectState : uint8_t {
   VERIFIED,     ///< A later read/reconciliation verified the intended state.
   UNKNOWN       ///< Conflicting or incomplete evidence prevents a safe claim.
 };
+
+/// Return a stable allocation-free diagnostic name for hardware-effect evidence.
+/// @param effect Effect state to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* effectStateName(EffectState effect) {
+  switch (effect) {
+    case EffectState::NONE: return "NONE";
+    case EffectState::NOT_ATTEMPTED: return "NOT_ATTEMPTED";
+    case EffectState::ATTEMPTED: return "ATTEMPTED";
+    case EffectState::ACKNOWLEDGED: return "ACKNOWLEDGED";
+    case EffectState::VERIFIED: return "VERIFIED";
+    case EffectState::UNKNOWN: return "UNKNOWN";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `effectStateName()`.
+/// @param effect Effect state to name.
+/// @return The same static-lifetime string as `effectStateName(effect)`.
+constexpr const char* toString(EffectState effect) {
+  return effectStateName(effect);
+}
 
 /// Last state-machine phase observed in progress or at termination.
 enum class OperationPhase : uint8_t {
@@ -159,6 +342,37 @@ enum class OperationPhase : uint8_t {
   READ_VERIFY_RESPONSE,///< Verification response read.
   READ_DEFERRED_RESULT ///< Deferred maintenance/conversion result read.
 };
+
+/// Return a stable allocation-free diagnostic name for an operation phase.
+/// @param phase Phase to name.
+/// @return Static-lifetime enum name, or `"UNKNOWN"` for an unknown value.
+constexpr const char* operationPhaseName(OperationPhase phase) {
+  switch (phase) {
+    case OperationPhase::NONE: return "NONE";
+    case OperationPhase::WAIT_POWER_UP: return "WAIT_POWER_UP";
+    case OperationPhase::SEND_WAKE: return "SEND_WAKE";
+    case OperationPhase::WAIT_WAKE: return "WAIT_WAKE";
+    case OperationPhase::SEND_STOP: return "SEND_STOP";
+    case OperationPhase::WAIT_STOP: return "WAIT_STOP";
+    case OperationPhase::SEND_COMMAND: return "SEND_COMMAND";
+    case OperationPhase::WAIT_EXECUTION: return "WAIT_EXECUTION";
+    case OperationPhase::SEND_READY_COMMAND: return "SEND_READY_COMMAND";
+    case OperationPhase::READ_READY_RESPONSE: return "READ_READY_RESPONSE";
+    case OperationPhase::SEND_READ_COMMAND: return "SEND_READ_COMMAND";
+    case OperationPhase::READ_RESPONSE: return "READ_RESPONSE";
+    case OperationPhase::SEND_VERIFY_COMMAND: return "SEND_VERIFY_COMMAND";
+    case OperationPhase::READ_VERIFY_RESPONSE: return "READ_VERIFY_RESPONSE";
+    case OperationPhase::READ_DEFERRED_RESULT: return "READ_DEFERRED_RESULT";
+  }
+  return "UNKNOWN";
+}
+
+/// Compatibility spelling for `operationPhaseName()`.
+/// @param phase Phase to name.
+/// @return The same static-lifetime string as `operationPhaseName(phase)`.
+constexpr const char* toString(OperationPhase phase) {
+  return operationPhaseName(phase);
+}
 
 /// Explicit authority token required by sensitive operation builders.
 enum class MaintenanceConfirmation : uint8_t {
@@ -445,24 +659,27 @@ struct RuntimeSnapshot {
 
 /// Passive telemetry separated into transfer, protocol, and logical job channels.
 ///
-/// Counters saturate at their integer maximum. They never block admission or
-/// perform recovery.
+/// A successful `begin()` starts a new health session and resets every field.
+/// A rejected `begin()` leaves the existing session unchanged; `end()` changes
+/// the state to `UNINIT` but preserves its diagnostic history. Counters
+/// saturate at their integer maximum. They never block admission or perform
+/// recovery.
 struct HealthSnapshot {
   DriverState state = DriverState::UNINIT; ///< Derived passive driver state.
   uint32_t lastTransferOkMs = 0; ///< Completion time of latest successful attempt.
   uint32_t lastTransferErrorMs = 0; ///< Completion time of latest failed attempt.
   Status lastTransferError = Status::Ok(); ///< Latest mapped transport failure.
   uint8_t consecutiveTransferFailures = 0; ///< Attempt failures since last success.
-  uint32_t totalTransferSuccess = 0; ///< Lifetime successful physical attempts.
-  uint32_t totalTransferFailures = 0; ///< Lifetime failed physical attempts.
+  uint32_t totalTransferSuccess = 0; ///< Successful attempts this health session.
+  uint32_t totalTransferFailures = 0; ///< Failed attempts this health session.
   uint32_t expectedNacks = 0; ///< Accepted NACKs in explicitly marked phases.
-  uint32_t totalProtocolFailures = 0; ///< Lifetime CRC/contract/protocol failures.
+  uint32_t totalProtocolFailures = 0; ///< CRC/contract failures this health session.
   uint32_t totalCrcFailures = 0; ///< Protocol failures specifically caused by CRC.
   uint32_t lastProtocolErrorMs = 0; ///< Owner-clock time of latest protocol failure.
   Status lastProtocolError = Status::Ok(); ///< Latest protocol-layer failure.
-  uint32_t totalOperationSuccess = 0; ///< Successful plus no-data terminal jobs.
-  uint32_t totalOperationFailures = 0; ///< Failed/timeout/partial/indeterminate jobs.
-  uint32_t totalOperationCancelled = 0; ///< Cancelled terminal jobs.
+  uint32_t totalOperationSuccess = 0; ///< Successful/no-data jobs this health session.
+  uint32_t totalOperationFailures = 0; ///< Other terminal jobs this health session.
+  uint32_t totalOperationCancelled = 0; ///< Cancelled jobs this health session.
   uint32_t lastOperationErrorMs = 0; ///< Completion time of latest logical error.
   Status lastOperationError = Status::Ok(); ///< Latest non-success operation status.
   OperationId lastOperationErrorId = {}; ///< Identity correlated to logical error.
@@ -575,12 +792,20 @@ public:
 
   /// @return Whether a valid configuration is currently bound.
   bool isBound() const { return _bound; }
+  /// @return Compatibility view equivalent to `isBound()`.
+  bool isInitialized() const { return isBound(); }
   /// @return Whether identity was verified in the current sensor epoch.
   bool isAttached() const { return _attached; }
   /// @return Passive transport-health state.
   DriverState state() const { return _driverState; }
   /// @return Compatibility alias for `state()`.
   DriverState driverState() const { return state(); }
+  /// Return passive transfer availability without probing the sensor.
+  /// @return `true` in `READY` or `DEGRADED`; attachment is not implied.
+  bool isOnline() const {
+    return _driverState == DriverState::READY ||
+           _driverState == DriverState::DEGRADED;
+  }
   /// @return Ownership state of the single operation/result slot.
   OperationState operationState() const;
 
@@ -588,6 +813,20 @@ public:
   RuntimeSnapshot runtimeSnapshot() const;
   /// @return Cache-only passive health telemetry; performs no I2C.
   HealthSnapshot healthSnapshot() const { return _health; }
+  /// @return Completion time of the latest successful transfer, or zero.
+  uint32_t lastOkMs() const { return _health.lastTransferOkMs; }
+  /// @return Completion time of the latest failed transfer, or zero.
+  uint32_t lastErrorMs() const { return _health.lastTransferErrorMs; }
+  /// @return Latest mapped transfer failure, or `Status::Ok()`.
+  Status lastError() const { return _health.lastTransferError; }
+  /// @return Saturating transfer failures since the latest transfer success.
+  uint8_t consecutiveFailures() const {
+    return _health.consecutiveTransferFailures;
+  }
+  /// @return Saturating failed-transfer count since the latest successful `begin()`.
+  uint32_t totalFailures() const { return _health.totalTransferFailures; }
+  /// @return Saturating successful-transfer count since the latest successful `begin()`.
+  uint32_t totalSuccess() const { return _health.totalTransferSuccess; }
   /// @return Cache-only configuration/provenance snapshot; performs no I2C.
   ConfigurationSnapshot configurationSnapshot() const { return _configuration; }
   /// @return Cache-only verified identity; inspect `Identity::valid`.
@@ -704,8 +943,8 @@ private:
 
   void _finish(OperationOutcome outcome, EffectState effect, const Status& status,
                uint32_t completedMs);
-  void _finishTransferFailure(const Status& status, uint32_t completedMs);
-  void _applyReadValue(OperationKind kind, uint16_t value, uint32_t nowMs);
+  void _finishOperationFailure(const Status& status, uint32_t completedMs);
+  void _applyReadValue(OperationKind kind, uint16_t value);
   void _applyVerifiedSetting(OperationKind kind, uint16_t value);
   void _storeSample(const uint16_t words[3], bool co2Valid, uint32_t nowMs);
   void _setMode(OperatingMode mode, ModeEvidence evidence);

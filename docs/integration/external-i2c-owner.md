@@ -330,6 +330,16 @@ state, not the controller, bus, or power rail.
 replacement for system health policy. `Config::offlineThreshold == 0` disables
 the `OFFLINE` transition; attempted failures still report `DEGRADED`.
 
+The zero-I2C compatibility views are intentionally narrow. `isInitialized()`
+means `isBound()`. `isOnline()` is true only for passive transfer states
+`READY` and `DEGRADED`; it is not attachment or protocol evidence. `lastOkMs()`,
+`lastErrorMs()`, `lastError()`, `consecutiveFailures()`, `totalFailures()`, and
+`totalSuccess()` are direct views of the transfer fields in `HealthSnapshot`.
+Use the complete snapshot for CRC/protocol and logical-operation telemetry.
+A successful `begin()` resets all channels for a new health session. A rejected
+`begin()` preserves them; `end()` changes the state to `UNINIT` while retaining
+the session history until the next successful bind.
+
 ## Integration checklist
 
 - [ ] One task owns the instance and bus serialization.

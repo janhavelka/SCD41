@@ -3,7 +3,7 @@
 
 PROJECT_NAME           = "SCD41"
 # Synchronized from library.json by scripts/generate_version.py.
-PROJECT_NUMBER         = "1.2.0"
+PROJECT_NUMBER         = "1.3.0"
 PROJECT_BRIEF          = "Bounded, externally scheduled SCD41 driver API"
 OUTPUT_DIRECTORY       = .doxygen
 CREATE_SUBDIRS         = NO

@@ -1,0 +1,60 @@
+# SCD41 Naming And Repository-Hygiene Audit
+
+Audit date: 2026-08-08
+Target version: 1.3.0
+
+This audit compares SCD41 read-only with clean, mature local I2C libraries:
+PCA9555 3.0.2, INA228 3.0.3, INA3221 3.1.0, MB85RC 4.1.0,
+RV3032-C7 3.0.1, and LDC1614 3.1.0. The completed OPT4001 1.2.1 naming audit
+was also used as a consistency check. Device-specific owner-driven behavior
+takes precedence over cosmetic uniformity.
+
+## Compatibility Rubric
+
+| Concern | Mature-peer pattern | SCD41 decision |
+| --- | --- | --- |
+| Errors | Stable `Err`, structured `Status`, allocation-free names | Preserve every value and spelling; append `CRC_ERROR` as an alias of `CRC_MISMATCH`. |
+| Driver state | Four passive states and direct health views | Preserve `DriverState`, `state()`, `driverState()`, and snapshots; add compatible zero-I2C direct transfer-health accessors. |
+| Lifecycle | `begin`/`end`, often blocking `probe`/`recover` | Preserve owner-driven `begin`/`start`/`poll`/`takeResult`/`cancel`/`end`. Do not add a second blocking lifecycle path. Protocol-qualified discovery and recovery remain typed `READ_IDENTITY`/`ATTACH` jobs. |
+| Initialization/online aliases | `isInitialized()` and `isOnline()` are common | `isInitialized()` is exactly `isBound()`. `isOnline()` means passive transfer state `READY` or `DEGRADED`, not verified attachment. |
+| Enum rendering | Core-owned static names avoid CLI drift | Add descriptive names plus overload-safe `toString()` for enums rendered by both CLIs; retain `errorName()` and `driverStateName()`. |
+| Health channels | Mature drivers expose direct transport counters | Map direct accessors only to transfer telemetry. Keep richer protocol/CRC and logical-operation fields in `HealthSnapshot`; all channels reset on successful `begin()`, not object construction alone. |
+| Ownership | One non-owning driver instance, externally serialized I2C | Retain fixed-memory typed jobs. No task, lock, queue, heap, platform type, or TunnelMonitor coupling is added. |
+
+No existing public type, enum value, field, method, CLI command, or operation
+kind was renamed, removed, or reordered. `SensorVariant::SCD42` remains despite
+having no datasheet v1.7 encoding because removing it would break source
+compatibility.
+
+## Internal Naming And Cleanup
+
+- Renamed private `_finishTransferFailure()` to
+  `_finishOperationFailure()`: the owner finalizes both mapped transport faults
+  and CRC/protocol failures through that path.
+- Removed the unused `nowMs` argument from private `_applyReadValue()`.
+- Removed example-only `BusDiag.h` and `DriverCompat.h`. The active Arduino CLI
+  now uses `I2cScanner.h`, the public `SCD41` class, and core enum helpers
+  directly.
+- Removed zero-reference `BoardConfig::LED`, `CommandHandler::parseFloat`,
+  unused color helpers, and unused logging levels/macros. No library-core path
+  changed ownership, allocation, retry, timing, or I2C behavior.
+- Native ESP-IDF and Arduino output now share core enum names, including a
+  descriptive final operation phase, instead of duplicate local switch tables.
+
+Repository-wide symbol searches established that each removed helper had no
+caller outside its own declaration/definition. The static hygiene contract
+rejects restoration of the obsolete wrappers and duplicate enum maps.
+
+## Documentation And Evidence Boundary
+
+- Current Windows PlatformIO instructions use `scripts\pio.cmd`; Linux CI keeps
+  its pinned `python -m platformio` commands.
+- Security support and synchronized metadata now name the staged 1.3.0 line.
+- The package description states the actual owner-driven driver role and does
+  not imply production or hardware validation.
+- Stable HIL procedures, protocol references, feature coverage, and owner
+  integration guides remain. No generated Doxygen HTML, completed prompt,
+  empty transcript, or NOT-RUN-only artifact is retained.
+
+These changes are source-level and host-testable. They do not claim physical
+SCD41, electrical-fault, calibration, optical, or long-duration validation.

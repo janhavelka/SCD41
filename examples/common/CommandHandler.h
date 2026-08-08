@@ -81,16 +81,6 @@ inline bool parseU32(const String& token, uint32_t& outValue) {
   return true;
 }
 
-inline bool parseFloat(const String& token, float& outValue) {
-  if (token.length() == 0U) {
-    return false;
-  }
-
-  char* end = nullptr;
-  outValue = static_cast<float>(std::strtod(token.c_str(), &end));
-  return !(end == token.c_str() || *end != '\0');
-}
-
 inline bool parseBool01(const String& token, bool& outValue) {
   if (token == "1" || token == "on" || token == "true" || token == "enable") {
     outValue = true;

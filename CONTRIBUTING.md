@@ -9,13 +9,14 @@ Thanks for contributing to this repository.
 3. Keep device behavior aligned with `docs/reference/scd41-protocol.md`.
 4. Run the repository checks that apply to your change:
    - `python tools/check_core_timing_guard.py`
+   - `python tools/check_repository_hygiene.py`
    - `python tools/check_cli_contract.py`
    - `python tools/check_idf_example_contract.py`
    - `python scripts/generate_version.py check`
-   - `python -m platformio test -e native`
-   - `python -m platformio test -e native_ubsan`
-   - `python -m platformio run -e esp32s3dev`
-   - `python -m platformio run -e esp32s2dev`
+   - `.\scripts\pio.cmd test -e native`
+   - `.\scripts\pio.cmd test -e native_ubsan`
+   - `.\scripts\pio.cmd run -e esp32s3dev`
+   - `.\scripts\pio.cmd run -e esp32s2dev`
    - `doxygen Doxyfile`
 5. Update `CHANGELOG.md` and package docs when behavior or metadata changes.
 6. Commit with a clear message and open a Pull Request.

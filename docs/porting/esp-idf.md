@@ -199,13 +199,14 @@ is checked by `tools/check_idf_example_contract.py`.
 
 ## Build checks
 
-Repository checks:
+Repository checks on Windows:
 
-```bash
+```powershell
 python tools/check_core_timing_guard.py
+python tools/check_repository_hygiene.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
-python -m platformio test -e native
+.\scripts\pio.cmd test -e native
 ```
 
 In an ESP-IDF v6.0.1 environment:

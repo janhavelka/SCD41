@@ -1,19 +1,21 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "SCD41/SCD41.h"
 #include "common/BoardConfig.h"
-#include "common/BusDiag.h"
 #include "common/CliShell.h"
 #include "common/CliStyle.h"
 #include "common/CommandHandler.h"
 #include "common/DiagnosticWorkflow.h"
-#include "common/DriverCompat.h"
+#include "common/I2cScanner.h"
 #include "common/I2cTransport.h"
 #include "common/Log.h"
 
+namespace app_driver = ::SCD41;
+
 namespace {
 
-app_driver::Device device;
+app_driver::SCD41 device;
 app_driver::Config config;
 app_driver::OperationResult lastResult;
 bool lastResultValid = false;
@@ -23,7 +25,7 @@ scd41_cli::DiagnosticWorkflow diagnosticWorkflow;
 bool timeReached(uint32_t nowMs, uint32_t targetMs);
 
 uint32_t operationBudgetMs(app_driver::OperationKind kind) {
-  const SCD41::OperationLimits limits = app_driver::Device::limits(kind);
+  const app_driver::OperationLimits limits = app_driver::SCD41::limits(kind);
   return limits.maxWaitMs +
          static_cast<uint32_t>(limits.maxCallbacks) * config.transferTimeoutMs +
          1000U;
@@ -39,7 +41,7 @@ void printStatus(const app_driver::Status& status) {
                                         ? LOG_COLOR_YELLOW
                                         : LOG_COLOR_RED));
   LOG_SERIAL.printf("status=%s%s%s detail=%ld msg=%s\n", color,
-                    app_driver::errToString(status.code),
+                    app_driver::errorName(status.code),
                     LOG_COLOR_RESET, static_cast<long>(status.detail), status.msg);
 }
 
@@ -48,7 +50,8 @@ void printSample(const app_driver::FixedSample& sample) {
       "sample seq=%lu epoch=%lu mode=%s co2=%u temp_mC=%ld rh_mPct=%lu flags=0x%04X at=%lu\n",
       static_cast<unsigned long>(sample.sequence),
       static_cast<unsigned long>(sample.sensorEpoch),
-      app_driver::modeToString(sample.mode), static_cast<unsigned>(sample.co2Ppm),
+      app_driver::operatingModeName(sample.mode),
+      static_cast<unsigned>(sample.co2Ppm),
       static_cast<long>(sample.temperatureMilliC),
       static_cast<unsigned long>(sample.humidityMilliPercent),
       static_cast<unsigned>(sample.flags),
@@ -83,23 +86,23 @@ void printResult(const app_driver::OperationResult& result) {
       "result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
       static_cast<unsigned long>(result.id.requestId),
       static_cast<unsigned long>(result.id.generation),
-      app_driver::operationToString(result.kind),
+      app_driver::operationKindName(result.kind),
       outcomeColor,
-      app_driver::outcomeToString(result.outcome),
+      app_driver::operationOutcomeName(result.outcome),
       LOG_COLOR_RESET,
-      app_driver::effectToString(result.effect),
-      app_driver::errToString(result.status.code),
+      app_driver::effectStateName(result.effect),
+      app_driver::errorName(result.status.code),
       static_cast<unsigned>(result.callbacksUsed),
       result.reconciliationRequired ? "yes" : "no");
   LOG_SERIAL.printf(
-      "timing started=%lu completed=%lu deadline=%lu phase=%u epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
+      "timing started=%lu completed=%lu deadline=%lu phase=%s epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
       static_cast<unsigned long>(result.startedMs),
       static_cast<unsigned long>(result.completedMs),
       static_cast<unsigned long>(result.deadlineMs),
-      static_cast<unsigned>(result.finalPhase),
+      app_driver::operationPhaseName(result.finalPhase),
       static_cast<unsigned long>(result.sensorEpoch),
-      app_driver::modeToString(result.operatingMode),
-      app_driver::evidenceToString(result.modeEvidence),
+      app_driver::operatingModeName(result.operatingMode),
+      app_driver::modeEvidenceName(result.modeEvidence),
       static_cast<unsigned>(result.completedFieldMask));
 
   switch (result.kind) {
@@ -112,7 +115,7 @@ void printResult(const app_driver::OperationResult& result) {
       LOG_SERIAL.printf("identity valid=%s serial=0x%012llX variant=%s variant_word=0x%04X epoch=%lu\n",
                         result.value.identity.valid ? "yes" : "no",
                         static_cast<unsigned long long>(result.value.identity.serialNumber),
-                        app_driver::variantToString(result.value.identity.variant),
+                        app_driver::sensorVariantName(result.value.identity.variant),
                         static_cast<unsigned>(result.value.identity.variantWord),
                         static_cast<unsigned long>(result.value.identity.sensorEpoch));
       break;
@@ -290,7 +293,7 @@ app_driver::Status startOperation(
     LOG_SERIAL.printf("started request=%lu generation=%lu op=%s deadline=%lu\n",
                       static_cast<unsigned long>(id.requestId),
                       static_cast<unsigned long>(id.generation),
-                      app_driver::operationToString(request.kind),
+                      app_driver::operationKindName(request.kind),
                       static_cast<unsigned long>(options.deadlineMs));
   }
   return status;
@@ -355,19 +358,19 @@ void printRuntime() {
       "runtime bound=%s attached=%s state=%s%s%s mode=%s evidence=%s epoch=%lu reconcile=%s sample=%s\n",
       runtime.bound ? "yes" : "no", runtime.attached ? "yes" : "no",
       stateColor,
-      app_driver::stateToString(runtime.driverState),
+      app_driver::driverStateName(runtime.driverState),
       LOG_COLOR_RESET,
-      app_driver::modeToString(runtime.operatingMode),
-      app_driver::evidenceToString(runtime.modeEvidence),
+      app_driver::operatingModeName(runtime.operatingMode),
+      app_driver::modeEvidenceName(runtime.modeEvidence),
       static_cast<unsigned long>(runtime.sensorEpoch),
       runtime.reconciliationRequired ? "yes" : "no",
       runtime.sampleAvailable ? "yes" : "no");
   LOG_SERIAL.printf(
       "slot state=%s request=%lu generation=%lu operation=%s next_due=%lu next_safe=%s%lu\n",
-      app_driver::operationStateToString(runtime.operationState),
+      app_driver::operationStateName(runtime.operationState),
       static_cast<unsigned long>(runtime.operationId.requestId),
       static_cast<unsigned long>(runtime.operationId.generation),
-      app_driver::operationToString(runtime.operationKind),
+      app_driver::operationKindName(runtime.operationKind),
       static_cast<unsigned long>(runtime.nextDueMs),
       runtime.nextSafeCommandValid ? "" : "invalid/",
       static_cast<unsigned long>(runtime.nextSafeCommandMs));
@@ -384,13 +387,13 @@ void printRuntime() {
       static_cast<unsigned long>(health.totalOperationCancelled));
   LOG_SERIAL.printf(
       "last_errors transfer=%s@%lu protocol=%s@%lu operation=%s@%lu op=%s request=%lu generation=%lu\n",
-      app_driver::errToString(health.lastTransferError.code),
+      app_driver::errorName(health.lastTransferError.code),
       static_cast<unsigned long>(health.lastTransferErrorMs),
-      app_driver::errToString(health.lastProtocolError.code),
+      app_driver::errorName(health.lastProtocolError.code),
       static_cast<unsigned long>(health.lastProtocolErrorMs),
-      app_driver::errToString(health.lastOperationError.code),
+      app_driver::errorName(health.lastOperationError.code),
       static_cast<unsigned long>(health.lastOperationErrorMs),
-      app_driver::operationToString(health.lastOperationErrorKind),
+      app_driver::operationKindName(health.lastOperationErrorKind),
       static_cast<unsigned long>(health.lastOperationErrorId.requestId),
       static_cast<unsigned long>(health.lastOperationErrorId.generation));
 }
@@ -480,7 +483,7 @@ void processCommand(const String& line) {
       printStatus(app_driver::Status::Error(
           app_driver::Err::BUSY, "Sensor safety window active"));
     } else {
-      (void)bus_diag::scan();
+      (void)i2c::scan();
     }
   } else if (head == "begin") {
     const app_driver::RuntimeSnapshot before = device.runtimeSnapshot();

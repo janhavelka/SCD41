@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -38,6 +38,9 @@ jobs:
       - name: Enforce core framework and timing guard
         run: python tools/check_core_timing_guard.py
 
+      - name: Enforce public naming and repository hygiene
+        run: python tools/check_repository_hygiene.py
+
       - name: Enforce Arduino CLI contract
         run: python tools/check_cli_contract.py
 
@@ -56,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
       - name: Cache PlatformIO
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -93,7 +96,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
       - name: Cache PlatformIO
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -120,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
       - name: Cache PlatformIO
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -168,7 +171,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
 
       - name: Build ESP-IDF example for ${{ matrix.idf_target }}
         uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
