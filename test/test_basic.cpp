@@ -747,6 +747,10 @@ void test_public_health_compatibility_accessors_match_transfer_channel() {
   Device device;
   TEST_ASSERT_FALSE(device.isInitialized());
   TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.driverState()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
   TEST_ASSERT_EQUAL_UINT32(0U, device.lastOkMs());
   TEST_ASSERT_EQUAL_UINT32(0U, device.lastErrorMs());
   TEST_ASSERT_TRUE(device.lastError().ok());
@@ -761,6 +765,10 @@ void test_public_health_compatibility_accessors_match_transfer_channel() {
   TEST_ASSERT_TRUE(device.isInitialized());
   TEST_ASSERT_TRUE(device.isBound());
   TEST_ASSERT_TRUE(device.isOnline());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.driverState()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
   TEST_ASSERT_EQUAL_UINT32(0U, bus.calls);
 
   uint32_t nowMs = 100U;
@@ -795,6 +803,10 @@ void test_public_health_compatibility_accessors_match_transfer_channel() {
   const size_t afterFailureCalls = bus.calls;
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::OFFLINE),
                     static_cast<uint8_t>(device.state()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.driverState()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(health.state));
   TEST_ASSERT_FALSE(device.isOnline());
   TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
   TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
@@ -826,6 +838,10 @@ void test_public_health_compatibility_accessors_match_transfer_channel() {
   device.end();
   TEST_ASSERT_FALSE(device.isInitialized());
   TEST_ASSERT_FALSE(device.isOnline());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.driverState()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
   TEST_ASSERT_EQUAL_UINT32(health.lastTransferOkMs, device.lastOkMs());
   TEST_ASSERT_EQUAL_UINT32(health.lastTransferErrorMs, device.lastErrorMs());
   TEST_ASSERT_EQUAL_UINT32(health.totalTransferFailures,
@@ -836,6 +852,10 @@ void test_public_health_compatibility_accessors_match_transfer_channel() {
   TEST_ASSERT_TRUE(device.begin(makeConfig(bus)).ok());
   TEST_ASSERT_TRUE(device.isInitialized());
   TEST_ASSERT_TRUE(device.isOnline());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.driverState()));
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(device.state()),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
   TEST_ASSERT_EQUAL_UINT32(0U, device.lastOkMs());
   TEST_ASSERT_EQUAL_UINT32(0U, device.lastErrorMs());
   TEST_ASSERT_TRUE(device.lastError().ok());

@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #ifndef SCD41_VERSION_STRING
-#define SCD41_VERSION_STRING "1.3.1"
+#define SCD41_VERSION_STRING "1.3.2"
 #endif
 
 #ifndef SCD41_BUILD_DATE
@@ -48,16 +48,16 @@ static constexpr uint16_t VERSION_MAJOR = 1;
 static constexpr uint16_t VERSION_MINOR = 3;
 
 /// @brief Patch version (backward-compatible fixes).
-static constexpr uint16_t VERSION_PATCH = 1;
+static constexpr uint16_t VERSION_PATCH = 2;
 
 /// @brief Full semantic version string.
 static constexpr const char* VERSION = SCD41_VERSION_STRING;
 
 /// @brief Encoded version for numeric comparison: MAJOR*10000 + MINOR*100 + PATCH.
-static constexpr uint32_t VERSION_CODE = 10301;
+static constexpr uint32_t VERSION_CODE = 10302;
 
 /// @brief Backward-compatible alias used by older repositories.
-static constexpr int VERSION_INT = 10301;
+static constexpr int VERSION_INT = 10302;
 
 /// @brief Build date string.
 static constexpr const char* BUILD_DATE = SCD41_BUILD_DATE;

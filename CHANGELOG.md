@@ -6,8 +6,19 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.3.1` for compatibility validation. No release tag
+The manifest is staged at `1.3.2` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
+
+### Planned 1.3.2
+
+#### Changed
+
+- Renamed the private terminal operation publisher from `_finish()` to
+  `_finishOperation()` to match the existing operation lifecycle vocabulary.
+- Strengthened the naming/hygiene contract for public lifecycle and health
+  accessors and for the owner-driven internal operation/transfer vocabulary.
+- Re-audited and retained the source-compatible `CRC_ERROR` alias and the
+  domain-specific transfer-adapter names rather than adding parallel APIs.
 
 ### Planned 1.3.1
 

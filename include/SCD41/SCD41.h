@@ -941,7 +941,7 @@ private:
                           bool effectful);
   Status _checkCommandSpacing(uint32_t nowMs);
 
-  void _finish(OperationOutcome outcome, EffectState effect, const Status& status,
+  void _finishOperation(OperationOutcome outcome, EffectState effect, const Status& status,
                uint32_t completedMs);
   void _finishOperationFailure(const Status& status, uint32_t completedMs);
   void _applyReadValue(OperationKind kind, uint16_t value);

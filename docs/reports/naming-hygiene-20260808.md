@@ -1,13 +1,14 @@
 # SCD41 Naming And Repository-Hygiene Audit
 
 Audit date: 2026-08-08
-Target version: 1.3.1
+Target version: 1.3.2
 
 This audit compares SCD41 read-only with clean, mature local I2C libraries:
 PCA9555 3.0.2, INA228 3.0.3, INA3221 3.1.0, MB85RC 4.1.0,
-RV3032-C7 3.0.1, and LDC1614 3.1.0. The completed OPT4001 1.2.1 naming audit
-was also used as a consistency check. Device-specific owner-driven behavior
-takes precedence over cosmetic uniformity.
+RV3032-C7 3.0.1, and LDC1614 3.1.0. The completed OPT4001 1.2.2 and
+TCA9548A 1.1.4 naming audits were also used as consistency checks.
+Device-specific owner-driven behavior takes precedence over cosmetic
+uniformity.
 
 ## Compatibility Rubric
 
@@ -31,6 +32,15 @@ compatibility.
 - Renamed private `_finishTransferFailure()` to
   `_finishOperationFailure()`: the owner finalizes both mapped transport faults
   and CRC/protocol failures through that path.
+- Renamed the private terminal publisher `_finish()` to `_finishOperation()` so
+  it forms an explicit family with `_beginOperation()`,
+  `_finishOperationFailure()`, and `_recordOperationOutcome()`.
+- Retained `_attemptTransfer()` and `_recordTransfer()` instead of importing
+  synchronous-driver raw/tracked wrapper names. SCD41 has one owner-driven,
+  normalized transfer contract and no untracked probe path; every physical
+  attempt is recorded.
+- Kept transfer-adapter enums typed and numeric rather than adding unused name
+  helpers. Core name helpers cover the driver enums rendered by both CLIs.
 - Removed the unused `nowMs` argument from private `_applyReadValue()`.
 - Removed example-only `BusDiag.h` and `DriverCompat.h`. The active Arduino CLI
   now uses `I2cScanner.h`, the public `SCD41` class, and core enum helpers
@@ -49,7 +59,7 @@ rejects restoration of the obsolete wrappers and duplicate enum maps.
 
 - Current Windows PlatformIO instructions use `scripts\pio.cmd`; Linux CI keeps
   its pinned `python -m platformio` commands.
-- Security support and synchronized metadata now name the staged 1.3.1 line.
+- Security support and synchronized metadata now name the staged 1.3.2 line.
 - The package description states the actual owner-driven driver role and does
   not imply production or hardware validation.
 - Stable HIL procedures, protocol references, feature coverage, and owner
@@ -70,3 +80,9 @@ the validation guide. Version 1.3.1 corrects both, ignores transient
 broken local links, generated prompts/transcripts/docs, stale metadata, and CI
 toolchain drift. No protocol, public API, transport, timing, cache, or health
 behavior changes in this follow-up.
+
+Version 1.3.2 re-audits the public status, state, and health vocabulary against
+the latest OPT4001 and TCA9548A passes; strengthens the executable hygiene
+contract for lifecycle and health accessors; and applies the private terminal
+publisher rename above. It does not change public API, protocol behavior, or
+health semantics.

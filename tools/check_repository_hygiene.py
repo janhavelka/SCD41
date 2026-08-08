@@ -148,6 +148,9 @@ def main() -> int:
             errors.append(f"public header missing toString({enum_type})")
 
     required_accessors = (
+        "DriverState state() const",
+        "DriverState driverState() const",
+        "HealthSnapshot healthSnapshot() const",
         "bool isInitialized() const { return isBound(); }",
         "bool isOnline() const",
         "uint32_t lastOkMs() const",
@@ -160,6 +163,20 @@ def main() -> int:
     for token in required_accessors:
         if token not in public:
             errors.append(f"public header missing health compatibility accessor: {token}")
+
+    required_internal_names = (
+        "_beginOperation",
+        "_attemptTransfer",
+        "_finishOperation",
+        "_finishOperationFailure",
+        "_recordTransfer",
+        "_recordProtocolFailure",
+        "_recordOperationOutcome",
+    )
+    internal_text = "\n".join((public, core))
+    for token in required_internal_names:
+        if token not in internal_text:
+            errors.append(f"driver internal naming contract missing: {token}")
 
     for cli_name, cli in (("Arduino", arduino), ("ESP-IDF", idf)):
         for helper in enum_helpers.values():
@@ -181,7 +198,9 @@ def main() -> int:
 
     active_text = "\n".join((public, core, arduino, idf))
     obsolete_tokens = (
+        "_finish(",
         "_finishTransferFailure",
+        "_updateHealth(",
         "bus_diag::",
         "app_driver::Device",
         "app_driver::errToString",
@@ -200,6 +219,7 @@ def main() -> int:
             errors.append(f"{cli_name} CLI restored a local enum-name mapper")
 
     for test_name in (
+        "test_status_and_public_type_contracts",
         "test_public_enum_name_helpers_are_exhaustive",
         "test_public_health_compatibility_accessors_match_transfer_channel",
     ):

@@ -224,7 +224,7 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
     if (partialConfiguration) {
       _workingValue.configuration = _configuration;
     }
-    _finish(partialConfiguration ? OperationOutcome::PARTIAL
+    _finishOperation(partialConfiguration ? OperationOutcome::PARTIAL
                                  : OperationOutcome::TIMED_OUT,
             effect, Status::Error(Err::TIMEOUT, "Operation deadline expired"),
             driverNowMs);
@@ -347,7 +347,7 @@ Status SCD41::cancel(const OperationId& id, uint32_t nowMs) {
       _active.effectfulWriteAttempted) {
     _configuration.persistenceIndeterminate = true;
   }
-  _finish(OperationOutcome::CANCELLED, effect,
+  _finishOperation(OperationOutcome::CANCELLED, effect,
           Status::Error(Err::CANCELLED, "Operation cancelled"), nowMs);
   return Status::Ok();
 }
@@ -377,7 +377,7 @@ void SCD41::end() {
         _active.effectfulWriteAttempted) {
       _configuration.persistenceIndeterminate = true;
     }
-    _finish(OperationOutcome::CANCELLED,
+    _finishOperation(OperationOutcome::CANCELLED,
             _active.effect,
             Status::Error(Err::CANCELLED, "Driver unbound"), completedMs);
   }
@@ -1022,7 +1022,7 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _configuration.sensorEpoch = _sensorEpoch;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
+        _finishOperation(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
                 Status::Error(Err::UNSUPPORTED, "Detected variant is not SCD41"),
                 nowMs);
         return Status::Ok();
@@ -1045,7 +1045,7 @@ Status SCD41::_stepAttach(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                                   : ConfigurationSnapshot{};
       _configuration.verifiedMask = 0U;
       _configuration.sensorEpoch = _sensorEpoch;
-      _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
               nowMs);
       return Status::Ok();
     }
@@ -1090,7 +1090,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         if (_active.request.kind == OperationKind::READ_CONFIGURATION &&
             _active.completedFieldMask != 0U) {
           _workingValue.configuration = _configuration;
-          _finish(OperationOutcome::PARTIAL, EffectState::NONE, status, nowMs);
+          _finishOperation(OperationOutcome::PARTIAL, EffectState::NONE, status, nowMs);
           return Status::Ok();
         }
         return status;
@@ -1119,7 +1119,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           _workingValue.identity = _identity;
           _workingValue.value = words[0];
           _markReconciliationRequired();
-          _finish(OperationOutcome::FAILED, EffectState::NONE,
+          _finishOperation(OperationOutcome::FAILED, EffectState::NONE,
                   strictUnsupported
                       ? Status::Error(Err::UNSUPPORTED,
                                       "Detected variant is not SCD41")
@@ -1148,7 +1148,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           if (_active.request.kind == OperationKind::READ_CONFIGURATION &&
               _active.completedFieldMask != 0U) {
             _workingValue.configuration = _configuration;
-            _finish(OperationOutcome::PARTIAL, EffectState::NONE, validation,
+            _finishOperation(OperationOutcome::PARTIAL, EffectState::NONE, validation,
                     nowMs);
             return Status::Ok();
           }
@@ -1163,7 +1163,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _configuration.verifiedMask |= fieldMask;
         if (_active.fieldIndex >= 6U) {
           _workingValue.configuration = _configuration;
-          _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
+          _finishOperation(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
                   nowMs);
           return Status::Ok();
         }
@@ -1173,7 +1173,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         return Status::Error(Err::IN_PROGRESS, "Reading next setting");
       }
 
-      _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(), nowMs);
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(), nowMs);
       return Status::Ok();
     }
 
@@ -1205,7 +1205,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _configuration.sensorEpoch = _sensorEpoch;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::FAILED, EffectState::NONE,
+        _finishOperation(OperationOutcome::FAILED, EffectState::NONE,
                 Status::Error(Err::UNSUPPORTED,
                               "Detected variant is not SCD41"), nowMs);
         return Status::Ok();
@@ -1223,7 +1223,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _identity.valid = true;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::FAILED, EffectState::NONE,
+        _finishOperation(OperationOutcome::FAILED, EffectState::NONE,
                 Status::Error(Err::RECONCILIATION_REQUIRED,
                               "Sensor identity changed; attach required"),
                 nowMs);
@@ -1235,7 +1235,7 @@ Status SCD41::_stepReadLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       _identity.sensorEpoch = _sensorEpoch;
       _identity.valid = true;
       _workingValue.identity = _identity;
-      _finish(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::NONE, Status::Ok(),
               nowMs);
       return Status::Ok();
     }
@@ -1326,7 +1326,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
             if (!validation.ok()) {
               return validation;
             }
-            _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+            _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
                     nowMs);
             return Status::Ok();
           }
@@ -1342,18 +1342,18 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
           _configuration.verifiedMask &=
               static_cast<uint16_t>(~fieldMask);
           _recordProtocolFailure(validation, nowMs);
-          _finish(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
+          _finishOperation(OperationOutcome::FAILED, EffectState::ACKNOWLEDGED,
                   validation, nowMs);
           return Status::Ok();
         }
         _applyVerifiedSetting(kind, word);
         if (word != _active.desiredRaw) {
-          _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+          _finishOperation(OperationOutcome::FAILED, EffectState::VERIFIED,
                   Status::Error(Err::COMMAND_FAILED,
                                 "Setting readback mismatch", word), nowMs);
           return Status::Ok();
         }
-        _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+        _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
                 nowMs);
         return Status::Ok();
       }
@@ -1409,7 +1409,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       } else if (kind == OperationKind::POWER_DOWN) {
         _setMode(OperatingMode::POWER_DOWN, ModeEvidence::ACKNOWLEDGED);
       }
-      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
               Status::Ok(), nowMs);
       return Status::Ok();
 
@@ -1464,7 +1464,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _configuration.sensorEpoch = _sensorEpoch;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::FAILED, EffectState::UNKNOWN,
+        _finishOperation(OperationOutcome::FAILED, EffectState::UNKNOWN,
                 Status::Error(Err::UNSUPPORTED,
                               "Wake verified wrong variant"), nowMs);
         return Status::Ok();
@@ -1482,7 +1482,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
         _identity.valid = true;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::FAILED, EffectState::UNKNOWN,
+        _finishOperation(OperationOutcome::FAILED, EffectState::UNKNOWN,
                 Status::Error(Err::RECONCILIATION_REQUIRED,
                               "Sensor changed during wake; attach required"),
                 nowMs);
@@ -1497,7 +1497,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
       _attached = true;
       _reconciliationRequired = false;
       _setMode(OperatingMode::IDLE, ModeEvidence::VERIFIED);
-      _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
               nowMs);
       return Status::Ok();
     }
@@ -1555,7 +1555,7 @@ Status SCD41::_stepMeasurement(uint32_t& nowMs,
       _workingValue.dataReady.raw = readyWord;
       _workingValue.dataReady.ready = isDataReady(readyWord);
       if (!isDataReady(readyWord)) {
-        _finish(OperationOutcome::NO_DATA, _active.effect,
+        _finishOperation(OperationOutcome::NO_DATA, _active.effect,
                 Status::Error(Err::MEASUREMENT_NOT_READY,
                               "Measurement not ready"), nowMs);
         return Status::Ok();
@@ -1587,7 +1587,7 @@ Status SCD41::_stepMeasurement(uint32_t& nowMs,
       if (!status.ok()) return status;
       _storeSample(words, kind != OperationKind::SINGLE_SHOT_RHT_ONLY, nowMs);
       _workingValue.sample = _latestSample;
-      _finish(OperationOutcome::SUCCEEDED,
+      _finishOperation(OperationOutcome::SUCCEEDED,
               kind == OperationKind::FETCH_SAMPLE ? EffectState::NONE
                                                   : EffectState::VERIFIED,
               Status::Ok(), nowMs);
@@ -1607,7 +1607,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _configuration.persistenceIndeterminate &&
       _active.phase == OperationPhase::SEND_COMMAND) {
     _workingValue.configuration = _configuration;
-    _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+    _finishOperation(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
             Status::Error(Err::INDETERMINATE,
                           "Persistence requires reinit reconciliation"),
             nowMs);
@@ -1617,7 +1617,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _configuration.dirtyMask == 0U &&
       _active.phase == OperationPhase::SEND_COMMAND) {
     _workingValue.configuration = _configuration;
-    _finish(OperationOutcome::SUCCEEDED, EffectState::NOT_ATTEMPTED,
+    _finishOperation(OperationOutcome::SUCCEEDED, EffectState::NOT_ATTEMPTED,
             Status::Ok(), nowMs);
     return Status::Ok();
   }
@@ -1671,7 +1671,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
         _configuration.persistenceIndeterminate = false;
         _workingValue.configuration = _configuration;
       }
-      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
               Status::Ok(), nowMs);
       return Status::Ok();
 
@@ -1685,20 +1685,20 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _workingValue.wordCount = 1;
       if (kind == OperationKind::SELF_TEST) {
         if (word != cmd::SELF_TEST_PASS) {
-          _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+          _finishOperation(OperationOutcome::FAILED, EffectState::VERIFIED,
                   Status::Error(Err::COMMAND_FAILED, "Self-test failed", word),
                   nowMs);
         } else {
-          _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
+          _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
                   Status::Ok(), nowMs);
         }
       } else if (word == cmd::FRC_FAILED) {
-        _finish(OperationOutcome::FAILED, EffectState::VERIFIED,
+        _finishOperation(OperationOutcome::FAILED, EffectState::VERIFIED,
                 Status::Error(Err::COMMAND_FAILED, "FRC failed", word), nowMs);
       } else {
         _workingValue.signedValue =
             static_cast<int32_t>(word) - static_cast<int32_t>(cmd::FRC_OFFSET_BIAS);
-        _finish(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
+        _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED,
                 Status::Ok(), nowMs);
       }
       return Status::Ok();
@@ -1749,7 +1749,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
         _configuration.sensorEpoch = _sensorEpoch;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+        _finishOperation(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
                 Status::Error(Err::UNSUPPORTED,
                               "Reset verified wrong variant"), nowMs);
         return Status::Ok();
@@ -1767,7 +1767,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
         _configuration.sensorEpoch = _sensorEpoch;
         _workingValue.identity = _identity;
         _markReconciliationRequired();
-        _finish(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
+        _finishOperation(OperationOutcome::INDETERMINATE, EffectState::UNKNOWN,
                 Status::Error(Err::RECONCILIATION_REQUIRED,
                               "Sensor changed during reset verification"),
                 nowMs);
@@ -1788,7 +1788,7 @@ Status SCD41::_stepMaintenance(uint32_t& nowMs,
       _attached = true;
       _reconciliationRequired = false;
       _setMode(OperatingMode::IDLE, ModeEvidence::VERIFIED);
-      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
               Status::Ok(), nowMs);
       return Status::Ok();
     }
@@ -1827,7 +1827,7 @@ Status SCD41::_stepDiagnostic(uint32_t& nowMs,
       if (!status.ok()) return status;
       _active.effect = EffectState::ACKNOWLEDGED;
       _markReconciliationRequired();
-      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
               Status::Ok(), nowMs);
       return Status::Ok();
 
@@ -1847,7 +1847,7 @@ Status SCD41::_stepDiagnostic(uint32_t& nowMs,
       std::memcpy(_workingValue.rawWords, words,
                   _active.request.wordCount * sizeof(uint16_t));
       _workingValue.wordCount = _active.request.wordCount;
-      _finish(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
+      _finishOperation(OperationOutcome::SUCCEEDED, EffectState::ACKNOWLEDGED,
               Status::Ok(), nowMs);
       return Status::Ok();
     }
@@ -2031,7 +2031,7 @@ Status SCD41::_checkCommandSpacing(uint32_t nowMs) {
   return Status::Error(Err::IN_PROGRESS, "Command spacing active");
 }
 
-void SCD41::_finish(OperationOutcome outcome, EffectState effect,
+void SCD41::_finishOperation(OperationOutcome outcome, EffectState effect,
                     const Status& status, uint32_t completedMs) {
   if (!_activeValid || _terminalValid) {
     return;
@@ -2107,7 +2107,7 @@ void SCD41::_finishOperationFailure(const Status& status,
     _workingValue.configuration = _configuration;
     outcome = OperationOutcome::PARTIAL;
   }
-  _finish(outcome, effect, status, completedMs);
+  _finishOperation(outcome, effect, status, completedMs);
 }
 
 void SCD41::_applyReadValue(OperationKind kind, uint16_t value) {
