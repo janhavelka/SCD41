@@ -139,6 +139,12 @@ def main() -> int:
         errors.append("durable naming/hygiene report is missing")
     if "python tools/check_repository_hygiene.py" not in ci:
         errors.append("CI does not run the repository hygiene guard")
+    checkout_pin = (
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 "
+        "# v7.0.1"
+    )
+    if ci.count(checkout_pin) != 5:
+        errors.append("CI checkout jobs are not all pinned to audited v7.0.1")
 
     if errors:
         print("Repository hygiene guard FAILED:")

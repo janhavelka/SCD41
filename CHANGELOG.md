@@ -34,6 +34,11 @@ is created while physical HIL remains an open release gate.
 - Renamed the private operation failure finalizer to reflect transport and
   protocol failures and removed an unused private timestamp parameter.
 
+#### Fixed
+
+- Corrected all CI checkout pins to the authoritative, resolvable v7.0.1 commit
+  and guard the exact pinned occurrence count.
+
 #### Removed
 
 - Proven-unused example-only bus/driver compatibility wrappers, parser, board,
