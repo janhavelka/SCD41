@@ -1,7 +1,7 @@
 # SCD41 Naming And Repository-Hygiene Audit
 
 Audit date: 2026-08-08
-Target version: 1.3.0
+Target version: 1.3.1
 
 This audit compares SCD41 read-only with clean, mature local I2C libraries:
 PCA9555 3.0.2, INA228 3.0.3, INA3221 3.1.0, MB85RC 4.1.0,
@@ -49,7 +49,7 @@ rejects restoration of the obsolete wrappers and duplicate enum maps.
 
 - Current Windows PlatformIO instructions use `scripts\pio.cmd`; Linux CI keeps
   its pinned `python -m platformio` commands.
-- Security support and synchronized metadata now name the staged 1.3.0 line.
+- Security support and synchronized metadata now name the staged 1.3.1 line.
 - The package description states the actual owner-driven driver role and does
   not imply production or hardware validation.
 - Stable HIL procedures, protocol references, feature coverage, and owner
@@ -58,3 +58,15 @@ rejects restoration of the obsolete wrappers and duplicate enum maps.
 
 These changes are source-level and host-testable. They do not claim physical
 SCD41, electrical-fault, calibration, optical, or long-duration validation.
+
+## Documentation And HIL Hygiene Follow-Up
+
+A fresh repository-wide call-graph and artifact pass found no unused private
+core method or active example helper. It did find two documentation/tooling
+gaps: ESP-IDF component metadata retained an unqualified production claim, and
+generated HIL summaries omitted repository/toolchain provenance required by
+the validation guide. Version 1.3.1 corrects both, ignores transient
+`hil-results/`, expands Doxygen coverage, and makes the hygiene guard reject
+broken local links, generated prompts/transcripts/docs, stale metadata, and CI
+toolchain drift. No protocol, public API, transport, timing, cache, or health
+behavior changes in this follow-up.

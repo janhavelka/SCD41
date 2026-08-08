@@ -27,6 +27,7 @@ reference from the repository root:
 
 ```bash
 python scripts/generate_version.py check
+python tools/check_repository_hygiene.py
 doxygen Doxyfile
 ```
 
@@ -42,6 +43,9 @@ header, ESP-IDF component metadata, and the Doxygen project number.
   durable compatibility decisions or evidence enforced by repository guards.
 - Retain a hardware report only when it records an actual run needed as release
   evidence. A file containing only `NOT RUN` entries is not evidence.
+- Runner output under `hil-results/` is ignored transient evidence. Promote only
+  a reviewed live-hardware record needed by release policy; discard dry-run and
+  failed setup residue after diagnosis.
 - Release packages exclude dated reports. Stable contracts and procedures
   belong in the reference, integration, porting, and validation guides.
 - Keep public declarations documented in place. Put owner integration rules in

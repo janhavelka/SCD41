@@ -4,8 +4,8 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
-Release status: `library.json` is staged at `1.3.0` for compatibility and
-release-candidate validation, but no `v1.3.0` release/tag or current physical
+Release status: `library.json` is staged at `1.3.1` for compatibility and
+release-candidate validation, but no `v1.3.1` release/tag or current physical
 HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
 [hardware validation guide](docs/validation/hardware-hil.md).
 
@@ -370,7 +370,10 @@ python tools/check_repository_hygiene.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
 python tools/test_scd41_hil_runner.py
+python tools/scd41_hil_runner.py --parser-self-test
 .\scripts\pio.cmd test -e native
+.\scripts\pio.cmd run -e esp32s3dev
+.\scripts\pio.cmd run -e esp32s2dev
 doxygen Doxyfile
 ```
 
@@ -395,7 +398,9 @@ compile-links that package for TunnelMonitor-node's integration target
 
 `library.json` is the version source of truth. `include/SCD41/Version.h`,
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
-from it. Version 1.3.0 adds backward-compatible diagnostic naming and direct
+from it. Version 1.3.1 tightens documentation, HIL evidence metadata, repository
+hygiene, and reproducible documentation validation. Version 1.3.0 added
+backward-compatible diagnostic naming and direct
 transfer-health views on top of the staged 1.0.0 operation model. That
 1.0.0 baseline was the breaking API change replacing direct calls
 and dual transport callbacks with the

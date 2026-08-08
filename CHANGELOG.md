@@ -6,8 +6,26 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.3.0` for compatibility validation. No release tag
+The manifest is staged at `1.3.1` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
+
+### Planned 1.3.1
+
+#### Changed
+
+- Expanded the warning-clean Doxygen input to the documentation index and
+  durable naming/hygiene decisions, and exact-pinned the CI Doxygen toolchain.
+- Synchronized README, contribution, security, ESP-IDF component, HIL, and
+  validation guidance with the staged manifest and Windows PlatformIO wrapper.
+
+#### Fixed
+
+- HIL summaries now capture repository, invocation, operating-system, Python,
+  and PlatformIO provenance required by the evidence guide. Transient runner
+  output has one ignored owner directory instead of leaving dry-run residue.
+- The repository-hygiene guard now checks both package metadata descriptions,
+  local Markdown links, Doxygen inputs, generated/one-time artifacts, HIL
+  residue, UTF-8 mojibake, and the exact pinned CI tooling contract.
 
 ### Planned 1.3.0
 

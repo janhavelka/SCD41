@@ -5,13 +5,16 @@ import argparse
 import datetime as dt
 import json
 import pathlib
+import platform
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, replace
 from typing import Optional
 
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 DESTRUCTIVE_CONFIRMATION = "I understand EEPROM and calibration risk"
 MINIMUM_SAFE_COMMANDS = (
     "version",
@@ -166,6 +169,58 @@ def load_serial_module():
 
 def timestamp() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def command_text(
+    command: list[str], default: str, *, allow_empty: bool = False
+) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return default
+    if result.returncode != 0:
+        return default
+    output = result.stdout.strip()
+    return output if output or allow_empty else default
+
+
+def git_text(args: list[str], default: str, *, allow_empty: bool = False) -> str:
+    return command_text(["git", *args], default, allow_empty=allow_empty)
+
+
+def platformio_command(*args: str) -> list[str]:
+    if platform.system() == "Windows":
+        wrapper = ROOT / "scripts" / "pio.cmd"
+        return ["cmd.exe", "/d", "/c", str(wrapper), *args]
+    return [sys.executable, "-m", "platformio", *args]
+
+
+def environment_metadata(invocation: str) -> dict[str, str]:
+    dirty = git_text(["status", "--short"], "unknown", allow_empty=True)
+    if dirty == "unknown":
+        dirty_summary = "unknown"
+    elif not dirty:
+        dirty_summary = "clean"
+    else:
+        dirty_summary = f"dirty ({len(dirty.splitlines())} paths)"
+    return {
+        "repository_branch": git_text(["branch", "--show-current"], "unknown"),
+        "repository_commit": git_text(["rev-parse", "HEAD"], "unknown"),
+        "repository_status": dirty_summary,
+        "invocation": invocation,
+        "operating_system": platform.platform(),
+        "python_version": platform.python_version(),
+        "platformio_version": command_text(
+            platformio_command("--version"), "not available"
+        ),
+    }
 
 
 def strip_ansi(text: str) -> str:
@@ -356,6 +411,13 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
         f"- Board: `{summary['board']}`",
         f"- Fixture: `{summary['fixture']}`",
         f"- Operator: `{summary['operator']}`",
+        f"- Repository branch: `{summary['repository_branch']}`",
+        f"- Repository commit: `{summary['repository_commit']}`",
+        f"- Repository status: `{summary['repository_status']}`",
+        f"- Invocation: `{summary['invocation']}`",
+        f"- Operating system: `{summary['operating_system']}`",
+        f"- Python: `{summary['python_version']}`",
+        f"- PlatformIO: `{summary['platformio_version']}`",
         f"- Include destructive: `{summary['include_destructive']}`",
         f"- Overall status: `{summary['status']}`",
         f"- Result counts: pass `{counts['pass']}`, fail `{counts['fail']}`, unknown `{counts['unknown']}`, not-run `{counts['not-run']}`",
@@ -404,6 +466,7 @@ def write_summary_files(
         "board": args.board,
         "fixture": args.fixture,
         "operator": args.operator,
+        **environment_metadata(args.invocation),
         "include_destructive": args.include_destructive,
         "status": status,
         "counts": result_counts(results),
@@ -417,6 +480,10 @@ def write_summary_files(
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = parse_args(argv)
+    invocation_args = list(argv) if argv is not None else sys.argv[1:]
+    args.invocation = subprocess.list2cmdline(
+        [sys.executable, str(ROOT / "tools" / "scd41_hil_runner.py"), *invocation_args]
+    )
     try:
         validate_args(args)
         if not destructive_confirmation_valid(args.include_destructive, args.confirm_destructive):

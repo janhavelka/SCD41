@@ -31,18 +31,22 @@ the observation that supports it.
 
 ## Runner
 
-```bash
+```powershell
 python tools/scd41_hil_runner.py --parser-self-test
 python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
-python tools/scd41_hil_runner.py \
-  --port COM8 --baud 115200 --output-dir hil-results \
-  --board "ESP32-S3 DevKitC-1" \
+python tools/scd41_hil_runner.py `
+  --port COM8 --baud 115200 --output-dir hil-results `
+  --board "ESP32-S3 DevKitC-1" `
   --fixture "SCD41 at 3.3 V; SDA/SCL and pullups recorded"
 ```
 
 Parser self-test and dry-run do not open serial and do not create hardware
 evidence. A live run requires `pyserial` and writes a raw transcript plus JSON
-and Markdown summaries.
+and Markdown summaries. The summary automatically records the repository
+branch, commit, clean/dirty state, invocation, operating system, Python, and
+PlatformIO version. `hil-results/` is ignored so dry runs and incomplete setup
+attempts do not pollute the checkout; retain only reviewed live evidence that a
+release gate actually requires.
 
 ## Safe smoke sequence
 
@@ -147,9 +151,9 @@ transcript:
 
 Enable the runner only with the exact confirmation phrase:
 
-```bash
-python tools/scd41_hil_runner.py \
-  --port COM7 --include-destructive \
+```powershell
+python tools/scd41_hil_runner.py `
+  --port COM7 --include-destructive `
   --confirm-destructive "I understand EEPROM and calibration risk"
 ```
 

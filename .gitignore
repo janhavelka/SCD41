@@ -1,6 +1,7 @@
 # PlatformIO
 .pio/
 .doxygen/
+hil-results/
 .vscode/
 .idea/
 

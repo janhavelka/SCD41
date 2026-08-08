@@ -4,6 +4,7 @@ from __future__ import annotations
 import builtins
 import contextlib
 import io
+import json
 import pathlib
 import sys
 import tempfile
@@ -174,6 +175,44 @@ def test_build_steps_timeout_override() -> None:
     assert_true(all(step.timeout_s == 3 for step in steps), "timeout override applies to all steps")
 
 
+def test_environment_metadata_distinguishes_clean_checkout() -> None:
+    original_git_text = hil.git_text
+    original_command_text = hil.command_text
+
+    def fake_git_text(args, default, *, allow_empty=False):
+        if args == ["status", "--short"]:
+            assert_true(allow_empty, "clean status query permits empty output")
+            return ""
+        if args == ["branch", "--show-current"]:
+            return "main"
+        if args == ["rev-parse", "HEAD"]:
+            return "0123456789abcdef"
+        return default
+
+    def fake_command_text(command, default, *, allow_empty=False):
+        del command, default, allow_empty
+        return "PlatformIO Core, version test"
+
+    hil.git_text = fake_git_text
+    hil.command_text = fake_command_text
+    try:
+        metadata = hil.environment_metadata("python runner.py --dry-run")
+    finally:
+        hil.git_text = original_git_text
+        hil.command_text = original_command_text
+
+    assert_equal(metadata["repository_status"], "clean", "clean checkout metadata")
+    assert_equal(metadata["repository_branch"], "main", "branch metadata")
+    assert_equal(
+        metadata["repository_commit"], "0123456789abcdef", "commit metadata"
+    )
+    assert_equal(
+        metadata["platformio_version"],
+        "PlatformIO Core, version test",
+        "PlatformIO metadata",
+    )
+
+
 def test_parser_self_test_mode() -> None:
     hil.run_parser_self_test()
 
@@ -192,6 +231,21 @@ def test_dry_run_writes_not_run_summary_without_pyserial() -> None:
         assert_equal(len(transcripts), 1, "dry-run writes transcript")
         report_text = reports[0].read_text(encoding="utf-8")
         assert_true("not-run" in report_text, "dry-run report marks steps not-run")
+        summary = json.loads(summaries[0].read_text(encoding="utf-8"))
+        for field in (
+            "repository_branch",
+            "repository_commit",
+            "repository_status",
+            "invocation",
+            "operating_system",
+            "python_version",
+            "platformio_version",
+        ):
+            assert_true(bool(summary.get(field)), f"dry-run records {field}")
+        assert_true(
+            "scd41_hil_runner.py --dry-run" in summary["invocation"],
+            "dry-run records the exact runner invocation",
+        )
 
 
 def main() -> int:
@@ -206,6 +260,7 @@ def main() -> int:
         test_step_pattern_matching,
         test_step_pass_rejects_failure_tokens,
         test_build_steps_timeout_override,
+        test_environment_metadata_distinguishes_clean_checkout,
         test_parser_self_test_mode,
         test_dry_run_writes_not_run_summary_without_pyserial,
     ]

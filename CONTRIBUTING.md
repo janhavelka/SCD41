@@ -12,12 +12,15 @@ Thanks for contributing to this repository.
    - `python tools/check_repository_hygiene.py`
    - `python tools/check_cli_contract.py`
    - `python tools/check_idf_example_contract.py`
+   - `python tools/test_scd41_hil_runner.py`
+   - `python tools/scd41_hil_runner.py --parser-self-test`
    - `python scripts/generate_version.py check`
    - `.\scripts\pio.cmd test -e native`
-   - `.\scripts\pio.cmd test -e native_ubsan`
    - `.\scripts\pio.cmd run -e esp32s3dev`
    - `.\scripts\pio.cmd run -e esp32s2dev`
    - `doxygen Doxyfile`
+   - The `native_ubsan` environment runs in Ubuntu CI; do not invoke it through
+     the Windows wrapper because the supported MinGW package lacks `libubsan`.
 5. Update `CHANGELOG.md` and package docs when behavior or metadata changes.
 6. Commit with a clear message and open a Pull Request.
 
