@@ -24,12 +24,19 @@ The example main component declares its platform dependencies:
 ```cmake
 idf_component_register(
   SRCS "main.cpp" "IdfI2cTransport.cpp"
-  INCLUDE_DIRS "."
+  INCLUDE_DIRS "." "../../../common"
   REQUIRES SCD41 esp_driver_i2c esp_driver_gpio esp_timer freertos vfs
 )
 ```
 
 The library component must not add those platform dependencies.
+
+Resolve the library under a fixed component name. `EXTRA_COMPONENT_DIRS`
+pointing at a checkout root takes the component name from the directory name,
+which breaks in any clone or release archive not named exactly `SCD41`. The
+bundled example instead ships `components/SCD41/CMakeLists.txt`, which
+registers `src/SCD41.cpp` and `include/` under the fixed name the example's
+`REQUIRES SCD41` expects.
 
 ## Create the application-owned bus
 
@@ -112,7 +119,7 @@ NACKed. Preserve that uncertainty.
 | ESP-IDF result | Library result | Disposition |
 | --- | --- | --- |
 | `ESP_OK` | `TransferCode::OK` | `COMPLETE` |
-| `ESP_ERR_NOT_FOUND` or `ESP_ERR_INVALID_RESPONSE` | `NACK` | `NO_EFFECT` only when no effectful payload could have been accepted; otherwise `INDETERMINATE` |
+| `ESP_FAIL`, `ESP_ERR_INVALID_STATE`, `ESP_ERR_NOT_FOUND` or `ESP_ERR_INVALID_RESPONSE` | `NACK` | `NO_EFFECT` only when no effectful payload could have been accepted; otherwise `INDETERMINATE` |
 | `ESP_ERR_TIMEOUT` | `TIMEOUT` | `INDETERMINATE` after controller start |
 | Invalid local context/request | `FAILED` | `NOT_STARTED` |
 | Other controller error | `BUS_ERROR` | `INDETERMINATE` |
@@ -120,6 +127,13 @@ NACKed. Preserve that uncertainty.
 Set `bytesTransferred` to the full requested byte count only on `ESP_OK` unless
 the platform gives a trustworthy partial count. Store the raw `esp_err_t` in
 `detail`.
+
+Mapping an unacknowledged transaction to `NACK` is mandatory, not cosmetic: the
+SCD4x never acknowledges `wake_up` (datasheet section 3.11.4), so an adapter
+that reports it as `BUS_ERROR` makes `ATTACH` fail permanently. `i2c_master_probe`
+reports a missing device as `ESP_ERR_NOT_FOUND`, but `i2c_master_transmit` and
+`i2c_master_receive` surface an unacknowledged transaction as `ESP_ERR_INVALID_STATE`
+or `ESP_FAIL` depending on the ESP-IDF version, so map all of them.
 
 Wake-up and attach stop reconciliation do not require fabricated address/data
 NACK codes. The driver marks only those transfers with

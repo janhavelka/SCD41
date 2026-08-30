@@ -31,6 +31,7 @@ static constexpr size_t MEASUREMENT_RESPONSE_LEN = 9;  ///< Response length for 
 
 static constexpr uint16_t EXECUTION_TIME_SHORT_MS = 1;           ///< Short command execution time
 static constexpr uint16_t EXECUTION_TIME_POWER_UP_MS = 30;       ///< Power-up and wake-up settle time
+static constexpr uint16_t POWER_UP_DELAY_MAX_MS = 1000;          ///< Largest accepted `Config::powerUpDelayMs`
 static constexpr uint16_t EXECUTION_TIME_REINIT_MS = 30;         ///< `reinit` execution time
 static constexpr uint16_t EXECUTION_TIME_SINGLE_SHOT_RHT_MS = 50; ///< RHT-only single-shot execution time
 static constexpr uint16_t EXECUTION_TIME_FRC_MS = 400;           ///< Forced recalibration execution time

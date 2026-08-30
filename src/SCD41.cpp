@@ -294,21 +294,19 @@ Status SCD41::start(const OperationRequest& request,
   if (!validation.ok()) {
     return validation;
   }
-  if (_nextGeneration == 0U) {
-    return Status::Error(Err::STALE_RESULT, "Operation generation exhausted");
-  }
-
   const OperationId id{options.requestId, _nextGeneration};
-  if (_nextGeneration == std::numeric_limits<uint32_t>::max()) {
-    _nextGeneration = 0U;
-  } else {
-    ++_nextGeneration;
-  }
-
   const Status beginStatus = _beginOperation(request, options, id);
   if (!beginStatus.ok()) {
     return beginStatus;
   }
+  // Commit the generation only once the operation is admitted, so a rejected
+  // start() consumes nothing. At most one result is retained at a time, so a
+  // wrapped generation can never be confused with an older one; zero is
+  // skipped because it means "no identity" in a default-constructed
+  // OperationId.
+  _nextGeneration = _nextGeneration == std::numeric_limits<uint32_t>::max()
+                        ? 1U
+                        : _nextGeneration + 1U;
   assignedId = id;
   return Status::Error(Err::IN_PROGRESS, "Operation started");
 }
@@ -438,8 +436,13 @@ OperationLimits SCD41::limits(OperationKind kind) {
   limitsValue.maxRetries = 0;
   switch (kind) {
     case OperationKind::ATTACH:
+      // Worst case: the largest accepted power-up delay, the wake settle, the
+      // stop settle, and the three short waits before serial/variant reads.
       limitsValue.maxCallbacks = 6;
-      limitsValue.maxWaitMs = 1533;
+      limitsValue.maxWaitMs = cmd::POWER_UP_DELAY_MAX_MS +
+                              cmd::EXECUTION_TIME_POWER_UP_MS +
+                              cmd::EXECUTION_TIME_STOP_PERIODIC_MS +
+                              3U * cmd::EXECUTION_TIME_SHORT_MS;
       break;
     case OperationKind::READ_DATA_READY:
     case OperationKind::READ_SENSOR_VARIANT:
@@ -498,8 +501,11 @@ OperationLimits SCD41::limits(OperationKind kind) {
       break;
     case OperationKind::WAKE_UP:
     case OperationKind::REINIT:
+      // Both settle for 30 ms (EXECUTION_TIME_REINIT_MS equals the power-up
+      // settle), then take three short waits for the serial/variant reads.
       limitsValue.maxCallbacks = 5;
-      limitsValue.maxWaitMs = 33;
+      limitsValue.maxWaitMs = cmd::EXECUTION_TIME_POWER_UP_MS +
+                              3U * cmd::EXECUTION_TIME_SHORT_MS;
       break;
     case OperationKind::SELF_TEST:
       limitsValue.maxCallbacks = 2;
@@ -610,7 +616,7 @@ Status SCD41::_validateConfig(const Config& config) const {
     return Status::Error(Err::INVALID_CONFIG, "Transfer timeout out of range");
   }
   if (config.powerUpDelayMs < cmd::EXECUTION_TIME_POWER_UP_MS ||
-      config.powerUpDelayMs > 1000U) {
+      config.powerUpDelayMs > cmd::POWER_UP_DELAY_MAX_MS) {
     return Status::Error(Err::INVALID_CONFIG, "Power-up delay out of range");
   }
   return Status::Ok();
@@ -710,7 +716,10 @@ Status SCD41::_validateRequestValue(const OperationRequest& request) const {
       break;
     case OperationKind::DIAGNOSTIC_WRITE_COMMAND:
     case OperationKind::DIAGNOSTIC_WRITE_WORD:
-      if (request.command == 0U || isManagedCommand(request.command)) {
+      if (request.command == 0U) {
+        return Status::Error(Err::INVALID_PARAM, "Invalid diagnostic command");
+      }
+      if (isManagedCommand(request.command)) {
         return Status::Error(Err::UNSUPPORTED,
                              "Use typed operation for managed command");
       }
@@ -748,20 +757,22 @@ Status SCD41::_validateAdmission(OperationKind kind) const {
                          "Dirty settings require verified readback");
   }
 
-  if (_identity.valid && _identity.variant != SensorVariant::SCD41) {
+  // Datasheet v1.7 restricts exactly one command group by variant: section
+  // 3.11 "Single Shot Measurement Mode (SCD41 & SCD43 only)". Low-power
+  // periodic (3.9) and the ASC target (3.8) are SCD4x-wide.
+  if (_identity.valid && _identity.variant != SensorVariant::SCD41 &&
+      _identity.variant != SensorVariant::SCD43) {
     switch (kind) {
-      case OperationKind::START_LOW_POWER_PERIODIC:
       case OperationKind::SINGLE_SHOT:
       case OperationKind::SINGLE_SHOT_RHT_ONLY:
-      case OperationKind::READ_ASC_TARGET:
-      case OperationKind::SET_ASC_TARGET:
       case OperationKind::READ_ASC_INITIAL_PERIOD:
       case OperationKind::SET_ASC_INITIAL_PERIOD:
       case OperationKind::READ_ASC_STANDARD_PERIOD:
       case OperationKind::SET_ASC_STANDARD_PERIOD:
       case OperationKind::POWER_DOWN:
       case OperationKind::WAKE_UP:
-        return Status::Error(Err::UNSUPPORTED, "Operation requires SCD41");
+        return Status::Error(Err::UNSUPPORTED,
+                             "Operation requires SCD41 or SCD43");
       default:
         break;
     }
@@ -1346,7 +1357,7 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                   validation, nowMs);
           return Status::Ok();
         }
-        _applyVerifiedSetting(kind, word);
+        _applyReadValue(kind, word);
         if (word != _active.desiredRaw) {
           _finishOperation(OperationOutcome::FAILED, EffectState::VERIFIED,
                   Status::Error(Err::COMMAND_FAILED,
@@ -2086,11 +2097,8 @@ void SCD41::_finishOperationFailure(const Status& status,
           effect == EffectState::ATTEMPTED) {
         effect = EffectState::ATTEMPTED;
       }
-    } else if (_lastTransferDisposition == TransferDisposition::NOT_STARTED) {
-      if (effect == EffectState::NOT_ATTEMPTED) {
-        effect = EffectState::NOT_ATTEMPTED;
-      }
-    } else if (status.code == Err::TIMEOUT) {
+    } else if (_lastTransferDisposition != TransferDisposition::NOT_STARTED &&
+               status.code == Err::TIMEOUT) {
       effect = EffectState::ACKNOWLEDGED;
       _markReconciliationRequired();
     }
@@ -2148,10 +2156,6 @@ void SCD41::_applyReadValue(OperationKind kind, uint16_t value) {
   _configuration.verifiedMask |= configurationFieldMask(field);
   _configuration.sensorEpoch = _sensorEpoch;
   _workingValue.configuration = _configuration;
-}
-
-void SCD41::_applyVerifiedSetting(OperationKind kind, uint16_t value) {
-  _applyReadValue(kind, value);
 }
 
 void SCD41::_storeSample(const uint16_t words[3], bool co2Valid,

@@ -27,10 +27,10 @@ Variant encodings in the dedicated CRC-protected response:
 
 | Variant | ID bits `[15:12]` | Notes |
 | --- | --- | --- |
-| SCD40 | `0x0` | Periodic CO2/T/RH, no SCD41-only low-power or single-shot commands |
+| SCD40 | `0x0` | Periodic and low-power periodic CO2/T/RH; no section 3.11 single-shot commands |
 | SCD41 | `0x1` | Target device for this library |
 | SCD42 | not defined | Compatibility enum only; datasheet v1.7 does not assign `0x2` to SCD42 |
-| SCD43 | `0x5` | Not targeted by this library |
+| SCD43 | `0x5` | Not targeted by this library; shares the section 3.11 command set with SCD41 |
 
 Bits `[11:0]` are not a family discriminator and may differ. Vendor examples
 are SCD40 `0x0440`/CRC `0x3F`, SCD41 `0x1440`/CRC `0x51`, and SCD43
@@ -148,6 +148,9 @@ time, then perform a read with no repeated command bytes. Do not collapse those
 into a combined transaction unless the driver explicitly asks for one.
 
 Commands must not be sent while a preceding command is still being processed.
+Datasheet v1.7 states this as a rule but publishes no `tIDLE` number; the 1 ms
+spacing above is this driver's conservative choice, equal to the shortest
+published command execution time.
 For read or send-command-and-fetch-result sequences, wait the documented
 execution time before issuing the read header.
 
@@ -174,7 +177,7 @@ Command words are not followed by CRC. The vendor CRC example gives
 | Rule | Timing |
 | --- | --- |
 | Power-up settle before first command | up to 30 ms |
-| Minimum command spacing `tIDLE` | at least 1 ms |
+| Minimum command spacing enforced by this driver | at least 1 ms |
 | Short command execution | 1 ms |
 | Stop periodic settle | 500 ms |
 | Wake-up settle after expected NACK | up to 30 ms |
@@ -202,9 +205,9 @@ remain failures.
 | Mode | Command | Cadence / Execution | Notes |
 | --- | --- | --- | --- |
 | Periodic | `0x21B1` | 1 sample every 5 s | Full CO2/T/RH |
-| Low-power periodic | `0x21AC` | 1 sample every 30 s | SCD41-only |
-| Single-shot full | `0x219D` | 5000 ms | SCD41-only |
-| Single-shot RHT-only | `0x2196` | 50 ms | SCD41-only, CO2 invalid |
+| Low-power periodic | `0x21AC` | 1 sample every 30 s | All SCD4x variants |
+| Single-shot full | `0x219D` | 5000 ms | SCD41 and SCD43 (section 3.11) |
+| Single-shot RHT-only | `0x2196` | 50 ms | SCD41 and SCD43, CO2 invalid |
 
 While periodic measurement is active, only these commands are allowed without
 first stopping measurement:
@@ -299,6 +302,7 @@ is still a protocol failure and must not enter a verified cache.
 | `get_automatic_self_calibration_enabled` | `0x2313` | 1 word | short | no |
 | `set_automatic_self_calibration_target` | `0x243A` | 1 word write | short | no |
 | `get_automatic_self_calibration_target` | `0x233F` | 1 word | short | no |
+| `start_low_power_periodic_measurement` | `0x21AC` | none | short | no |
 | `get_data_ready_status` | `0xE4B8` | 1 word | short | yes |
 | `persist_settings` | `0x3615` | none | 800 ms | no |
 | `get_serial_number` | `0x3682` | 3 words | short | no |

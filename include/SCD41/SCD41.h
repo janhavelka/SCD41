@@ -455,7 +455,8 @@ struct OperationOptions {
   uint32_t requestId = 0;
   /// Admission time in the owner's monotonic 32-bit millisecond clock.
   uint32_t nowMs = 0;
-  /// Immutable absolute deadline in the same clock; must be within 2^31 ms.
+  /// Immutable absolute deadline in the same clock. It must be strictly after
+  /// `nowMs` and within 2^31 ms of it; `deadlineMs == nowMs` is rejected.
   uint32_t deadlineMs = 0;
 };
 
@@ -690,9 +691,9 @@ struct HealthSnapshot {
 
 /// Fixed result storage. Interpret members by `OperationResult::kind`:
 /// - sample operations -> `sample`
-/// - attach/identity/wake/reinit -> `identity`
+/// - attach/identity/wake -> `identity`
 /// - sensor-variant read -> `identity` and the raw word in `value`
-/// - factory reset -> `identity` and `configuration`
+/// - reinit/factory reset -> `identity` and reconciled `configuration`
 /// - setting reads -> their scalar member plus `configuration`
 /// - setting writes/configuration/persistence -> `configuration`
 /// - data-ready -> `dataReady`
@@ -833,7 +834,7 @@ public:
   Identity identity() const { return _identity; }
   /// Copy the latest cached sample without consuming it or performing I2C.
   /// @param out Destination; unchanged when no valid cached sample exists.
-  /// @return `OK` or `RESULT_NOT_READY`.
+  /// @return `OK` or `MEASUREMENT_NOT_READY`.
   Status peekLatestSample(FixedSample& out) const;
 
   /// Get authoritative worst-case metadata for an operation kind.
@@ -945,7 +946,6 @@ private:
                uint32_t completedMs);
   void _finishOperationFailure(const Status& status, uint32_t completedMs);
   void _applyReadValue(OperationKind kind, uint16_t value);
-  void _applyVerifiedSetting(OperationKind kind, uint16_t value);
   void _storeSample(const uint16_t words[3], bool co2Valid, uint32_t nowMs);
   void _setMode(OperatingMode mode, ModeEvidence evidence);
   void _markReconciliationRequired();

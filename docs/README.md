@@ -16,9 +16,8 @@ too detailed for the README.
 | [Hardware/HIL validation](validation/hardware-hil.md) | Hardware evidence rules and smoke-test matrix. |
 | [Feature coverage](validation/feature-coverage.md) | Datasheet v1.7 command-to-core/CLI/test matrix and remaining evidence. |
 
-Source checkouts also retain guard-enforced compatibility evidence under
-`docs/reports/`. Dated reports are intentionally absent from release packages,
-so package documentation does not link to files that are not shipped.
+There is no `docs/reports/` directory. Completed audits and progress logs live
+in git history, not in the active documentation set.
 
 ## Generated API Reference
 
@@ -38,9 +37,10 @@ header, ESP-IDF component metadata, and the Doxygen project number.
 
 ## Documentation Policy
 
-- Keep completed task prompts, generated extracts, progress logs, and branch
-  notes out of `docs/`. A dated audit report is retained only when it records
-  durable compatibility decisions or evidence enforced by repository guards.
+- Keep completed task prompts, generated extracts, progress logs, branch notes,
+  and dated audit reports out of `docs/`. A durable decision belongs in the
+  reference, integration, porting, or validation guide that owns it; the record
+  of when it was made belongs in `CHANGELOG.md` and git history.
 - Retain a hardware report only when it records an actual run needed as release
   evidence. A file containing only `NOT RUN` entries is not evidence.
 - Runner output under `hil-results/` is ignored transient evidence. Promote only

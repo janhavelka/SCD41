@@ -72,7 +72,12 @@ def fail(message: str) -> int:
 
 
 def normalize_member(name: str) -> str:
-    return name.replace("\\", "/").lstrip("./")
+    # Strip only a leading "./" - lstrip("./") would eat the leading dot of a
+    # dotted top-level path such as ".github/workflows/ci.yml".
+    name = name.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    return name.lstrip("/")
 
 
 def member_contains(members: set[str], required: str) -> bool:
@@ -80,8 +85,13 @@ def member_contains(members: set[str], required: str) -> bool:
 
 
 def member_has_forbidden_path(members: set[str], forbidden: str) -> bool:
+    # Members are relative and may or may not carry a package-root prefix, so a
+    # forbidden directory must be matched at the start of the path as well as
+    # after any separator.
     return any(
-        member == forbidden.rstrip("/") or f"/{forbidden}" in member
+        member == forbidden.rstrip("/")
+        or member.startswith(forbidden)
+        or f"/{forbidden}" in member
         for member in members
     )
 

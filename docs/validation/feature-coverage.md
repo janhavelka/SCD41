@@ -54,19 +54,18 @@ individually, and every payload word written by the driver carries CRC-8.
 | Mixed stress | `stress_mix [N]` schedules read-only, mode-safe operation cycles. Idle cycles cover identity, configuration, variant, and readiness; periodic cycles cover readiness, sample fetch, and ambient pressure. A legitimate no-data sample is a warning, not a transport failure. |
 | Aggregate self-check | `selfcheck` requires attached idle mode and sequences identity, variant, full configuration, and the 10 s sensor self-test with pass/warn/fail summary. The direct `selftest` command remains available. |
 | Raw diagnostics | `command read_words`, `write`, and `write_word` require an explicit `confirm`. Managed command words are rejected, response words remain CRC-checked, and every dispatched raw command requires a later attach/recover. |
-| CLI parity | `tools/check_cli_contract.py` proves Arduino handlers exist in `processCommand`; `tools/check_idf_example_contract.py` checks help, parser, handler semantics, workflow dispatch, confirmations, colors/output contract, and native-IDF purity. |
+| CLI parity | `tools/check_cli_contract.py` proves Arduino handlers exist in `processCommand`; `tools/check_idf_example_contract.py` checks help, parser, handler semantics, workflow dispatch, confirmations, required owner-safe tokens, and native-IDF purity. |
 | External owner | Core lifecycle and operations are non-owning and fixed-memory. `start` is zero-I2C, `poll` consumes an explicit callback budget, results are exactly once, callbacks may not re-enter, and callers serialize the instance. |
 
-## Read-only product-integration fit review
+## Single-owner integration fit
 
-The audit inspected TunnelMonitor-node revision
-`acae76ffe7b5de100d4102b122d5365d76f7c96d` read-only. Its actual I2C path has
-one `I2cTask` owner, a fixed `I2cDeviceBinding` table, one-attempt
-`I2cOwnerTransport`, owner-context lifecycle calls, and copied passive results
-and status for consumers. SCD41 is not currently present in that binding table,
-so this is an architecture-fit review, not an integration or build claim.
+This library is designed to sit under an application that owns the I2C
+controller: one bus-owner task, a fixed device table, a one-attempt transport,
+owner-context lifecycle calls, and passive results copied out for consumers.
+The table below maps that shape onto the public API. It is an architecture-fit
+statement, not an integration or build claim for any particular product.
 
-| TunnelMonitor owner boundary | SCD41 fit |
+| Owner-side boundary | SCD41 fit |
 | --- | --- |
 | zero-I2C binding | `begin(config)` validates and copies the non-owning callback table |
 | immutable command identity/deadline | `OperationOptions` plus assigned `OperationId` |
@@ -75,9 +74,9 @@ so this is an architecture-fit review, not an integration or build claim.
 | bounded published device status | copy `runtimeSnapshot`, `healthSnapshot`, configuration/identity/sample evidence after owner-context work |
 | bus invalidation/recovery | owner cancels/ends, performs controller/rail recovery, then submits a fresh `ATTACH`; the library never resets the bus |
 
-No TunnelMonitor header, type, task, queue, mutex, or product policy is added to
-this library. A future product adapter should remain private to that product and
-translate fixed owner requests/results at the existing binding boundary.
+No product header, type, task, queue, mutex, or policy is added to this
+library. A product adapter should stay private to that product and translate
+fixed owner requests/results at its own binding boundary.
 
 ## Response-domain policy
 

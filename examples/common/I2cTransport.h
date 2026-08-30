@@ -64,9 +64,13 @@ inline SCD41::TransferResult wireTransfer(
                       transferred);
       case 2:
       case 3:
+        // Arduino-ESP32 returns 2 for any unacknowledged byte and cannot prove
+        // the NACK happened in the address phase, so a write that already put
+        // command bytes on the bus must stay INDETERMINATE.
         return result(SCD41::TransferCode::NACK,
-                      wireStatus == 2U ? SCD41::TransferDisposition::NO_EFFECT
-                                       : SCD41::TransferDisposition::INDETERMINATE,
+                      request.writeLength > 0U
+                          ? SCD41::TransferDisposition::INDETERMINATE
+                          : SCD41::TransferDisposition::NO_EFFECT,
                       wireStatus, 0U);
       case 4:
         return result(SCD41::TransferCode::BUS_ERROR,
@@ -84,11 +88,11 @@ inline SCD41::TransferResult wireTransfer(
     const size_t received =
         wire->requestFrom(request.address, request.readLength, true);
     if (received == 0U) {
-      return result(SCD41::TransferCode::NACK,
-                    request.writeLength == 0U
-                        ? SCD41::TransferDisposition::NO_EFFECT
-                        : SCD41::TransferDisposition::INDETERMINATE,
-                    0, transferred);
+      // Arduino-ESP32 zeroes the read count for a NACK, a timeout and a bus
+      // fault alike, so neither the cause nor the absence of effect is
+      // provable. Do not invent a NACK the platform cannot prove.
+      return result(SCD41::TransferCode::FAILED,
+                    SCD41::TransferDisposition::INDETERMINATE, 0, transferred);
     }
     if (received != request.readLength) {
       while (wire->available() > 0) {

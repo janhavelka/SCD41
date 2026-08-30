@@ -334,7 +334,9 @@ invent address/data precision. Timeouts and bus errors are not expected NACKs.
 
 `Config::strictVariantCheck` defaults to true. Setting it false is a diagnostic
 escape hatch that can attach to another observed SCD4x identity; it is not a
-support claim. Known SCD41-only operations remain rejected with `UNSUPPORTED`.
+support claim. The datasheet section 3.11 command group (single shot,
+power-down/wake-up, ASC initial/standard period) remains rejected with
+`UNSUPPORTED` for variants outside SCD41/SCD43.
 
 Detailed device facts are in
 [SCD41 protocol reference](docs/reference/scd41-protocol.md).
@@ -398,15 +400,11 @@ compile-links that package for TunnelMonitor-node's integration target
 
 `library.json` is the version source of truth. `include/SCD41/Version.h`,
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
-from it. Version 1.3.2 aligns the private operation-finalization vocabulary and
-strengthens naming/health contract checks. Version 1.3.1 tightened
-documentation, HIL evidence metadata, repository hygiene, and reproducible
-documentation validation. Version 1.3.0 added
-backward-compatible diagnostic naming and direct
-transfer-health views on top of the staged 1.0.0 operation model. That
-1.0.0 baseline was the breaking API change replacing direct calls
-and dual transport callbacks with the
-externally scheduled operation model.
+from it.
+
+The 1.0.0 baseline was the breaking API change that replaced direct blocking
+calls and dual transport callbacks with the externally scheduled operation
+model. Per-version detail is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

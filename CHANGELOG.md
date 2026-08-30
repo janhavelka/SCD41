@@ -9,6 +9,75 @@ All notable changes are documented here. The format follows
 The manifest is staged at `1.3.2` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
 
+### Audit pass
+
+#### Fixed
+
+- The ESP-IDF example transport now maps `ESP_FAIL` and `ESP_ERR_INVALID_STATE`
+  to `TransferCode::NACK`. `i2c_master_transmit` reports an unacknowledged
+  transaction with those codes, not the `ESP_ERR_NOT_FOUND` documented for
+  `i2c_master_probe`, so the datasheet-mandated `wake_up` NACK previously
+  surfaced as `BUS_ERROR` and `ATTACH` could never complete on ESP-IDF.
+- The variant admission gate now matches datasheet v1.7, which restricts only
+  section 3.11 (single shot, power-down/wake-up, ASC initial/standard period)
+  and to SCD41 *and* SCD43. Low-power periodic measurement (3.9) and the ASC
+  target (3.8) are SCD4x-wide and are no longer rejected on an SCD40.
+- The Wire example adapter no longer claims `NO_EFFECT` for a write NACK that
+  Arduino-ESP32 cannot attribute to the address phase, and no longer reports a
+  read timeout or bus fault as a NACK.
+- The example I2C scanner sets its own transfer timeout instead of inheriting
+  whatever bound the driver's last transfer requested, which could report a
+  present sensor as absent.
+- The operation generation counter now wraps to 1. It previously wrapped to 0
+  and made every later `start()` fail permanently with `STALE_RESULT`.
+- A diagnostic request with command word `0x0000` now returns `INVALID_PARAM`
+  rather than `UNSUPPORTED`, matching the diagnostic read path.
+- The HIL runner now strips ANSI escapes and matches case-insensitively on the
+  live serial path, as its own parser self-test already did. Colourized CLI
+  output meant every `outcome=` expectation failed on real hardware. Regex
+  alternations in expectations are also escaped in the Markdown summary.
+- `check_package_contents.py` now detects forbidden top-level package paths;
+  the previous check matched neither a bare nor a dot-prefixed top-level path.
+- The ESP-IDF example registers the library through a fixed-name
+  `components/SCD41` wrapper instead of `EXTRA_COMPONENT_DIRS`, which took the
+  component name from the checkout directory and broke in any clone or release
+  archive not named exactly `SCD41`.
+- The ESP-IDF contract guard now matches include directives and file paths
+  against raw text; the "Arduino source reuse" rule ran against
+  comment/string-stripped code and could never fire.
+
+#### Changed
+
+- Native host tests build with `-Wall -Wextra -Werror=return-type`; the
+  environment previously dropped every warning flag.
+- The core timing guard states its zero-tolerance policy directly instead of
+  comparing against a permanently empty allowlist.
+- The guards CI job regenerates version metadata before `git diff --exit-code`,
+  so that step can actually detect drift.
+
+#### Removed
+
+- `test/stubs/Arduino.h` and `test/stubs/Wire.h`, which no test included and
+  which declared `extern` globals with no definition, plus the dead
+  `-Itest/stubs` include path.
+- The private `_applyVerifiedSetting()` alias, a dead self-assignment branch in
+  `_finishOperationFailure()`, and the dated naming-hygiene report that the
+  repository-hygiene guard required and version-pinned.
+
+#### Documentation
+
+- `AGENTS.md` no longer mandates the shift-approximation fixed-point formulas
+  that were replaced by the exact `/65535` form, and its repository map matches
+  the tree.
+- The protocol reference no longer marks low-power periodic measurement as
+  SCD41-only, lists `start_low_power_periodic_measurement` in the command
+  summary, and attributes the 1 ms command spacing to this driver rather than
+  to a datasheet `tIDLE` number.
+- The HIL safe smoke sequence matches the runner's `SAFE_STEPS`, which the
+  documented sequence had drifted from.
+- `Err::I2C_ERROR` is documented by what produces it; the five values the
+  driver never returns are marked reserved.
+
 ### Planned 1.3.2
 
 #### Changed

@@ -338,7 +338,9 @@ def read_until_match(
             transcript.append(text)
             buffer += text
             idle_deadline = time.monotonic() + idle_timeout_s
-            if pattern.search(buffer):
+            # The CLI colourizes the very tokens the expectations match, so the
+            # buffer must be normalized exactly like step_output_matches().
+            if pattern.search(strip_ansi(buffer)):
                 return True, buffer
         else:
             if time.monotonic() >= idle_deadline:
@@ -358,7 +360,7 @@ def run_step(ser, step: Step, idle_timeout_s: float, transcript: list[str]) -> d
     started = time.monotonic()
     matched, output = read_until_match(
         ser,
-        re.compile(step.expect, re.DOTALL),
+        re.compile(step.expect, re.IGNORECASE | re.DOTALL),
         step.timeout_s,
         idle_timeout_s,
         transcript,
@@ -430,6 +432,8 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
             "| {name} | `{command}` | `{expect}` | {destructive} | {status} | {elapsed_s} | {failure_tokens} |".format(
                 **{
                     **result,
+                    # Expectations are regexes; an unescaped `|` would split the row.
+                    "expect": str(result["expect"]).replace("|", "\\|"),
                     "failure_tokens": ", ".join(result.get("failure_tokens", [])) or "-",
                 }
             )

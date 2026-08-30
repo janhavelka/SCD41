@@ -4,7 +4,6 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
-from typing import Dict
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCAN_DIRS = ("src", "include")
@@ -72,7 +71,6 @@ BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT_RE = re.compile(r"//[^\n]*")
 STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 
-ALLOWED_FINDINGS: Dict[str, Dict[str, int]] = {}
 
 
 def strip_non_code(text: str) -> str:
@@ -118,20 +116,12 @@ def main() -> int:
         record_findings(observed, rel, "heap", FORBIDDEN_HEAP_TOKENS, code)
         record_findings(observed, rel, "logging", FORBIDDEN_LOGGING_TOKENS, code)
 
+    # The policy is zero tolerance: core headers and src/ must contain none of
+    # these framework, timing, heap, or logging constructs.
     errors: list[str] = []
     for rel, findings in observed.items():
-        expected = ALLOWED_FINDINGS.get(rel, {})
         for label, count in findings.items():
-            exp = expected.get(label, 0)
-            if count != exp:
-                errors.append(f"{rel}: {label} observed={count}, expected={exp}")
-
-    for rel, expected in ALLOWED_FINDINGS.items():
-        actual = observed.get(rel, {})
-        for label, exp in expected.items():
-            count = actual.get(label, 0)
-            if count != exp:
-                errors.append(f"{rel}: {label} observed={count}, expected={exp}")
+            errors.append(f"{rel}: forbidden {label} appears {count} time(s)")
 
     if errors:
         print("Core timing guard FAILED:")

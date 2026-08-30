@@ -75,14 +75,20 @@ FORBIDDEN_DRIVER_CALLS = (
     ".tick(", ".probe(", ".recover(", ".readMeasurement(",
     ".startPeriodicMeasurement(", ".stopPeriodicMeasurement(",
 )
-FORBIDDEN_PATTERNS = {
+# Include directives and file paths only ever appear inside string literals or
+# comments, which strip_non_code() erases. They must be matched on raw text.
+FORBIDDEN_RAW_PATTERNS = {
     "Arduino header": re.compile(r'^\s*#\s*include\s*[<"](?:Arduino\.h|Wire\.h)[>"]', re.MULTILINE),
-    "legacy I2C header": re.compile(r'^\s*#\s*include\s*<driver/i2c\.h>', re.MULTILINE),
+    "legacy I2C header": re.compile(r'^\s*#\s*include\s*[<"]driver/i2c\.h[>"]', re.MULTILINE),
+    "Arduino source reuse": re.compile(r"examples/01_basic_bringup_cli/main\.cpp"),
+}
+# Identifier patterns must be matched on stripped code so that comments and
+# string literals mentioning a name do not trip the guard.
+FORBIDDEN_PATTERNS = {
     "Arduino facade": re.compile(r"\b(?:ArduinoCompat|IdfArduinoCompat|TwoWire|Serial|String)\b"),
     "dynamic C++ container": re.compile(r"\bstd::(?:string|vector)\b"),
     "heap allocation": re.compile(r"\b(?:malloc|calloc|realloc|free)\s*\(|\bnew\s+"),
     "Arduino time": re.compile(r"\bmillis\s*\("),
-    "Arduino source reuse": re.compile(r"examples/01_basic_bringup_cli/main\.cpp"),
 }
 
 BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
@@ -272,14 +278,18 @@ def main() -> int:
         if path.is_file() and path.suffix.lower() in {".c", ".cc", ".cpp", ".h", ".hpp"}
     )
     code = strip_non_code(combined)
+    for label, pattern in FORBIDDEN_RAW_PATTERNS.items():
+        if pattern.search(combined):
+            fail(f"IDF example uses forbidden {label}")
     for label, pattern in FORBIDDEN_PATTERNS.items():
-        target = combined if "header" in label else code
-        if pattern.search(target):
+        if pattern.search(code):
             fail(f"IDF example uses forbidden {label}")
     workflow_code = strip_non_code(workflow)
+    for label, pattern in FORBIDDEN_RAW_PATTERNS.items():
+        if pattern.search(workflow):
+            fail(f"shared diagnostic workflow uses forbidden {label}")
     for label, pattern in FORBIDDEN_PATTERNS.items():
-        target = workflow if "header" in label else workflow_code
-        if pattern.search(target):
+        if pattern.search(workflow_code):
             fail(f"shared diagnostic workflow uses forbidden {label}")
     for token in REQUIRED_IDF_TOKENS:
         if token not in combined:

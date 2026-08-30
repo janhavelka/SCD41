@@ -31,9 +31,16 @@ include/SCD41/         - Public API headers only (Doxygen)
   Version.h            - Auto-generated (do not edit)
 src/                   - Implementation (.cpp)
 examples/
-  01_*/
-  common/              - Example-only helpers (Log.h, BoardConfig.h, I2cTransport.h,
-                         I2cScanner.h, CommandHandler.h)
+  01_basic_bringup_cli/  - Arduino/PlatformIO CLI
+  common/                - Example-only helpers, NOT part of the library
+  idf/basic/             - Native ESP-IDF CLI
+test/                  - Native Unity public-contract suite
+tools/                 - CI guard scripts and the HIL runner
+scripts/               - Version generation and the Windows PlatformIO wrapper
+docs/                  - reference/, integration/, porting/, validation/
+.github/workflows/     - CI
+CMakeLists.txt         - ESP-IDF component registration
+idf_component.yml      - Generated ESP-IDF component metadata
 platformio.ini
 library.json
 README.md
@@ -176,9 +183,13 @@ struct Status {
   - CO2 in ppm directly from the raw 16-bit word
   - temperature as `-45 + 175 * raw / 65535`
   - humidity as `100 * raw / 65535`
-- Fixed-point conversions should be available:
-  - `temperature_mdegC = ((21875 * raw) >> 13) - 45000`
-  - `humidity_milliPct = ((12500 * raw) >> 13)`
+- Fixed-point conversions must keep the datasheet's exact `65535` denominator
+  and round to nearest, so the full-scale endpoints are exactly 130000 mC and
+  100000 milli-percent RH:
+  - `temperature_mdegC = round(175000 * raw / 65535) - 45000`
+  - `humidity_milliPct = round(100000 * raw / 65535)`
+  - Do not reintroduce shift approximations such as `((21875 * raw) >> 13)`;
+    they were removed because they miss the published endpoints.
 - Support runtime compensation and maintenance commands:
   - temperature offset
   - sensor altitude

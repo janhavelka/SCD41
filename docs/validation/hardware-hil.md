@@ -53,15 +53,25 @@ release gate actually requires.
 The default runner executes this sequence. It does not change calibration or
 EEPROM state.
 
+The authoritative list is the `SAFE_STEPS` table in
+[`tools/scd41_hil_runner.py`](../../tools/scd41_hil_runner.py); the runner
+executes exactly that table, including its settle waits. To reproduce it by
+hand, issue these commands in order:
+
 ```text
 help
 version
 scan
 begin
+probe
+recover
 status
 identity
 variant
 settings
+selfcheck
+stress 5
+stress_mix 2
 dataready
 periodic on
 # wait at least 5 s

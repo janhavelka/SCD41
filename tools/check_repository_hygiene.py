@@ -253,17 +253,7 @@ def main() -> int:
     if f"The `{version}` manifest is currently staged" not in security:
         errors.append("SECURITY.md staged manifest is stale against library.json")
 
-    if not (ROOT / "docs/reports/naming-hygiene-20260808.md").is_file():
-        errors.append("durable naming/hygiene report is missing")
-    report = read("docs/reports/naming-hygiene-20260808.md")
-    if f"Target version: {version}" not in report:
-        errors.append("durable naming/hygiene report target version is stale")
-    if f"staged {version} line" not in report:
-        errors.append("durable naming/hygiene report metadata statement is stale")
-    for required_input in (
-        "docs/README.md",
-        "docs/reports/naming-hygiene-20260808.md",
-    ):
+    for required_input in ("docs/README.md",):
         if required_input not in doxyfile:
             errors.append(f"Doxygen input omits {required_input}")
     if "OUTPUT_DIRECTORY       = .doxygen" not in doxyfile:

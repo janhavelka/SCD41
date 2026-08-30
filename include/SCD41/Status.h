@@ -14,7 +14,8 @@ enum class Err : uint8_t {
   OK = 0,                              ///< The request completed successfully.
   NOT_INITIALIZED,                     ///< `begin()` has not bound the instance.
   INVALID_CONFIG,                      ///< A `Config` field violates its contract.
-  I2C_ERROR,                           ///< Legacy generic I2C failure code.
+  I2C_ERROR,                           ///< Adapter reported FAILED, an unknown
+                                       ///< code, or a bad completion clock.
   TIMEOUT,                             ///< The operation deadline expired.
   INVALID_PARAM,                       ///< A request value or ID is invalid.
   DEVICE_NOT_FOUND,                    ///< Attach could not verify a supported device.
@@ -26,18 +27,19 @@ enum class Err : uint8_t {
   IN_PROGRESS,                         ///< Work was admitted or remains active.
   COMMAND_FAILED,                      ///< The sensor reported command-level failure.
   UNSUPPORTED,                         ///< The operation is unsupported for this variant.
-  I2C_NACK_ADDR,                       ///< Legacy precise address-NACK code.
-  I2C_NACK_DATA,                       ///< Legacy precise data-NACK code.
-  I2C_NACK_READ,                       ///< Legacy precise read-NACK code.
+  I2C_NACK_ADDR,                       ///< Reserved; never returned (see `I2C_NACK`).
+  I2C_NACK_DATA,                       ///< Reserved; never returned (see `I2C_NACK`).
+  I2C_NACK_READ,                       ///< Reserved; never returned (see `I2C_NACK`).
   I2C_TIMEOUT,                         ///< One physical transfer timed out.
   I2C_BUS,                             ///< The controller reported a bus fault.
-  OFFLINE, ///< Passive diagnostic state only; it never gates transfers.
+  OFFLINE, ///< Reserved; never returned. Passive health is `DriverState::OFFLINE`.
 
   // Append-only operation-model additions.
   RESULT_NOT_READY,                    ///< No retained terminal result is available.
   STALE_RESULT,                        ///< The supplied ID does not match retained state.
   CANCELLED,                           ///< Host-side future work was cancelled.
-  PARTIAL,                             ///< Some composite fields completed before failure.
+  PARTIAL,                             ///< Reserved; never returned. A partial read
+                                       ///< reports `OperationOutcome::PARTIAL`.
   INDETERMINATE,                       ///< Hardware effect cannot be proven.
   CONFIRMATION_REQUIRED,               ///< Maintenance confirmation is absent or wrong.
   RECONCILIATION_REQUIRED,             ///< Attach/readback is required before this work.
