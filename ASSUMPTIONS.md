@@ -38,6 +38,11 @@ core driver cannot determine by itself.
 
 - `TransferResult::completedMs`, operation `nowMs`, and poll `nowMs` use the same
   wrapping 32-bit monotonic millisecond clock.
+- Consecutive accepted owner time observations must be less than 2^31 ms apart
+  (about 24.8 days). Continue polling while idle or retaining a result to age
+  the owner timestamp and expire sensor safety gates. A callback can finish
+  after the owner's sampled time; it advances transfer scheduling without
+  replacing the last accepted owner timestamp.
 - An individual operation deadline is less than half the 32-bit clock range
   from its start, so wrap-safe signed time comparisons remain unambiguous.
 - The transfer adapter enforces `TransferRequest::timeoutMs` and returns after

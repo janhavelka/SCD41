@@ -154,11 +154,24 @@ result has been consumed.
 `cancel(id, nowMs)` performs no I2C. It prevents later phases and stores a
 terminal cancelled result. If bytes were already accepted, the effect field and
 reconciliation flag remain conservative; cancellation is not hardware rollback.
+Cancelling a managed read, or a setting operation before its effectful write,
+preserves attachment and periodic mode. A backward cancellation timestamp is
+clamped to the last accepted owner timestamp so a clock error cannot prevent
+cancellation. `start()` and active `poll()` still reject backward owner time.
 After every attempted transfer, and after cancellation or timeout during a
 long sensor action, `RuntimeSnapshot::nextSafeCommandMs` is the earliest safe
 admission time while `nextSafeCommandValid` is true. The validity flag matters
 when the absolute timestamp wraps to zero. `start()` returns zero-I2C `BUSY`
 until that time; no new operation silently absorbs an inherited wait.
+An acknowledged or ambiguous effectful transfer retains its full command
+settle time even if it fails or crosses the operation deadline. Cancellation
+preserves that gate without replacing it with the next logical phase time.
+
+Keep observing owner time less than 2^31 ms apart (about 24.8 days), including
+while idle or retaining a result. `poll()` records those observations and clears
+elapsed safety gates. Callback completion times drive transfer scheduling but
+do not replace the owner timestamp; repeated calls may reuse a sampled owner
+time while the sensor safety gate continues to prevent early I2C.
 
 `end()` also performs no I2C. Active work becomes a retained cancellation
 result. The application remains responsible for any desired stop command, bus
@@ -285,6 +298,11 @@ still check epoch and flags.
 A zero-write `PERSIST_SETTINGS` success means only that this driver instance has
 no known unpersisted setting change. It does not read or prove EEPROM contents,
 especially after a fresh bind.
+
+An acknowledged `REINIT` or `FACTORY_RESET` clears discarded runtime dirty
+fields once its sensor execution wait finishes, before identity verification.
+A failed verification does not restore those discarded changes. Existing
+`persistenceIndeterminate` remains set until reset/reinit verification succeeds.
 
 ## Retry and recovery policy
 

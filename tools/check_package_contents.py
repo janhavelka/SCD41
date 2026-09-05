@@ -35,6 +35,7 @@ REQUIRED_PACKAGE_PATHS = (
     "examples/common/DiagnosticWorkflow.h",
     "examples/common/I2cTransport.h",
     "examples/idf/basic/CMakeLists.txt",
+    "examples/idf/basic/components/SCD41/CMakeLists.txt",
     "examples/idf/basic/main/CMakeLists.txt",
     "examples/idf/basic/main/IdfI2cTransport.cpp",
     "examples/idf/basic/main/IdfI2cTransport.h",
@@ -91,6 +92,7 @@ def member_has_forbidden_path(members: set[str], forbidden: str) -> bool:
     return any(
         member == forbidden.rstrip("/")
         or member.startswith(forbidden)
+        or member.endswith(f"/{forbidden.rstrip('/')}")
         or f"/{forbidden}" in member
         for member in members
     )

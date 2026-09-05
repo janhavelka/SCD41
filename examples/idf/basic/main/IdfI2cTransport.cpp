@@ -29,14 +29,9 @@ SCD41::TransferResult mappedResult(esp_err_t error,
       code = SCD41::TransferCode::OK;
       disposition = SCD41::TransferDisposition::COMPLETE;
       break;
-    // The SCD41 never acknowledges wake_up (datasheet 3.11.4), so a NACK must
-    // reach the driver as TransferCode::NACK or ATTACH can never complete.
-    // i2c_master_transmit/_receive surface an unacknowledged transaction as
-    // ESP_ERR_INVALID_STATE or ESP_FAIL; ESP_ERR_NOT_FOUND comes from
-    // i2c_master_probe. Treat all of them as a NACK.
-    case ESP_FAIL:
-    case ESP_ERR_INVALID_STATE:
-    case ESP_ERR_NOT_FOUND:
+    // ESP-IDF v6.0.1 synchronous transfers report NACK as INVALID_RESPONSE.
+    // Generic controller/queue errors must remain failures even in the
+    // driver's expected-NACK wake and attach-reconciliation phases.
     case ESP_ERR_INVALID_RESPONSE:
       code = SCD41::TransferCode::NACK;
       disposition = effectfulWrite ? SCD41::TransferDisposition::INDETERMINATE

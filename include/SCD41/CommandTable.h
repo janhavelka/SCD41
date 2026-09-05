@@ -95,13 +95,13 @@ static constexpr uint8_t SENSOR_VARIANT_SCD41 = 0x1; ///< `get_sensor_variant` e
 static constexpr uint8_t SENSOR_VARIANT_SCD43 = 0x5; ///< `get_sensor_variant` encoding for SCD43
 
 // Compatibility aliases retained for source compatibility with the pre-1.1
-// command table. These values always describe the dedicated sensor-variant
-// response; serial-number words carry no variant contract.
+// command table. Decode supported variants from the dedicated sensor-variant
+// response, never serial-number words. The legacy SCD42 value is reserved.
 static constexpr uint16_t SERIAL_VARIANT_MASK = SENSOR_VARIANT_MASK; ///< Compatibility alias
 static constexpr uint16_t SERIAL_VARIANT_SHIFT = SENSOR_VARIANT_SHIFT; ///< Compatibility alias
 static constexpr uint8_t SERIAL_VARIANT_SCD40 = SENSOR_VARIANT_SCD40; ///< Compatibility alias
 static constexpr uint8_t SERIAL_VARIANT_SCD41 = SENSOR_VARIANT_SCD41; ///< Compatibility alias
-static constexpr uint8_t SERIAL_VARIANT_SCD42 = 0x2; ///< Legacy value; not decoded by v1.7 protocol
+static constexpr uint8_t SERIAL_VARIANT_SCD42 = 0x2; ///< Reserved legacy value; undefined by datasheet v1.7 and never decoded
 static constexpr uint8_t SERIAL_VARIANT_SCD43 = SENSOR_VARIANT_SCD43; ///< Compatibility alias
 
 // ============================================================================
@@ -120,7 +120,7 @@ static constexpr uint16_t ASC_INITIAL_PERIOD_DEFAULT_H = 44; ///< Default ASC in
 static constexpr uint16_t ASC_STANDARD_PERIOD_DEFAULT_H = 156; ///< Default ASC standard period
 static constexpr uint16_t ASC_PERIOD_STEP_HOURS = 4; ///< Required ASC period step size
 static constexpr uint16_t CO2_MIN_PPM = 0; ///< Minimum representable CO2 reading
-static constexpr uint16_t CO2_MAX_PPM = 40000; ///< Maximum representable CO2 reading
+static constexpr uint16_t CO2_MAX_PPM = 40000; ///< Legacy CO2 upper bound; not enforced on raw uint16 readings
 
 } // namespace cmd
 } // namespace SCD41

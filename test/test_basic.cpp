@@ -134,6 +134,7 @@ struct ModelTransport {
   uint16_t selfTestResult = 0;
   uint16_t frcResult = 0x8005;
   uint16_t diagnosticWords[3] = {0x1111, 0x2222, 0x3333};
+  uint8_t diagnosticWordCount = 1;
   uint32_t persistWrites = 0;
   uint32_t factoryResetWrites = 0;
   FaultRule fault = {};
@@ -263,7 +264,10 @@ uint8_t responseWordCount(uint16_t command) {
 
 void fillResponse(ModelTransport& bus, uint8_t* out, size_t length) {
   TEST_ASSERT_NOT_NULL(out);
-  const uint8_t wordCount = responseWordCount(bus.pendingResponseCommand);
+  const uint8_t wordCount =
+      bus.pendingResponseCommand == 0x1234U || bus.pendingResponseCommand == 0x4321U
+          ? bus.diagnosticWordCount
+          : responseWordCount(bus.pendingResponseCommand);
   TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(wordCount) * 3U, length);
 
   uint16_t words[3] = {};
@@ -439,6 +443,25 @@ PollResult driveUntilTerminal(Device& device, ModelTransport& bus, uint32_t& now
     }
   }
   TEST_FAIL_MESSAGE("operation did not reach a terminal result");
+  return poll;
+}
+
+PollResult driveUntilCallbacks(Device& device, ModelTransport& bus, uint32_t& nowMs,
+                               uint8_t count) {
+  PollResult poll = {};
+  for (uint16_t i = 0U; i < 128U; ++i) {
+    poll = pollChecked(device, bus, nowMs, 1U);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
+                      static_cast<uint8_t>(poll.state));
+    if (operationCalls(bus) == count) {
+      return poll;
+    }
+    TEST_ASSERT_TRUE(operationCalls(bus) < count);
+    nowMs = poll.nextDueMs != 0U && !timeReached(nowMs, poll.nextDueMs)
+                ? poll.nextDueMs
+                : nowMs + 1U;
+  }
+  TEST_FAIL_MESSAGE("operation did not reach requested callback boundary");
   return poll;
 }
 
@@ -1110,10 +1133,12 @@ void test_owner_clock_cannot_move_backwards() {
   TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
                     static_cast<uint8_t>(invalidPoll.state));
   TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
-  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INVALID_PARAM),
-                    static_cast<uint8_t>(device.cancel(id, 99).code));
+  TEST_ASSERT_TRUE(device.cancel(id, 99).ok());
   TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
-  TEST_ASSERT_TRUE(device.cancel(id, 100).ok());
+  const OperationResult result = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::CANCELLED),
+                    static_cast<uint8_t>(result.outcome));
+  TEST_ASSERT_EQUAL_UINT32(100U, result.completedMs);
 }
 
 void test_cancel_before_io_is_exact_and_prevents_stale_completion() {
@@ -2597,6 +2622,7 @@ void test_each_runtime_and_maintenance_stage_fails_without_hidden_retry() {
   };
   const ProcedureCase procedures[] = {
       {OperationRequest::make(OperationKind::READ_IDENTITY), Preparation::IDLE},
+      {OperationRequest::make(OperationKind::READ_SENSOR_VARIANT), Preparation::IDLE},
       {OperationRequest::make(OperationKind::START_PERIODIC), Preparation::IDLE},
       {OperationRequest::make(OperationKind::START_LOW_POWER_PERIODIC), Preparation::IDLE},
       {OperationRequest::make(OperationKind::STOP_PERIODIC), Preparation::PERIODIC},
@@ -2653,7 +2679,7 @@ void test_each_runtime_and_maintenance_stage_fails_without_hidden_retry() {
     }
     const OperationResult baseline =
         completeJob(baselineDevice, baselineBus, procedure.request, baselineNow,
-                    20000, requestId++);
+                    20000, requestId++, UINT8_MAX);
     TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::SUCCEEDED),
                       static_cast<uint8_t>(baseline.outcome));
     const size_t transferCount = operationCalls(baselineBus);
@@ -3009,6 +3035,706 @@ void test_helper_boundaries_and_extreme_float_inputs() {
                     static_cast<uint8_t>(frcMax.outcome));
 }
 
+void test_terminal_phases_identify_pending_responses_and_wake_verification() {
+  struct CancelCase {
+    OperationRequest request;
+    uint8_t callbacks;
+    OperationPhase phase;
+  };
+  const CancelCase waits[] = {
+      {OperationRequest::make(OperationKind::SINGLE_SHOT), 2U,
+       OperationPhase::READ_READY_RESPONSE},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT), 4U,
+       OperationPhase::READ_RESPONSE},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY), 2U,
+       OperationPhase::READ_READY_RESPONSE},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY), 4U,
+       OperationPhase::READ_RESPONSE},
+      {OperationRequest::make(OperationKind::REINIT), 2U,
+       OperationPhase::READ_VERIFY_RESPONSE},
+      {OperationRequest::factoryReset(), 2U,
+       OperationPhase::READ_VERIFY_RESPONSE}};
+  uint32_t requestId = 10500U;
+  for (const CancelCase& item : waits) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs, requestId++);
+    resetOperationTrace(bus);
+    const OperationId id = startJob(device, item.request, nowMs, nowMs + 10000U,
+                                    requestId++);
+    const PollResult pending = driveUntilCallbacks(device, bus, nowMs, item.callbacks);
+    TEST_ASSERT_EQUAL_UINT32(nowMs + 1U, pending.nextDueMs);
+    const size_t before = bus.calls;
+    const PollResult early = pollChecked(device, bus, nowMs, UINT8_MAX);
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    TEST_ASSERT_EQUAL_UINT32(pending.nextDueMs, early.nextDueMs);
+    TEST_ASSERT_TRUE(device.cancel(id, nowMs).ok());
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.phase),
+                      static_cast<uint8_t>(result.finalPhase));
+  }
+
+  struct FailureCase {
+    OperationKind kind;
+    uint8_t callback;
+    OperationPhase phase;
+  };
+  const FailureCase failures[] = {
+      {OperationKind::SINGLE_SHOT, 3U, OperationPhase::READ_READY_RESPONSE},
+      {OperationKind::SINGLE_SHOT, 5U, OperationPhase::READ_RESPONSE},
+      {OperationKind::REINIT, 3U, OperationPhase::READ_VERIFY_RESPONSE},
+      {OperationKind::REINIT, 5U, OperationPhase::READ_VERIFY_RESPONSE},
+      {OperationKind::WAKE_UP, 2U, OperationPhase::SEND_READ_COMMAND},
+      {OperationKind::WAKE_UP, 3U, OperationPhase::READ_RESPONSE},
+      {OperationKind::WAKE_UP, 4U, OperationPhase::SEND_VERIFY_COMMAND},
+      {OperationKind::WAKE_UP, 5U, OperationPhase::READ_VERIFY_RESPONSE}};
+  for (const FailureCase& item : failures) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs, requestId++);
+    if (item.kind == OperationKind::WAKE_UP) {
+      TEST_ASSERT_TRUE(completeJob(
+          device, bus, OperationRequest::make(OperationKind::POWER_DOWN),
+          nowMs, 100U, requestId++).status.ok());
+    }
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, item.callback, TransferCode::BUS_ERROR,
+                      TransferDisposition::NO_EFFECT);
+    const OperationId id = startJob(device, OperationRequest::make(item.kind),
+                                    nowMs, nowMs + 10000U, requestId++);
+    driveUntilTerminal(device, bus, nowMs);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_BUS),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.phase),
+                      static_cast<uint8_t>(result.finalPhase));
+    TEST_ASSERT_EQUAL_UINT8(item.callback, result.callbacksUsed);
+  }
+}
+
+void test_cancel_before_mutation_preserves_periodic_session_and_attachment() {
+  for (uint8_t cancelAfter = 1U; cancelAfter <= 3U; ++cancelAfter) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    TEST_ASSERT_TRUE(completeJob(
+        device, bus, OperationRequest::make(OperationKind::START_PERIODIC),
+        nowMs, 100U, 10600U).status.ok());
+    resetOperationTrace(bus);
+    const OperationId id = startJob(
+        device, OperationRequest::make(OperationKind::FETCH_SAMPLE),
+        nowMs, nowMs + 100U, 10601U);
+    driveUntilCallbacks(device, bus, nowMs, cancelAfter);
+    const size_t before = bus.calls;
+    TEST_ASSERT_TRUE(device.cancel(id, nowMs).ok());
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_FALSE(result.reconciliationRequired);
+    TEST_ASSERT_TRUE(device.isAttached());
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::PERIODIC),
+                      static_cast<uint8_t>(result.operatingMode));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(ModelMode::PERIODIC),
+                      static_cast<uint8_t>(bus.mode));
+    TEST_ASSERT_TRUE(completeJob(
+        device, bus, OperationRequest::make(OperationKind::FETCH_SAMPLE),
+        nowMs, 100U, 10602U).status.ok());
+    TEST_ASSERT_EQUAL_UINT32(0U,
+                             countCommand(bus, before, cmd::CMD_STOP_PERIODIC_MEASUREMENT));
+  }
+
+  for (uint8_t cancelAfter = 1U; cancelAfter <= 2U; ++cancelAfter) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    resetOperationTrace(bus);
+    const OperationId id = startJob(device, OperationRequest::setSensorAltitudeM(123U),
+                                    nowMs, nowMs + 100U, 10610U);
+    driveUntilCallbacks(device, bus, nowMs, cancelAfter);
+    TEST_ASSERT_TRUE(device.cancel(id, nowMs).ok());
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_FALSE(result.reconciliationRequired);
+    TEST_ASSERT_TRUE(device.isAttached());
+    TEST_ASSERT_EQUAL_UINT16(0U, bus.sensorAltitudeM);
+    TEST_ASSERT_EQUAL_HEX16(0U, device.configurationSnapshot().dirtyMask);
+    TEST_ASSERT_EQUAL_UINT32(0U, countCommand(bus, bus.operationCallBase,
+                                            cmd::CMD_SET_SENSOR_ALTITUDE));
+  }
+}
+
+void test_later_callback_timestamp_does_not_advance_owner_clock_watermark() {
+  for (uint8_t completionAction = 0U; completionAction < 3U; ++completionAction) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    resetOperationTrace(bus);
+    const uint32_t sampledOwnerMs = nowMs;
+    const uint32_t completedMs = sampledOwnerMs + 7U;
+    faultRelativeCall(bus, 1U, TransferCode::OK, TransferDisposition::COMPLETE,
+                      true, false, completedMs);
+    const OperationId id = startJob(
+        device, OperationRequest::make(OperationKind::READ_DATA_READY),
+        sampledOwnerMs, sampledOwnerMs + 100U, 10700U + completionAction);
+    const PollResult sent = pollChecked(device, bus, sampledOwnerMs);
+    TEST_ASSERT_EQUAL_UINT32(completedMs + 1U, sent.nextDueMs);
+    TEST_ASSERT_EQUAL_UINT32(completedMs, device.healthSnapshot().lastTransferOkMs);
+    const size_t before = bus.calls;
+    const PollResult repeated = pollChecked(device, bus, sampledOwnerMs, UINT8_MAX);
+    TEST_ASSERT_TRUE(repeated.status.inProgress());
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    TEST_ASSERT_EQUAL_UINT32(completedMs + 1U, repeated.nextDueMs);
+
+    if (completionAction == 0U) {
+      nowMs = completedMs + 1U;
+      driveUntilTerminal(device, bus, nowMs);
+      TEST_ASSERT_TRUE(takeTerminal(device, id).status.ok());
+    } else {
+      if (completionAction == 1U) {
+        TEST_ASSERT_TRUE(device.cancel(id, sampledOwnerMs).ok());
+      } else {
+        device.end();
+      }
+      TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+      const OperationResult result = takeTerminal(device, id);
+      TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::CANCELLED),
+                        static_cast<uint8_t>(result.outcome));
+      TEST_ASSERT_EQUAL_UINT32(sampledOwnerMs, result.completedMs);
+    }
+  }
+}
+
+void test_idle_and_retained_result_polls_observe_clock_across_long_uptime() {
+  for (uint8_t retainResult = 0U; retainResult < 2U; ++retainResult) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    resetOperationTrace(bus);
+    const OperationId id = startJob(
+        device, OperationRequest::make(OperationKind::READ_DATA_READY),
+        nowMs, nowMs + 100U, 10800U);
+    driveUntilTerminal(device, bus, nowMs);
+    TEST_ASSERT_TRUE(device.runtimeSnapshot().nextSafeCommandValid);
+    if (retainResult == 0U) {
+      TEST_ASSERT_TRUE(takeTerminal(device, id).status.ok());
+    }
+    const size_t before = bus.calls;
+    ++nowMs;
+    (void)pollChecked(device, bus, nowMs, UINT8_MAX);
+    TEST_ASSERT_FALSE(device.runtimeSnapshot().nextSafeCommandValid);
+    for (uint8_t observation = 0U; observation < 4U; ++observation) {
+      // Each observation is < 2^31 ms apart; total elapsed time crosses wrap.
+      nowMs += 0x70000000U;
+      const PollResult poll = pollChecked(device, bus, nowMs, UINT8_MAX);
+      TEST_ASSERT_TRUE(poll.status.ok());
+      TEST_ASSERT_EQUAL(static_cast<uint8_t>(retainResult != 0U
+                                                ? OperationState::RESULT_PENDING
+                                                : OperationState::IDLE),
+                        static_cast<uint8_t>(poll.state));
+    }
+    TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    if (retainResult != 0U) {
+      TEST_ASSERT_TRUE(takeTerminal(device, id).status.ok());
+    }
+    TEST_ASSERT_TRUE(completeJob(
+        device, bus, OperationRequest::make(OperationKind::READ_DATA_READY),
+        nowMs, 100U, 10801U).status.ok());
+  }
+}
+
+void test_cancel_keeps_spacing_after_late_setting_preread_completion() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs);
+  resetOperationTrace(bus);
+  const uint32_t completedMs = nowMs + 8U;
+  faultRelativeCall(bus, 2U, TransferCode::OK, TransferDisposition::COMPLETE,
+                    false, true, completedMs);
+  const OperationId id = startJob(device, OperationRequest::setSensorAltitudeM(123U),
+                                  nowMs, nowMs + 100U, 10810U);
+  driveUntilCallbacks(device, bus, nowMs, 2U);
+  TEST_ASSERT_TRUE(nowMs < completedMs);
+  TEST_ASSERT_EQUAL_UINT32(completedMs + 1U,
+                           device.runtimeSnapshot().nextSafeCommandMs);
+  const size_t before = bus.calls;
+  TEST_ASSERT_TRUE(device.cancel(id, nowMs).ok());
+  TEST_ASSERT_FALSE(takeTerminal(device, id).reconciliationRequired);
+  TEST_ASSERT_EQUAL_UINT32(completedMs + 1U,
+                           device.runtimeSnapshot().nextSafeCommandMs);
+  OperationId rejected = {};
+  assertNoIoStatus(device.start(OperationRequest::make(OperationKind::READ_DATA_READY),
+                                OperationOptions{10811U, completedMs,
+                                                 completedMs + 100U}, rejected),
+                   bus, before, Err::BUSY);
+}
+
+void test_setting_deadline_has_same_reconciliation_in_poll_and_callback() {
+  for (uint8_t expireInCallback = 0U; expireInCallback < 2U; ++expireInCallback) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    resetOperationTrace(bus);
+    const uint32_t deadlineMs = nowMs + 100U;
+    faultRelativeCall(bus, 4U, TransferCode::OK, TransferDisposition::COMPLETE,
+                      true, false, deadlineMs - (expireInCallback == 0U ? 1U : 0U));
+    const OperationId id = startJob(device, OperationRequest::setSensorAltitudeM(123U),
+                                    nowMs, deadlineMs, 10900U + expireInCallback);
+    if (expireInCallback == 0U) {
+      driveUntilCallbacks(device, bus, nowMs, 4U);
+      const size_t before = bus.calls;
+      (void)pollChecked(device, bus, deadlineMs, UINT8_MAX);
+      TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+    } else {
+      driveUntilTerminal(device, bus, nowMs);
+    }
+    const OperationResult result = takeTerminal(device, id);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationOutcome::TIMED_OUT),
+                      static_cast<uint8_t>(result.outcome));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(EffectState::ACKNOWLEDGED),
+                      static_cast<uint8_t>(result.effect));
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+    TEST_ASSERT_FALSE(device.isAttached());
+    const uint16_t mask = configurationFieldMask(ConfigurationField::SENSOR_ALTITUDE);
+    TEST_ASSERT_EQUAL_HEX16(mask, result.value.configuration.dirtyMask & mask);
+    TEST_ASSERT_EQUAL_HEX16(0U, result.value.configuration.verifiedMask & mask);
+    TEST_ASSERT_EQUAL_UINT32(4U, operationCalls(bus));
+  }
+}
+
+void test_late_and_ambiguous_commands_retain_full_sensor_settle_windows() {
+  enum class Preparation : uint8_t { UNATTACHED, IDLE, PERIODIC, POWER_DOWN, DIRTY };
+  struct Case {
+    OperationRequest request;
+    Preparation preparation;
+    uint8_t callback;
+    uint32_t settleMs;
+  };
+  const Case cases[] = {
+      {OperationRequest::make(OperationKind::ATTACH), Preparation::UNATTACHED, 1U, 30U},
+      {OperationRequest::make(OperationKind::ATTACH), Preparation::UNATTACHED, 2U, 500U},
+      {OperationRequest::make(OperationKind::STOP_PERIODIC), Preparation::PERIODIC, 1U, 500U},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT), Preparation::IDLE, 1U, 5000U},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY), Preparation::IDLE, 1U, 50U},
+      {OperationRequest::make(OperationKind::SELF_TEST), Preparation::IDLE, 1U, 10000U},
+      {OperationRequest::forcedRecalibration(400U), Preparation::IDLE, 1U, 400U},
+      {OperationRequest::persistSettings(), Preparation::DIRTY, 1U, 800U},
+      {OperationRequest::factoryReset(), Preparation::IDLE, 1U, 1200U},
+      {OperationRequest::make(OperationKind::REINIT), Preparation::IDLE, 1U, 30U},
+      {OperationRequest::make(OperationKind::WAKE_UP), Preparation::POWER_DOWN, 1U, 30U}};
+  uint32_t requestId = 11000U;
+  for (const Case& item : cases) {
+    const bool wake = item.request.kind == OperationKind::WAKE_UP ||
+                      (item.request.kind == OperationKind::ATTACH && item.callback == 1U);
+    for (uint8_t ambiguity = 0U; ambiguity < 2U; ++ambiguity) {
+      ModelTransport bus;
+      Device device;
+      bindDevice(device, bus);
+      uint32_t nowMs = 10U;
+      if (item.preparation != Preparation::UNATTACHED) {
+        attachDevice(device, bus, nowMs, requestId++);
+      }
+      if (item.preparation == Preparation::PERIODIC) {
+        TEST_ASSERT_TRUE(completeJob(
+            device, bus, OperationRequest::make(OperationKind::START_PERIODIC),
+            nowMs, 100U, requestId++).status.ok());
+      } else if (item.preparation == Preparation::POWER_DOWN) {
+        TEST_ASSERT_TRUE(completeJob(
+            device, bus, OperationRequest::make(OperationKind::POWER_DOWN),
+            nowMs, 100U, requestId++).status.ok());
+      } else if (item.preparation == Preparation::DIRTY) {
+        TEST_ASSERT_TRUE(completeJob(device, bus, OperationRequest::setSensorAltitudeM(123U),
+                                     nowMs, 100U, requestId++).status.ok());
+      }
+      resetOperationTrace(bus);
+      const uint32_t deadlineMs = nowMs + 1000U;
+      const TransferCode code = ambiguity != 0U ? TransferCode::TIMEOUT
+                                  : wake ? TransferCode::NACK : TransferCode::OK;
+      const TransferDisposition disposition = ambiguity != 0U || wake
+                                                  ? TransferDisposition::INDETERMINATE
+                                                  : TransferDisposition::COMPLETE;
+      faultRelativeCall(bus, item.callback, code, disposition, true, false, deadlineMs);
+      const OperationId id = startJob(device, item.request, nowMs, deadlineMs, requestId++);
+      driveUntilTerminal(device, bus, nowMs);
+      const OperationResult result = takeTerminal(device, id);
+      TEST_ASSERT_FALSE(result.status.ok());
+      TEST_ASSERT_EQUAL_UINT8(item.callback, result.callbacksUsed);
+      const uint32_t safeMs = deadlineMs + item.settleMs;
+      TEST_ASSERT_TRUE(device.runtimeSnapshot().nextSafeCommandValid);
+      TEST_ASSERT_EQUAL_UINT32(safeMs, device.runtimeSnapshot().nextSafeCommandMs);
+      const size_t before = bus.calls;
+      OperationId rejected = {};
+      assertNoIoStatus(device.start(OperationRequest::make(OperationKind::ATTACH),
+                                    OperationOptions{requestId++, safeMs - 1U,
+                                                     safeMs + 5000U}, rejected),
+                       bus, before, Err::BUSY);
+      const OperationId next = startJob(device, OperationRequest::make(OperationKind::ATTACH),
+                                        safeMs, safeMs + 5000U, requestId++);
+      TEST_ASSERT_EQUAL_UINT32(before, bus.calls);
+      TEST_ASSERT_TRUE(device.cancel(next, safeMs).ok());
+      (void)takeTerminal(device, next);
+    }
+  }
+}
+
+void test_reset_dirty_evidence_clears_only_after_acknowledged_settle() {
+  const OperationRequest requests[] = {
+      OperationRequest::make(OperationKind::REINIT), OperationRequest::factoryReset()};
+  for (const OperationRequest& request : requests) {
+    for (uint8_t stopStage = 0U; stopStage < 3U; ++stopStage) {
+      ModelTransport bus;
+      Device device;
+      bindDevice(device, bus);
+      uint32_t nowMs = 10U;
+      attachDevice(device, bus, nowMs);
+      TEST_ASSERT_TRUE(completeJob(device, bus, OperationRequest::setSensorAltitudeM(123U),
+                                   nowMs, 100U, 11100U).status.ok());
+      const uint16_t dirtyMask = device.configurationSnapshot().dirtyMask;
+      TEST_ASSERT_NOT_EQUAL_HEX16(0U, dirtyMask);
+      resetOperationTrace(bus);
+      if (stopStage != 1U) {
+        faultRelativeCall(bus, stopStage == 0U ? 1U : 2U, TransferCode::BUS_ERROR,
+                          TransferDisposition::NO_EFFECT);
+      }
+      const OperationId id = startJob(device, request, nowMs, nowMs + 5000U,
+                                      11101U + stopStage);
+      if (stopStage == 0U) {
+        driveUntilTerminal(device, bus, nowMs);
+      } else {
+        const PollResult sent = driveUntilCallbacks(device, bus, nowMs, 1U);
+        TEST_ASSERT_EQUAL_HEX16(dirtyMask, device.configurationSnapshot().dirtyMask);
+        nowMs = sent.nextDueMs - 1U;
+        (void)pollChecked(device, bus, nowMs, UINT8_MAX);
+        TEST_ASSERT_EQUAL_HEX16(dirtyMask, device.configurationSnapshot().dirtyMask);
+        if (stopStage == 1U) {
+          TEST_ASSERT_TRUE(device.cancel(id, nowMs).ok());
+        } else {
+          ++nowMs;
+          driveUntilTerminal(device, bus, nowMs);
+        }
+      }
+      const OperationResult result = takeTerminal(device, id);
+      const uint16_t expectedDirty = stopStage == 2U ? 0U : dirtyMask;
+      TEST_ASSERT_EQUAL_HEX16(expectedDirty, device.configurationSnapshot().dirtyMask);
+      TEST_ASSERT_EQUAL_HEX16(expectedDirty, result.value.configuration.dirtyMask);
+      if (stopStage == 2U && request.kind == OperationKind::REINIT) {
+        attachDevice(device, bus, nowMs);
+        const OperationResult persisted = completeJob(
+            device, bus, OperationRequest::persistSettings(), nowMs, 1000U, 11110U);
+        TEST_ASSERT_TRUE(persisted.status.ok());
+        TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+        TEST_ASSERT_EQUAL_UINT32(0U, bus.persistWrites);
+      }
+    }
+  }
+}
+
+void test_failed_reinit_verification_keeps_persistence_uncertainty() {
+  ModelTransport bus;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs);
+  TEST_ASSERT_TRUE(completeJob(device, bus, OperationRequest::setSensorAltitudeM(123U),
+                               nowMs, 100U, 11200U).status.ok());
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 1U, TransferCode::TIMEOUT, TransferDisposition::INDETERMINATE, true);
+  OperationId id = startJob(device, OperationRequest::persistSettings(), nowMs,
+                            nowMs + 1000U, 11201U);
+  driveUntilTerminal(device, bus, nowMs);
+  TEST_ASSERT_TRUE(takeTerminal(device, id).value.configuration.persistenceIndeterminate);
+  attachDevice(device, bus, nowMs);
+  resetOperationTrace(bus);
+  faultRelativeCall(bus, 2U, TransferCode::BUS_ERROR, TransferDisposition::NO_EFFECT);
+  id = startJob(device, OperationRequest::make(OperationKind::REINIT), nowMs,
+                nowMs + 100U, 11202U);
+  driveUntilTerminal(device, bus, nowMs);
+  const OperationResult failed = takeTerminal(device, id);
+  TEST_ASSERT_EQUAL_HEX16(0U, failed.value.configuration.dirtyMask);
+  TEST_ASSERT_TRUE(failed.value.configuration.persistenceIndeterminate);
+  attachDevice(device, bus, nowMs);
+  const OperationResult blocked = completeJob(
+      device, bus, OperationRequest::persistSettings(), nowMs, 1000U, 11203U);
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::INDETERMINATE),
+                    static_cast<uint8_t>(blocked.status.code));
+  TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+  TEST_ASSERT_TRUE(completeJob(
+      device, bus, OperationRequest::make(OperationKind::REINIT), nowMs,
+      100U, 11204U).status.ok());
+  TEST_ASSERT_FALSE(device.configurationSnapshot().persistenceIndeterminate);
+}
+
+void test_non_strict_variant_admission_matches_datasheet_command_groups() {
+  struct VariantCase {
+    uint16_t word;
+    SensorVariant variant;
+  };
+  const VariantCase variants[] = {
+      {0x0440U, SensorVariant::SCD40},
+      {0x5441U, SensorVariant::SCD43}};
+  const OperationRequest restricted[] = {
+      OperationRequest::make(OperationKind::SINGLE_SHOT),
+      OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY),
+      OperationRequest::make(OperationKind::READ_ASC_INITIAL_PERIOD),
+      OperationRequest::setAscInitialPeriodHours(48U),
+      OperationRequest::make(OperationKind::READ_ASC_STANDARD_PERIOD),
+      OperationRequest::setAscStandardPeriodHours(160U),
+      OperationRequest::make(OperationKind::POWER_DOWN),
+      OperationRequest::make(OperationKind::WAKE_UP)};
+
+  uint32_t requestId = 10000U;
+  for (const VariantCase& item : variants) {
+    ModelTransport bus;
+    bus.variantWord = item.word;
+    Config config = makeConfig(bus);
+    config.strictVariantCheck = false;
+    Device device;
+    TEST_ASSERT_TRUE(device.begin(config).ok());
+    uint32_t nowMs = 10U;
+    const OperationResult attached = completeJob(
+        device, bus, OperationRequest::make(OperationKind::ATTACH), nowMs,
+        5000U, requestId++);
+    TEST_ASSERT_TRUE(attached.status.ok());
+    TEST_ASSERT_TRUE(device.isAttached());
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(item.variant),
+                      static_cast<uint8_t>(device.identity().variant));
+
+    const OperationResult lowPower = completeJob(
+        device, bus, OperationRequest::make(OperationKind::START_LOW_POWER_PERIODIC),
+        nowMs, 100U, requestId++);
+    TEST_ASSERT_TRUE(lowPower.status.ok());
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperatingMode::LOW_POWER_PERIODIC),
+                      static_cast<uint8_t>(device.runtimeSnapshot().operatingMode));
+    TEST_ASSERT_TRUE(completeJob(
+        device, bus, OperationRequest::make(OperationKind::STOP_PERIODIC),
+        nowMs, 1000U, requestId++).status.ok());
+    const OperationResult target = completeJob(
+        device, bus, OperationRequest::make(OperationKind::READ_ASC_TARGET),
+        nowMs, 100U, requestId++);
+    TEST_ASSERT_TRUE(target.status.ok());
+    TEST_ASSERT_EQUAL_UINT32(400U, target.value.value);
+    TEST_ASSERT_TRUE(completeJob(device, bus, OperationRequest::setAscTargetPpm(500U),
+                                 nowMs, 100U, requestId++).status.ok());
+    TEST_ASSERT_EQUAL_UINT16(500U, bus.ascTarget);
+
+    for (const OperationRequest& request : restricted) {
+      if (item.variant == SensorVariant::SCD40) {
+        const size_t before = bus.calls;
+        OperationId id = {};
+        assertNoIoStatus(device.start(request,
+                                      OperationOptions{requestId++, nowMs,
+                                                       nowMs + 10000U}, id),
+                         bus, before, Err::UNSUPPORTED);
+      } else {
+        TEST_ASSERT_TRUE(completeJob(device, bus, request, nowMs, 10000U,
+                                     requestId++).status.ok());
+      }
+    }
+  }
+}
+
+void test_execution_waits_match_numeric_datasheet_boundaries() {
+  enum class Preparation : uint8_t { IDLE, PERIODIC, POWER_DOWN, DIRTY };
+  struct WaitCase {
+    OperationRequest request;
+    Preparation preparation;
+    uint16_t command;
+    uint32_t waitMs;
+    uint16_t followingCommand;
+    bool completesAtBoundary;
+  };
+  // Literal durations and commands are independent of CommandTable.h:
+  // Sensirion SCD4x datasheet v1.7, Table 9 (April 2025).
+  const WaitCase cases[] = {
+      {OperationRequest::make(OperationKind::STOP_PERIODIC), Preparation::PERIODIC,
+       0x3F86U, 500U, 0U, true},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT), Preparation::IDLE,
+       0x219DU, 5000U, 0xE4B8U, false},
+      {OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY), Preparation::IDLE,
+       0x2196U, 50U, 0xE4B8U, false},
+      {OperationRequest::forcedRecalibration(400U), Preparation::IDLE,
+       0x362FU, 400U, 0U, true},
+      {OperationRequest::persistSettings(), Preparation::DIRTY,
+       0x3615U, 800U, 0U, true},
+      {OperationRequest::factoryReset(), Preparation::IDLE,
+       0x3632U, 1200U, 0x3682U, false},
+      {OperationRequest::make(OperationKind::SELF_TEST), Preparation::IDLE,
+       0x3639U, 10000U, 0U, true},
+      {OperationRequest::make(OperationKind::REINIT), Preparation::IDLE,
+       0x3646U, 30U, 0x3682U, false},
+      {OperationRequest::make(OperationKind::POWER_DOWN), Preparation::IDLE,
+       0x36E0U, 1U, 0U, true},
+      {OperationRequest::make(OperationKind::WAKE_UP), Preparation::POWER_DOWN,
+       0x36F6U, 30U, 0x3682U, false}};
+
+  uint32_t requestId = 10100U;
+  for (const WaitCase& item : cases) {
+    ModelTransport bus;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs, requestId++);
+    if (item.preparation == Preparation::PERIODIC) {
+      TEST_ASSERT_TRUE(completeJob(
+          device, bus, OperationRequest::make(OperationKind::START_PERIODIC),
+          nowMs, 100U, requestId++).status.ok());
+    } else if (item.preparation == Preparation::POWER_DOWN) {
+      TEST_ASSERT_TRUE(completeJob(
+          device, bus, OperationRequest::make(OperationKind::POWER_DOWN),
+          nowMs, 100U, requestId++).status.ok());
+    } else if (item.preparation == Preparation::DIRTY) {
+      TEST_ASSERT_TRUE(completeJob(
+          device, bus, OperationRequest::setTemperatureOffsetMilliC(4000),
+          nowMs, 100U, requestId++).status.ok());
+    }
+
+    resetOperationTrace(bus);
+    const OperationId id = startJob(device, item.request, nowMs,
+                                    nowMs + item.waitMs + 1000U, requestId++);
+    const PollResult sent = pollChecked(device, bus, nowMs, UINT8_MAX);
+    TEST_ASSERT_EQUAL_UINT32(1U, operationCalls(bus));
+    TEST_ASSERT_EQUAL_HEX16(item.command, bus.trace[bus.operationCallBase].command);
+    const uint32_t dueMs = nowMs + item.waitMs;
+    TEST_ASSERT_EQUAL_UINT32(dueMs, sent.nextDueMs);
+    TEST_ASSERT_EQUAL_UINT32(dueMs, device.runtimeSnapshot().nextSafeCommandMs);
+    const PollResult early = pollChecked(device, bus, dueMs - 1U, UINT8_MAX);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(OperationState::ACTIVE),
+                      static_cast<uint8_t>(early.state));
+    TEST_ASSERT_EQUAL_UINT32(1U, operationCalls(bus));
+    TEST_ASSERT_EQUAL_UINT32(dueMs, early.nextDueMs);
+
+    nowMs = dueMs;
+    const PollResult due = pollChecked(device, bus, nowMs, UINT8_MAX);
+    TEST_ASSERT_EQUAL(item.completesAtBoundary,
+                      due.state == OperationState::RESULT_PENDING);
+    if (operationCalls(bus) > 1U) {
+      TEST_ASSERT_EQUAL_HEX16(item.followingCommand,
+                              bus.trace[bus.operationCallBase + 1U].command);
+    }
+    if (!item.completesAtBoundary) {
+      TEST_ASSERT_EQUAL_UINT32(2U, operationCalls(bus));
+      driveUntilTerminal(device, bus, nowMs, UINT8_MAX);
+    }
+    TEST_ASSERT_TRUE(takeTerminal(device, id).status.ok());
+  }
+}
+
+void test_diagnostic_reads_return_only_crc_verified_requested_words() {
+  for (uint8_t count = 1U; count <= 3U; ++count) {
+    ModelTransport bus;
+    bus.diagnosticWordCount = count;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    const OperationResult result = completeJob(
+        device, bus, OperationRequest::diagnosticReadWords(0x1234U, count),
+        nowMs, 100U, 10200U + count);
+    TEST_ASSERT_TRUE(result.status.ok());
+    TEST_ASSERT_EQUAL_UINT8(count, result.value.wordCount);
+    TEST_ASSERT_EQUAL_HEX16_ARRAY(bus.diagnosticWords, result.value.rawWords, count);
+    for (uint8_t i = count; i < 3U; ++i) {
+      TEST_ASSERT_EQUAL_HEX16(0U, result.value.rawWords[i]);
+    }
+    TEST_ASSERT_TRUE(result.reconciliationRequired);
+  }
+
+  for (uint8_t corruptWord = 0U; corruptWord < 3U; ++corruptWord) {
+    ModelTransport bus;
+    bus.diagnosticWordCount = 3U;
+    Device device;
+    bindDevice(device, bus);
+    uint32_t nowMs = 10U;
+    attachDevice(device, bus, nowMs);
+    bus.badCrc = true;
+    bus.badCrcWord = corruptWord;
+    const OperationResult result = completeJob(
+        device, bus, OperationRequest::diagnosticReadWords(0x1234U, 3U),
+        nowMs, 100U, 10210U + corruptWord);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::CRC_MISMATCH),
+                      static_cast<uint8_t>(result.status.code));
+    TEST_ASSERT_EQUAL_UINT8(0U, result.value.wordCount);
+    const uint16_t empty[3] = {};
+    TEST_ASSERT_EQUAL_HEX16_ARRAY(empty, result.value.rawWords, 3U);
+  }
+}
+
+void test_zero_offline_threshold_preserves_failure_health_and_recovery() {
+  ModelTransport bus;
+  Config config = makeConfig(bus);
+  config.offlineThreshold = 0U;
+  Device device;
+  TEST_ASSERT_TRUE(device.begin(config).ok());
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs);
+  const uint32_t failuresBefore = device.healthSnapshot().totalTransferFailures;
+  for (uint32_t i = 1U; i <= 5U; ++i) {
+    resetOperationTrace(bus);
+    faultRelativeCall(bus, 1U, TransferCode::TIMEOUT, TransferDisposition::NO_EFFECT);
+    const OperationId id = startJob(
+        device, OperationRequest::make(OperationKind::READ_DATA_READY), nowMs,
+        nowMs + 100U, 10300U + i);
+    driveUntilTerminal(device, bus, nowMs);
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(Err::I2C_TIMEOUT),
+                      static_cast<uint8_t>(takeTerminal(device, id).status.code));
+    const HealthSnapshot health = device.healthSnapshot();
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::DEGRADED),
+                      static_cast<uint8_t>(health.state));
+    TEST_ASSERT_EQUAL_UINT32(i, health.consecutiveTransferFailures);
+    TEST_ASSERT_EQUAL_UINT32(failuresBefore + i, health.totalTransferFailures);
+    advanceToNextSafe(device, nowMs);
+  }
+  TEST_ASSERT_TRUE(completeJob(
+      device, bus, OperationRequest::make(OperationKind::READ_DATA_READY),
+      nowMs, 100U, 10310U).status.ok());
+  TEST_ASSERT_EQUAL(static_cast<uint8_t>(DriverState::READY),
+                    static_cast<uint8_t>(device.healthSnapshot().state));
+  TEST_ASSERT_EQUAL_UINT32(0U, device.healthSnapshot().consecutiveTransferFailures);
+}
+
+void test_rht_only_sample_does_not_publish_nonzero_co2_as_valid() {
+  ModelTransport bus;
+  bus.measurementWords[0] = 987U;
+  Device device;
+  bindDevice(device, bus);
+  uint32_t nowMs = 10U;
+  attachDevice(device, bus, nowMs);
+  const OperationResult full = completeJob(
+      device, bus, OperationRequest::make(OperationKind::SINGLE_SHOT),
+      nowMs, 6000U, 10400U);
+  TEST_ASSERT_TRUE(full.status.ok());
+  TEST_ASSERT_TRUE((full.value.sample.flags & SAMPLE_CO2_VALID) != 0U);
+  const OperationResult rht = completeJob(
+      device, bus, OperationRequest::make(OperationKind::SINGLE_SHOT_RHT_ONLY),
+      nowMs, 100U, 10401U);
+  TEST_ASSERT_TRUE(rht.status.ok());
+  const uint16_t expectedFlags = SAMPLE_TEMPERATURE_VALID | SAMPLE_HUMIDITY_VALID |
+                                 SAMPLE_FRESH;
+  TEST_ASSERT_EQUAL_HEX16(expectedFlags, rht.value.sample.flags);
+  TEST_ASSERT_EQUAL_INT32(Device::convertTemperatureMilliC(bus.measurementWords[1]),
+                          rht.value.sample.temperatureMilliC);
+  TEST_ASSERT_EQUAL_UINT32(Device::convertHumidityMilliPercent(bus.measurementWords[2]),
+                           rht.value.sample.humidityMilliPercent);
+  FixedSample cached = {};
+  TEST_ASSERT_TRUE(device.peekLatestSample(cached).ok());
+  TEST_ASSERT_EQUAL_HEX16(expectedFlags, cached.flags);
+  TEST_ASSERT_EQUAL_UINT32(rht.value.sample.sequence, cached.sequence);
+}
+
 void test_cli_diagnostic_workflows_are_bounded_and_deterministic() {
   scd41_cli::DiagnosticWorkflow workflow;
   TEST_ASSERT_FALSE(workflow.begin(
@@ -3127,6 +3853,20 @@ int main(int, char**) {
   RUN_TEST(test_end_is_zero_io_and_cancels_active_work);
   RUN_TEST(test_rebind_uses_only_new_transport_context);
   RUN_TEST(test_helper_boundaries_and_extreme_float_inputs);
+  RUN_TEST(test_terminal_phases_identify_pending_responses_and_wake_verification);
+  RUN_TEST(test_cancel_before_mutation_preserves_periodic_session_and_attachment);
+  RUN_TEST(test_later_callback_timestamp_does_not_advance_owner_clock_watermark);
+  RUN_TEST(test_idle_and_retained_result_polls_observe_clock_across_long_uptime);
+  RUN_TEST(test_cancel_keeps_spacing_after_late_setting_preread_completion);
+  RUN_TEST(test_setting_deadline_has_same_reconciliation_in_poll_and_callback);
+  RUN_TEST(test_late_and_ambiguous_commands_retain_full_sensor_settle_windows);
+  RUN_TEST(test_reset_dirty_evidence_clears_only_after_acknowledged_settle);
+  RUN_TEST(test_failed_reinit_verification_keeps_persistence_uncertainty);
+  RUN_TEST(test_non_strict_variant_admission_matches_datasheet_command_groups);
+  RUN_TEST(test_execution_waits_match_numeric_datasheet_boundaries);
+  RUN_TEST(test_diagnostic_reads_return_only_crc_verified_requested_words);
+  RUN_TEST(test_zero_offline_threshold_preserves_failure_health_and_recovery);
+  RUN_TEST(test_rht_only_sample_does_not_publish_nonzero_co2_as_valid);
   RUN_TEST(test_cli_diagnostic_workflows_are_bounded_and_deterministic);
   return UNITY_END();
 }

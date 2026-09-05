@@ -335,11 +335,11 @@ enum class OperationPhase : uint8_t {
   SEND_COMMAND,        ///< Primary command or payload attempt.
   WAIT_EXECUTION,      ///< Zero-I2C sensor execution wait.
   SEND_READY_COMMAND,  ///< Data-ready command write.
-  READ_READY_RESPONSE, ///< Data-ready response read.
+  READ_READY_RESPONSE, ///< Pending data-ready response; reads when due.
   SEND_READ_COMMAND,   ///< Command write preceding a separate response read.
-  READ_RESPONSE,       ///< Primary CRC-protected response read.
+  READ_RESPONSE,       ///< Pending primary CRC-protected response; reads when due.
   SEND_VERIFY_COMMAND, ///< Readback command used to verify a mutation.
-  READ_VERIFY_RESPONSE,///< Verification response read.
+  READ_VERIFY_RESPONSE,///< Pending verification response; reads when due.
   READ_DEFERRED_RESULT ///< Deferred maintenance/conversion result read.
 };
 
@@ -761,13 +761,16 @@ public:
   /// @return `OK`, `INVALID_CONFIG`, or `BUSY` when a slot/result is retained.
   Status begin(const Config& config);
   /// Advance the one active operation.
+  /// Records owner time and expires elapsed safety gates even while idle or
+  /// retaining a result. Observe time at intervals shorter than 2^31 ms.
   /// @param nowMs Current time in the owner's wrapping 32-bit clock domain.
   /// @param maxCallbacks Hard callback-attempt budget for this call; zero is valid.
   /// @return Current slot state, progress status, callback use, and next due time.
   PollResult poll(uint32_t nowMs, uint8_t maxCallbacks = 1);
   /// Compatibility executor; delegates to `poll(nowMs, 1)`.
   /// @param nowMs Current time in the owner clock domain.
-  /// @return The status from the delegated poll.
+  /// @return Only the delegated status; use `poll()` for slot state and next
+  ///     due time. Successful idle and result-pending calls both return `OK`.
   Status tick(uint32_t nowMs);
   /// Start one typed operation without invoking transport.
   /// @param request Fixed typed operation request.
@@ -777,9 +780,12 @@ public:
   Status start(const OperationRequest& request, const OperationOptions& options,
                OperationId& assignedId);
   /// Cancel active host work without I2C and retain one terminal result.
+  /// Pure reads preserve attachment and measurement mode. An attempted
+  /// effectful write requires reconciliation; existing sensor waits remain.
   /// @param id Exact active operation identity.
-  /// @param nowMs Cancellation time in the owner clock domain.
-  /// @return `OK` when cancelled, or an identity/state/clock error.
+  /// @param nowMs Owner cancellation time; clamped to the last accepted owner
+  ///     timestamp if it moves backwards, so clock errors cannot block cancel.
+  /// @return `OK` when cancelled, or an identity/state error.
   Status cancel(const OperationId& id, uint32_t nowMs);
   /// Copy and consume the matching terminal result exactly once. Performs no I2C.
   /// @param expectedId Exact retained operation identity.

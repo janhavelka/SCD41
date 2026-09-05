@@ -130,6 +130,10 @@ active.
 
 `cancel(id, nowMs)` cancels host-side future work without I2C and retains a
 `CANCELLED` result. It cannot undo bytes already accepted by the sensor.
+Cancelling a managed read preserves attachment and measurement mode; effectful
+work still requires reconciliation. A backward cancellation time is clamped to
+the last accepted owner time. Continue polling while idle or retaining results,
+with owner time observations less than 2^31 ms apart (about 24.8 days).
 `end()` also performs no I2C; active work becomes a retained cancelled result
 timestamped with the last owner time accepted by the driver.
 `tick(nowMs)` is a narrow compatibility executor equivalent to a one-callback
@@ -239,6 +243,9 @@ override and never creates persistence work. Persistence is rejected while any
 dirty field is unverified. Persistence is a zero-write success when this
 instance has no known unpersisted field. That no-op does not read or prove
 EEPROM contents after a fresh bind.
+After an acknowledged reinit or factory reset finishes its sensor settle,
+discarded runtime changes no longer count as dirty, even if identity verification
+then fails. EEPROM uncertainty still requires successful reset/reinit verification.
 
 `READ_SENSOR_VARIANT` refreshes the decoded family and raw variant word without
 rereading the serial number. When the family still agrees, the already verified

@@ -119,7 +119,7 @@ NACKed. Preserve that uncertainty.
 | ESP-IDF result | Library result | Disposition |
 | --- | --- | --- |
 | `ESP_OK` | `TransferCode::OK` | `COMPLETE` |
-| `ESP_FAIL`, `ESP_ERR_INVALID_STATE`, `ESP_ERR_NOT_FOUND` or `ESP_ERR_INVALID_RESPONSE` | `NACK` | `NO_EFFECT` only when no effectful payload could have been accepted; otherwise `INDETERMINATE` |
+| `ESP_ERR_INVALID_RESPONSE` | `NACK` | `NO_EFFECT` for read-only requests; otherwise `INDETERMINATE` |
 | `ESP_ERR_TIMEOUT` | `TIMEOUT` | `INDETERMINATE` after controller start |
 | Invalid local context/request | `FAILED` | `NOT_STARTED` |
 | Other controller error | `BUS_ERROR` | `INDETERMINATE` |
@@ -128,12 +128,19 @@ Set `bytesTransferred` to the full requested byte count only on `ESP_OK` unless
 the platform gives a trustworthy partial count. Store the raw `esp_err_t` in
 `detail`.
 
-Mapping an unacknowledged transaction to `NACK` is mandatory, not cosmetic: the
-SCD4x never acknowledges `wake_up` (datasheet section 3.11.4), so an adapter
-that reports it as `BUS_ERROR` makes `ATTACH` fail permanently. `i2c_master_probe`
-reports a missing device as `ESP_ERR_NOT_FOUND`, but `i2c_master_transmit` and
-`i2c_master_receive` surface an unacknowledged transaction as `ESP_ERR_INVALID_STATE`
-or `ESP_FAIL` depending on the ESP-IDF version, so map all of them.
+The example targets synchronous ESP-IDF v6.0.1 transfers. Its
+[transmit API](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/include/driver/i2c_master.h)
+documents `ESP_ERR_INVALID_RESPONSE` for a NACK, and the
+[shared synchronous driver path](https://github.com/espressif/esp-idf/blob/v6.0.1/components/esp_driver_i2c/i2c_master.c)
+uses that value for transmit, receive, and transmit-receive. `ESP_ERR_NOT_FOUND`
+is the missing-device result of `i2c_master_probe`, which this adapter does not
+call. Generic `ESP_FAIL` and `ESP_ERR_INVALID_STATE` results are not proof of a
+NACK and map to `BUS_ERROR`. Verify the error contract before porting the adapter
+to another ESP-IDF version; do not broaden expected-NACK handling to generic
+controller or queue failures.
+
+The SCD4x does not acknowledge `wake_up` (datasheet section 3.11.4), so genuine
+NACKs must reach the core as `NACK` for attach reconciliation to proceed.
 
 Wake-up and attach stop reconciliation do not require fabricated address/data
 NACK codes. The driver marks only those transfers with

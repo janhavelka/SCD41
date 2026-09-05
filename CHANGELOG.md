@@ -9,6 +9,38 @@ All notable changes are documented here. The format follows
 The manifest is staged at `1.3.2` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
 
+### Audit verification and corrections
+
+#### Fixed
+
+- Restricted ESP-IDF NACK mapping to the pinned synchronous driver's
+  `ESP_ERR_INVALID_RESPONSE`; queue/controller failures retain `BUS_ERROR`
+  instead of being accepted as expected wake NACKs.
+- Owner clock observations now advance during idle/result-pending polling and
+  expire old safety gates. Callback completion timestamps no longer replace
+  the owner watermark; backward cancellation times clamp to that watermark.
+- Cancelled managed reads preserve attachment and periodic mode. Cancellation
+  retains the transfer-owned safety gate without shortening it.
+- Unified deadline failure handling and retained full sensor settle windows
+  for acknowledged or ambiguous commands even when a callback crosses the
+  deadline or fails before the normal wait phase.
+- Corrected measurement/maintenance wait diagnostics using existing response
+  phases and aligned wake identity phase names with attach.
+- Clear discarded runtime dirty settings after acknowledged reinit/reset
+  settles, even if identity verification fails; preserve EEPROM uncertainty
+  until successful reconciliation.
+- Package checks now reject prefixed empty forbidden directories and require
+  the fixed-name ESP-IDF component wrapper.
+
+#### Changed
+
+- Added public-contract regressions for the audit's clock, cancellation,
+  timeout, phase, variant, timing, diagnostic payload, health, and sample flag
+  cases. Removed duplicate wait/gate and persistence-failure bookkeeping.
+- Recorded every audit finding, corrections to the report, retained
+  compatibility decisions, and actual validation in
+  `docs/reports/CODE_AUDIT_RESOLUTION.md`.
+
 ### Audit pass
 
 #### Fixed

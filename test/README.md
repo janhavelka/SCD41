@@ -22,6 +22,14 @@ Coverage includes:
   EEPROM uncertainty, and passive health channels
 - contradictory transport results, completion-clock failures, and command
   spacing after failed attempts
+- response-phase diagnostics, read-only cancellation, repeated sampled owner
+  time, idle/result-retention wrap, and cancellation safety-gate preservation
+- numeric sensor execution waits and full settle retention after late or
+  ambiguous writes, with one deadline reconciliation policy
+- non-strict SCD40/SCD43 admission, diagnostic word counts and CRC-atomic
+  payloads, zero offline threshold, and RHT-only CO2 validity
+- reset/reinit dirty-state timing and persistence uncertainty after failed
+  identity verification
 - fixed-width/copy/size checks for owner-boundary value types
 
 Prefer public API assertions. Do not expose private driver state to make a test
