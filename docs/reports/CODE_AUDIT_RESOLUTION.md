@@ -149,6 +149,28 @@ $env:PLATFORMIO_OFFLINE = '1'
 ```
 
 There is no local native ESP-IDF installation or usable local sanitizer
-alternative. CI validation for these and the exact target will be recorded
-after the implementation push. Physical SCD41/HIL validation was not performed;
-that release gate remains open and no release tag was created.
+alternative. The repository's CI completed these checks successfully after the
+implementation push, as recorded below. Physical SCD41/HIL validation was not
+performed; that release gate remains open and no release tag was created.
+
+## Completed CI evidence
+
+Implementation commit: `98dd2f9aeaca0211c8569c0eeac74db60171a73d`.
+[CI run 33987486144](https://github.com/janhavelka/SCD41/actions/runs/33987486144)
+completed successfully on 2026-09-05. All seven jobs passed:
+
+| Job | Evidence |
+| --- | --- |
+| Native tests | 67/67 passed; job log records `67 test cases: 67 succeeded`. |
+| Native undefined-behavior sanitizer, same job | 67/67 passed on Linux with the configured sanitizer flags; the second suite summary also records `67 test cases: 67 succeeded`. This closes the validation gap caused by the local missing runtime. |
+| Arduino ESP32-S3 | `platformio-build (esp32s3dev)` succeeded. |
+| Arduino ESP32-S2 | `platformio-build (esp32s2dev)` succeeded. |
+| Native ESP-IDF ESP32-S2 | Pinned ESP-IDF v6.0.1 build log records `Successfully created ESP32-S2 image` and `Project build complete` at 19:36:27 UTC. |
+| Native ESP-IDF ESP32-S3 | Pinned ESP-IDF v6.0.1 build log records `Successfully created ESP32-S3 image` and `Project build complete` at 19:36:36 UTC. |
+| Package | Package content and clean package-consumer checks passed; `Exact target package consumer PASSED` for the pinned TunnelMonitor-node board contract `b708f511964db6c51e949e99c67820476f00f9c7`. This closes the local shared-package build gap. |
+| Guards | Exact Doxygen 1.17.0, synchronized metadata, core/repository/CLI guards, HIL parser/dry-run checks and generated-file/whitespace checks all passed. |
+
+The two native suites share one job; the table separates their evidence. CI job
+logs were fetched and inspected, not inferred from source compatibility. The
+subsequent report-only commit records these results without changing the tested
+implementation. All source changes and this report are synchronized on `main`.
