@@ -301,7 +301,10 @@ especially after a fresh bind.
 
 An acknowledged `REINIT` or `FACTORY_RESET` clears discarded runtime dirty
 fields once its sensor execution wait finishes, before identity verification.
-A failed verification does not restore those discarded changes. Existing
+A cancellation or deadline at or after that wait also discards obsolete dirty
+fields, even when it bypasses the normal wait phase. Termination before the
+wait finishes retains dirty evidence. A failed verification does not restore
+those discarded changes. Existing
 `persistenceIndeterminate` remains set until reset/reinit verification succeeds.
 
 ## Retry and recovery policy

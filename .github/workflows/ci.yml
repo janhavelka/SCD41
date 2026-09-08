@@ -60,6 +60,9 @@ jobs:
       - name: Test HIL runner parser helpers
         run: python tools/test_scd41_hil_runner.py
 
+      - name: Test package and CLI guard regressions
+        run: python tools/test_audit_guards.py
+
       - name: Exercise HIL runner no-hardware entry points
         run: |
           python tools/scd41_hil_runner.py --parser-self-test

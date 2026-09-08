@@ -3478,6 +3478,79 @@ void test_failed_reinit_verification_keeps_persistence_uncertainty() {
   TEST_ASSERT_FALSE(device.configurationSnapshot().persistenceIndeterminate);
 }
 
+void test_reset_terminal_paths_clear_dirty_only_after_acknowledged_settle() {
+  struct ResetCase {
+    OperationRequest request;
+    uint32_t settleMs;
+  };
+  const ResetCase cases[] = {
+      {OperationRequest::make(OperationKind::REINIT), 30U},
+      {OperationRequest::factoryReset(), 1200U}};
+  uint32_t requestId = 11300U;
+  for (const ResetCase& item : cases) {
+    for (uint8_t wrap = 0U; wrap < 2U; ++wrap) {
+      for (uint8_t cancel = 0U; cancel < 2U; ++cancel) {
+        for (uint8_t boundary = 0U; boundary < 3U; ++boundary) {
+          ModelTransport bus;
+          Device device;
+          bindDevice(device, bus);
+          uint32_t nowMs = wrap != 0U ? UINT32_MAX - 1000U : 10U;
+          attachDevice(device, bus, nowMs, requestId++);
+          TEST_ASSERT_TRUE(completeJob(
+              device, bus, OperationRequest::setSensorAltitudeM(123U),
+              nowMs, 100U, requestId++).status.ok());
+          const uint16_t dirtyMask = device.configurationSnapshot().dirtyMask;
+          TEST_ASSERT_NOT_EQUAL_HEX16(0U, dirtyMask);
+          if (wrap != 0U) {
+            nowMs = UINT32_MAX - 10U;
+          }
+          const uint32_t settleAtMs = nowMs + item.settleMs;
+          const uint32_t terminalMs = settleAtMs - 1U + boundary;
+          const uint32_t deadlineMs = cancel != 0U ? settleAtMs + 100U : terminalMs;
+          resetOperationTrace(bus);
+          const OperationId id = startJob(device, item.request, nowMs,
+                                          deadlineMs, requestId++);
+          const PollResult sent = pollChecked(device, bus, nowMs, UINT8_MAX);
+          TEST_ASSERT_EQUAL_UINT32(1U, operationCalls(bus));
+          TEST_ASSERT_EQUAL_UINT32(settleAtMs, sent.nextDueMs);
+          TEST_ASSERT_EQUAL_HEX16(dirtyMask, device.configurationSnapshot().dirtyMask);
+          const bool persistenceUncertain =
+              device.configurationSnapshot().persistenceIndeterminate;
+
+          if (cancel != 0U) {
+            TEST_ASSERT_TRUE(device.cancel(id, terminalMs).ok());
+          } else {
+            (void)pollChecked(device, bus, terminalMs, UINT8_MAX);
+          }
+          const OperationResult result = takeTerminal(device, id);
+          TEST_ASSERT_EQUAL(static_cast<uint8_t>(cancel != 0U
+                                                    ? OperationOutcome::CANCELLED
+                                                    : OperationOutcome::TIMED_OUT),
+                            static_cast<uint8_t>(result.outcome));
+          TEST_ASSERT_EQUAL_UINT32(1U, operationCalls(bus));
+          TEST_ASSERT_TRUE(result.reconciliationRequired);
+          TEST_ASSERT_FALSE(device.isAttached());
+          const uint16_t expectedDirty = boundary == 0U ? dirtyMask : 0U;
+          TEST_ASSERT_EQUAL_HEX16(expectedDirty, device.configurationSnapshot().dirtyMask);
+          TEST_ASSERT_EQUAL_HEX16(expectedDirty, result.value.configuration.dirtyMask);
+          TEST_ASSERT_EQUAL(persistenceUncertain,
+                            result.value.configuration.persistenceIndeterminate);
+
+          if (boundary != 0U && item.request.kind == OperationKind::REINIT) {
+            nowMs = terminalMs;
+            attachDevice(device, bus, nowMs, requestId++);
+            TEST_ASSERT_TRUE(completeJob(
+                device, bus, OperationRequest::persistSettings(), nowMs,
+                1000U, requestId++).status.ok());
+            TEST_ASSERT_EQUAL_UINT32(0U, operationCalls(bus));
+            TEST_ASSERT_EQUAL_UINT32(0U, bus.persistWrites);
+          }
+        }
+      }
+    }
+  }
+}
+
 void test_non_strict_variant_admission_matches_datasheet_command_groups() {
   struct VariantCase {
     uint16_t word;
@@ -3862,6 +3935,7 @@ int main(int, char**) {
   RUN_TEST(test_late_and_ambiguous_commands_retain_full_sensor_settle_windows);
   RUN_TEST(test_reset_dirty_evidence_clears_only_after_acknowledged_settle);
   RUN_TEST(test_failed_reinit_verification_keeps_persistence_uncertainty);
+  RUN_TEST(test_reset_terminal_paths_clear_dirty_only_after_acknowledged_settle);
   RUN_TEST(test_non_strict_variant_admission_matches_datasheet_command_groups);
   RUN_TEST(test_execution_waits_match_numeric_datasheet_boundaries);
   RUN_TEST(test_diagnostic_reads_return_only_crc_verified_requested_words);

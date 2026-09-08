@@ -1,5 +1,117 @@
 # Code audit verification and resolution
 
+## Revalidation on 2026-09-08
+
+Starting revision: `d491c8ed1a15c597a95a7f9fe163a7ae16082731` on `main`.
+The checkout was clean. Fetching all remotes confirmed `origin/main` was the
+newest intended branch, and the fast-forward sync was already current.
+
+The requested [docs/CODE_AUDIT.md input at that revision](https://github.com/janhavelka/SCD41/blob/d491c8ed1a15c597a95a7f9fe163a7ae16082731/docs/CODE_AUDIT.md)
+reintroduced the August working audit after the September 5 fixes below.
+Its 53-test baseline and open-proposal status were therefore stale: the actual
+starting tree passed 67 host tests. Three independent reviews covered core
+findings, protocol/test coverage, and adapters/tooling; the primary review
+checked their evidence, the remaining claims, integration documentation, and
+final changes. Every published finding was rechecked, including claims marked
+already fixed and rejected. The unpublished candidate findings cannot be
+reconstructed from aggregate counts.
+
+### Current finding dispositions
+
+The detailed per-item tables in the earlier review below remain applicable,
+with these current conclusions and additions:
+
+| Audit section | Current verification and decision |
+| --- | --- |
+| What is already correct | All 30 command definitions, CRC framing/vector, exact temperature/humidity conversions, offset and pressure encodings, and operation bounds remain correct against the bundled v1.7 datasheet. Periodic-start 1 ms spacing is driver policy, not a datasheet command-duration entry. |
+| Fixed item 1: IDF attach | Refuted for pinned IDF v6.0.1. Rechecked its official synchronous driver and public header: only `ESP_ERR_INVALID_RESPONSE` proves NACK. The current adapter correctly leaves generic errors as bus failures; the audit's broad mapping must not be restored. |
+| Fixed item 2: variant gate | Correct and retained. Tests cover SCD40 family-wide low-power/ASC target access and SCD41/SCD43 section 3.11 admission. This does not broaden the supported product claim. |
+| Fixed item 3: HIL matching | Correct normalization retained. Added a durable test of actual `run_step()` with mixed-case ANSI-colored output split across chunks, including a split escape/token. It also checks raw transcript preservation and failure-token rejection. |
+| Fixed item 4: package paths | Existing top-level and prefixed-directory fixes are correct. Added archive-level regressions for 72 forbidden-path variants, allowed lookalikes, root prefixes, and the required fixed-name IDF wrapper. |
+| Fixed item 5: other changes | Rechecked generation zero-skip/admission-only advancement, conservative Wire write/read errors, scanner timeout restoration, zero diagnostic command rejection, deleted unused stubs, native warning flags, raw-source checks, timing zero-tolerance policy, metadata regeneration before CI diff, derived limits, removed dead helper, and fixed component name. All remain valid. The earlier documentation corrections also hold. |
+| P1: phase names | Already resolved with existing response phases and aligned wake identity labels. Retain this smaller solution; no new public enum or routing state is needed. |
+| P2: read cancellation | Already resolved by `effectfulWriteAttempted`. Preserve attachment and periodic mode for managed reads; retain conservative mutation/diagnostic handling. |
+| P3: completion and owner time | Already resolved: callback completion governs scheduling in the same clock domain without replacing owner observations. Cancellation clamps backward owner time. Retained. |
+| P4: long idle | Already resolved by observing idle/result-pending polls and expiring old safety gates. The less-than-half-range observation contract remains documented. |
+| P5: deadline policy | Already centralized in `_finishOperationFailure()`. Full sensor settling is retained in the transfer executor even when the callback crosses its deadline. Retained. |
+| P6: seven coverage gaps | Existing tests cover final phases, non-strict variants, literal sensor waits, diagnostic payload/CRC, zero offline threshold and RHT-only validity. Legitimate paths run with large callback budgets and bounded completion; no public API can force corrupted internal runaway state to hit the 32-transition cap. No artificial production hook was added. |
+| P7: reset/reinit dirty state | The prior normal-wait fix was incomplete at cancellation/deadline boundaries. Applied the small terminal-path correction described below and added 24 boundary scenarios. |
+| P7: duplicate persistence assignment | Already removed from the failure step. Factory reset's necessary in-progress uncertainty remains. |
+| P7: unused constants / `tick()` | Retain documented source compatibility. Unused within this repository does not mean unused by consumers; `tick()` is explicitly status-only. Removing them or adding deprecation noise has no current correctness benefit. |
+| P7: CODEOWNERS | Refuted again against GitHub's official documentation: eligible account-associated email addresses are allowed. Account association/write access cannot be proven from the local file. |
+| P7: duplicate CLI checker tables | They still agree. Added a parity assertion for tables and parser output; no shared parser abstraction is needed. |
+| Deliberately not changed: five claims | Cached `SAMPLE_FRESH` remains record provenance; safety validity denotes a meaningful timestamp; end/begin result backpressure is intentional; rebind preserves owner/epoch continuity; `NOT_STARTED` remains observable through operation results without counting as a hardware failure. Retained. |
+
+Primary-source adapter and CODEOWNERS links are retained in the corresponding
+earlier sections. Arduino's separate error vocabulary was also checked against
+the pinned [Wire implementation](https://github.com/espressif/arduino-esp32/blob/3.3.11/libraries/Wire/src/Wire.cpp)
+and [I2C HAL](https://github.com/espressif/arduino-esp32/blob/3.3.11/cores/esp32/esp32-hal-i2c-ng.c).
+Source verification is not a physical ACK/NACK measurement.
+
+### Changes made in this pass
+
+An acknowledged `REINIT` or `FACTORY_RESET` could physically finish its 30 ms
+or 1200 ms wait, but cancellation or deadline expiry could publish the result
+before `_stepMaintenance()` cleared obsolete dirty fields. This was an
+uncovered continuation of P7, not a reason to replace the operation engine.
+
+Nine lines in the existing `_finishOperation()` now discard those fields when
+the active operation is an acknowledged reset/reinit in `WAIT_EXECUTION` and
+the terminal timestamp has reached its due time. The update happens before
+copying configuration into the terminal result. It adds no state, allocation,
+API, retry, or I2C. Earlier termination and failed/ambiguous command writes
+retain their evidence, and `persistenceIndeterminate` still requires successful
+verification. Clearing at command acknowledgement, as the audit proposed,
+would still be premature.
+
+The new public-contract regression spans both commands, cancellation/expiry,
+one millisecond before/exactly at/one millisecond after settling, and normal
+and wrapping time: 24 scenarios. It checks cache/result agreement, retained
+uncertainty, zero further callbacks and zero-write persistence after reinit
+reconciliation. Against the original implementation the regression failed
+with `dirtyMask` expected `0x0000`, actual `0x0002`; the previous 67 tests
+passed. With the fix all 68 tests pass.
+
+Tooling regressions now run in CI through the existing HIL test script and
+`tools/test_audit_guards.py`. Five mutation checks confirmed detection of the
+old dotted-path normalizer, forbidden-path matcher, missing required wrapper,
+missing raw-source check, and missing live ANSI normalization.
+
+README, the owner guide, test coverage notes, and changelog now describe the
+boundary behavior. The documentation index now acknowledges this explicitly
+requested report. Removed the superseded working input after dispositioning
+its findings, as its own instructions requested; it remains recoverable from
+the linked git revision. This also fixes its stale relative PDF link, which
+failed the starting repository-hygiene check. The manifest remains staged at
+`1.3.2`; no release tag is created.
+
+### Current validation
+
+| Check | Current local result |
+| --- | --- |
+| `.\scripts\pio.cmd test -e native` | Baseline 67/67 passed; new regression failed before the fix; final 68/68 passed. |
+| `.\scripts\pio.cmd test -e native_ubsan` | Cannot link: installed Windows GCC lacks `-lubsan`. Current Linux CI evidence is needed. |
+| `.\scripts\pio.cmd run -e esp32s3dev -e esp32s2dev` | Both passed with the existing `C:\pio` package directory and process-local `PLATFORMIO_OFFLINE=1`. An initial attempt using the longer user-profile package path failed while unpacking a framework header beyond Windows path limits; the existing short-path cache resolved it. No Core installation or machine setting change. |
+| `.\scripts\pio.cmd pkg pack . -o .pio/SCD41-reaudit-package.tar.gz` | Passed. |
+| Package content check and clean source/packed consumers | All passed, including host compile/link/run. |
+| `python tools/check_target_package_consumer.py .pio/SCD41-reaudit-package.tar.gz` | Local build failed when framework headers became unavailable in shared `C:\pio\packages`. The build selected Arduino 3.2.0; inspection after the failure found 3.3.11 at that same package path. This indicates concurrent package replacement; current isolated CI evidence is needed. |
+| Version check, regeneration, generated-file diff | Passed; all three generated tracked files remain unchanged. |
+| Core timing, repository hygiene, Arduino CLI, IDF example guards | All passed. |
+| `python tools/test_audit_guards.py` | Seven tests passed, including 72 forbidden archive-path scenarios. |
+| `python tools/test_scd41_hil_runner.py` | Passed, including the new live-reader test. |
+| HIL parser self-test and `--dry-run --port COM8` | Passed; dry-run output is under ignored `.pio/reaudit-hil-dry-run`. No serial hardware was opened. |
+| `doxygen Doxyfile` | Passed without warnings using installed Doxygen 1.13.2. CI pins 1.17.0. |
+| `git diff --check` | Passed. |
+
+Current CI results are recorded when completed.
+Physical hardware/HIL was not run; the physical release gate remains open.
+
+## Earlier review and recorded evidence (2026-09-05)
+
+The remainder records the preceding implementation and its validation. Its
+commit hashes, counts and environment notes describe that earlier run, not
+new runs on the current revision.
+
 Review date: 2026-09-05. Starting revision:
 `96e5233f6fd95e0393fe7567022905d365ab484e` on `main`.
 

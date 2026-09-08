@@ -2008,6 +2008,15 @@ void SCD41::_finishOperation(OperationOutcome outcome, EffectState effect,
   if (!_activeValid || _terminalValid) {
     return;
   }
+  if ((_active.request.kind == OperationKind::REINIT ||
+       _active.request.kind == OperationKind::FACTORY_RESET) &&
+      _active.phase == OperationPhase::WAIT_EXECUTION &&
+      _active.effect == EffectState::ACKNOWLEDGED &&
+      _timeReached(completedMs, _active.nextDueMs)) {
+    // Cancellation or expiry can bypass the wait step after the acknowledged
+    // reload/reset has settled. Discard obsolete dirty work in that case too.
+    _configuration.dirtyMask = 0U;
+  }
   if (_fieldFor(_active.request.kind) != ConfigurationField::NONE ||
       _active.request.kind == OperationKind::READ_CONFIGURATION ||
       _active.request.kind == OperationKind::PERSIST_SETTINGS ||

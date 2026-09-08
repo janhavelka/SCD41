@@ -4,10 +4,12 @@ from __future__ import annotations
 import builtins
 import contextlib
 import io
+import itertools
 import json
 import pathlib
 import sys
 import tempfile
+from unittest import mock
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -168,6 +170,48 @@ def test_step_pass_rejects_failure_tokens() -> None:
     )
 
 
+def test_live_step_matches_colored_chunks_and_keeps_raw_evidence() -> None:
+    class SerialChunks:
+        def __init__(self, chunks):
+            self.chunks = iter(chunks)
+            self.written = []
+            self.flushes = 0
+
+        def write(self, data):
+            self.written.append(data)
+
+        def flush(self):
+            self.flushes += 1
+
+        def read(self, size):
+            chunk = next(self.chunks, b"")
+            assert_true(len(chunk) <= size, "serial chunk respects requested size")
+            return chunk
+
+    step = hil.Step("attach", "begin", r"op=ATTACH outcome=SUCCEEDED", timeout_s=1)
+    for prefix, expected_status in (
+        (b"", "pass"),
+        (b"Status: \x1b[31mI2C_TIMEOUT\x1b[0m\n", "fail"),
+    ):
+        # Split both an ANSI escape and the matching token across reads. This
+        # exercises the live reader, not only the parser helper used by CI.
+        chunks = [prefix + b"op=\x1b[3", b"2mAtTaCh\x1b[0m outcome=\x1b[32mSUC",
+                  b"CEEDED\x1b[0m\n"]
+        serial = SerialChunks(chunks)
+        transcript = []
+        with mock.patch.object(hil.time, "monotonic", side_effect=itertools.count(0, 0.01)), \
+                mock.patch.object(hil.time, "sleep"):
+            result = hil.run_step(serial, step, 0.1, transcript)
+        raw_output = b"".join(chunks).decode("utf-8")
+        assert_true(result["matched"], "live matching strips ANSI and ignores case")
+        assert_equal(result["status"], expected_status, "live failure classification")
+        assert_equal(result["last_output"], raw_output, "result preserves raw output")
+        assert_equal("".join(transcript), "\n>>> begin\n" + raw_output,
+                     "transcript preserves raw serial evidence")
+        assert_equal(serial.written, [b"begin\n"], "one command is written")
+        assert_equal(serial.flushes, 1, "command is flushed once")
+
+
 def test_build_steps_timeout_override() -> None:
     args = hil.parse_args(["--dry-run", "--timeout-s", "3"])
     hil.validate_args(args)
@@ -259,6 +303,7 @@ def main() -> int:
         test_failure_token_classification,
         test_step_pattern_matching,
         test_step_pass_rejects_failure_tokens,
+        test_live_step_matches_colored_chunks_and_keeps_raw_evidence,
         test_build_steps_timeout_override,
         test_environment_metadata_distinguishes_clean_checkout,
         test_parser_self_test_mode,

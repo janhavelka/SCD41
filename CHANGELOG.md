@@ -9,6 +9,35 @@ All notable changes are documented here. The format follows
 The manifest is staged at `1.3.2` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
 
+### Audit revalidation (2026-09-08)
+
+#### Fixed
+
+- A cancelled or expired acknowledged reinit/factory reset now discards obsolete
+  runtime dirty settings when its sensor wait has already elapsed, even if the
+  terminal path bypasses the normal wait phase. Earlier termination and EEPROM
+  uncertainty remain conservative.
+
+#### Added
+
+- Regression coverage for reset/reinit cancellation and deadline boundaries,
+  including wrapping clocks, terminal snapshots, and zero-write persistence
+  after reconciliation.
+- Durable package/CLI guard regressions and live HIL matching tests for colored,
+  chunked output, with CI execution and checker-table parity assertions.
+
+#### Changed
+
+- Independently rechecked every published audit finding against current source;
+  updated `docs/reports/CODE_AUDIT_RESOLUTION.md` with current dispositions and
+  validation. Corrected the documentation index's claim that no report exists.
+
+#### Removed
+
+- The reintroduced, superseded `docs/CODE_AUDIT.md` working input, whose stale
+  root-relative datasheet link failed repository hygiene. Its original text
+  remains in git history and is linked from the resolution report.
+
 ### Audit verification and corrections
 
 #### Fixed

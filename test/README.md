@@ -28,8 +28,9 @@ Coverage includes:
   ambiguous writes, with one deadline reconciliation policy
 - non-strict SCD40/SCD43 admission, diagnostic word counts and CRC-atomic
   payloads, zero offline threshold, and RHT-only CO2 validity
-- reset/reinit dirty-state timing and persistence uncertainty after failed
-  identity verification
+- reset/reinit dirty-state timing, cancellation/deadline boundaries before,
+  at, and after settle (including clock wrap), and persistence uncertainty
+  after failed identity verification
 - fixed-width/copy/size checks for owner-boundary value types
 
 Prefer public API assertions. Do not expose private driver state to make a test

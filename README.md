@@ -245,7 +245,8 @@ instance has no known unpersisted field. That no-op does not read or prove
 EEPROM contents after a fresh bind.
 After an acknowledged reinit or factory reset finishes its sensor settle,
 discarded runtime changes no longer count as dirty, even if identity verification
-then fails. EEPROM uncertainty still requires successful reset/reinit verification.
+then fails or the owner cancels/expires the operation at or after that settle.
+EEPROM uncertainty still requires successful reset/reinit verification.
 
 `READ_SENSOR_VARIANT` refreshes the decoded family and raw variant word without
 rereading the serial number. When the family still agrees, the already verified
