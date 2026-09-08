@@ -90,11 +90,11 @@ failed the starting repository-hygiene check. The manifest remains staged at
 | Check | Current local result |
 | --- | --- |
 | `.\scripts\pio.cmd test -e native` | Baseline 67/67 passed; new regression failed before the fix; final 68/68 passed. |
-| `.\scripts\pio.cmd test -e native_ubsan` | Cannot link: installed Windows GCC lacks `-lubsan`. Current Linux CI evidence is needed. |
+| `.\scripts\pio.cmd test -e native_ubsan` | Cannot link locally: installed Windows GCC lacks `-lubsan`. Linux CI below passed. |
 | `.\scripts\pio.cmd run -e esp32s3dev -e esp32s2dev` | Both passed with the existing `C:\pio` package directory and process-local `PLATFORMIO_OFFLINE=1`. An initial attempt using the longer user-profile package path failed while unpacking a framework header beyond Windows path limits; the existing short-path cache resolved it. No Core installation or machine setting change. |
 | `.\scripts\pio.cmd pkg pack . -o .pio/SCD41-reaudit-package.tar.gz` | Passed. |
 | Package content check and clean source/packed consumers | All passed, including host compile/link/run. |
-| `python tools/check_target_package_consumer.py .pio/SCD41-reaudit-package.tar.gz` | Local build failed when framework headers became unavailable in shared `C:\pio\packages`. The build selected Arduino 3.2.0; inspection after the failure found 3.3.11 at that same package path. This indicates concurrent package replacement; current isolated CI evidence is needed. |
+| `python tools/check_target_package_consumer.py .pio/SCD41-reaudit-package.tar.gz` | Local build failed when framework headers became unavailable in shared `C:\pio\packages`. The build selected Arduino 3.2.0; inspection after the failure found 3.3.11 at that same package path. This indicates concurrent package replacement; isolated CI below passed. |
 | Version check, regeneration, generated-file diff | Passed; all three generated tracked files remain unchanged. |
 | Core timing, repository hygiene, Arduino CLI, IDF example guards | All passed. |
 | `python tools/test_audit_guards.py` | Seven tests passed, including 72 forbidden archive-path scenarios. |
@@ -103,8 +103,28 @@ failed the starting repository-hygiene check. The manifest remains staged at
 | `doxygen Doxyfile` | Passed without warnings using installed Doxygen 1.13.2. CI pins 1.17.0. |
 | `git diff --check` | Passed. |
 
-Current CI results are recorded when completed.
 Physical hardware/HIL was not run; the physical release gate remains open.
+
+### Current completed CI evidence
+
+Implementation commit: `21e60e9cde732efd209e278e227f12ee79bab5c6`.
+[CI run 34210160897](https://github.com/janhavelka/SCD41/actions/runs/34210160897)
+completed successfully on 2026-09-08. All seven jobs passed; the native and
+sanitizer suites share one job. Job logs were fetched and inspected.
+
+| Check | Evidence |
+| --- | --- |
+| Native public-contract tests | `68 test cases: 68 succeeded`, at 09:28:28 UTC. |
+| Native undefined-behavior sanitizer | `68 test cases: 68 succeeded`, at 09:28:30 UTC. This closes the local missing-runtime gap. |
+| Arduino ESP32-S3 and ESP32-S2 | Both `platformio-build` jobs succeeded. |
+| Native ESP-IDF ESP32-S3 | Pinned v6.0.1 build records image creation and `Project build complete` at 09:30:40 UTC. |
+| Native ESP-IDF ESP32-S2 | Pinned v6.0.1 build records image creation and `Project build complete` at 09:30:36 UTC. |
+| Package | Content and clean-consumer checks passed. `Exact target package consumer PASSED` at 09:29:15 UTC for board contract `b708f511964db6c51e949e99c67820476f00f9c7`, closing the local shared-package failure. |
+| Guards | Exact Doxygen 1.17.0, metadata synchronization, core/repository/CLI guards, both tooling test scripts, HIL parser/dry-run, and generated-file/whitespace checks all passed. |
+
+The follow-up documentation commit records these completed results without
+changing the tested implementation. It does not represent physical hardware
+validation or authorize a release tag.
 
 ## Earlier review and recorded evidence (2026-09-05)
 
