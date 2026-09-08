@@ -49,10 +49,21 @@ local rebuild is claimed for this follow-up.
 and both CLI guards pass. The latest starting-revision
 [CI run 34210534854](https://github.com/janhavelka/SCD41/actions/runs/34210534854)
 also passed all seven jobs, including the pinned native ESP-IDF builds. No
-starting-revision CI fix was needed. Follow-up build evidence is recorded after
-the corrections are pushed. The physical run remains blocked on identifying
-and documenting the connected fixture; no `Safe smoke passed`, fault, soak,
-shared-bus, or maintenance label is claimed.
+starting-revision CI fix was needed.
+
+The corrected implementation `ebcd1e4612986a03190d469313275299549a7fc6` passed
+all seven jobs in [CI run 34232930910](https://github.com/janhavelka/SCD41/actions/runs/34232930910).
+Inspected logs record 68/68 native and sanitizer test passes, all 16 HIL helper
+tests and seven guard regressions passing, both Arduino target builds, and the
+exact-target package consumer passing. Pinned native ESP-IDF v6.0.1 logs record
+`Project build complete` for S2 at 13:38:25 UTC and S3 at 13:38:29 UTC on
+2026-09-08. Thus the follow-up examples build in isolated CI despite the local
+cache/toolchain problem. The subsequent report-only commit records that
+completed evidence without changing the tested implementation.
+
+The physical run remains blocked on identifying and documenting the connected
+fixture; no `Safe smoke passed`, fault, soak, shared-bus, or maintenance label
+is claimed.
 
 ## Revalidation on 2026-09-08
 

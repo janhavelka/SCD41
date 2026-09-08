@@ -25,6 +25,10 @@ is created while physical HIL remains an open release gate.
 
 #### Validation
 
+- Follow-up implementation CI passed all seven jobs: 68/68 native and sanitizer
+  tests, 16 HIL helper tests, seven guard regressions, Arduino/native ESP-IDF
+  builds for S2/S3, and the exact-target package consumer. Evidence is recorded
+  in `docs/reports/CODE_AUDIT_RESOLUTION.md`.
 - Verdict remains `HIL not run`: no connected SCD41 transcript has been
   captured. Host/parser tests and CI builds do not promote a physical verdict.
 
