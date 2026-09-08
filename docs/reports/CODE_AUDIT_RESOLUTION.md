@@ -1,5 +1,59 @@
 # Code audit verification and resolution
 
+## Independent HIL follow-up (2026-09-08)
+
+Starting revision: `e4a1ea52fdfc4387b4da308642c7379df855a53b`, clean and
+synchronized with newest `origin/main`. The pasted review requests two real
+hardware confirmations. Both evidence gaps are valid; neither the earlier
+host tests nor successful firmware builds can close them.
+
+| Requested confirmation | Source review and current verdict |
+| --- | --- |
+| Live ANSI-normalized safe sequence | `read_until_match()` strips ANSI from accumulated serial chunks and `run_step()` matches case-insensitively. Live-reader host regressions pass. Physical verdict: `HIL not run`. |
+| Native ESP-IDF v6.0.1 attach with wake NACK | The adapter maps only `ESP_ERR_INVALID_RESPONSE` to NACK and preserves the original error detail. Successful CI builds do not demonstrate a physical wake/attach. Physical verdict: `HIL not run`. |
+
+The preflight review found an additional reproducible runner defect: its 8 s
+idle timeout expired during the safe selfcheck's 10 s silent self-test,
+despite that step's 25 s absolute timeout. Changed the existing default to
+15 s and added an actual `run_step()` test with a controlled clock and delayed
+serial output. Restoring 8 s makes the regression fail. Incomplete output
+still fails within the idle bound, and an explicit 3 s step deadline still
+wins. This is software evidence only.
+
+The final status matcher also used to stop at the runtime line, potentially
+omitting later health/error chunks from the only retained final observation.
+It now waits through complete health counters and the final error line; tests
+reject truncated output and classify errors that arrive in that last line.
+This exposed another false failure: the healthy counter `cancelled=0` matched
+the `CANCELLED` status token. The classifier now excludes exactly that zero
+counter while retaining nonzero cancellations and actual cancelled statuses.
+
+The adapter and core already retained raw IDF errors, but neither CLI printed
+`OperationResult::status.detail`. Both terminal result lines now include
+`detail=<signed decimal>` so a failed `ATTACH` can preserve the exact error in
+the transcript before anyone changes its mapping. Existing CLI guards require
+that detail field. No core or adapter mapping change was justified.
+
+Hardware preflight found two USB serial devices, COM11 and COM12. Their
+presence does not identify the wired SCD41 fixture. Board/port selection,
+SDA/SCL, pullups, supply, bulk capacitance, and bus-sharing details have been
+requested from the operator. The examples' GPIO8/GPIO9 and 400 kHz defaults
+are source settings, not measured fixture facts. No port was opened or flashed,
+and no hardware transcript, EEPROM write, or calibration change was produced.
+No local native ESP-IDF installation was found in PATH or standard locations;
+WSL and Docker are unavailable. A local Arduino build attempt failed on missing
+target compiler commands in the changing shared PlatformIO cache; no successful
+local rebuild is claimed for this follow-up.
+
+`--parser-self-test`, the HIL test script, seven package/CLI regression tests,
+and both CLI guards pass. The latest starting-revision
+[CI run 34210534854](https://github.com/janhavelka/SCD41/actions/runs/34210534854)
+also passed all seven jobs, including the pinned native ESP-IDF builds. No
+starting-revision CI fix was needed. Follow-up build evidence is recorded after
+the corrections are pushed. The physical run remains blocked on identifying
+and documenting the connected fixture; no `Safe smoke passed`, fault, soak,
+shared-bus, or maintenance label is claimed.
+
 ## Revalidation on 2026-09-08
 
 Starting revision: `d491c8ed1a15c597a95a7f9fe163a7ae16082731` on `main`.

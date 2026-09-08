@@ -51,6 +51,7 @@ REQUIRED_OWNER_TOKENS = (
     "app_driver::errorName(status.code)",
     "app_driver::operationKindName(result.kind)",
     "app_driver::operationPhaseName(result.finalPhase)",
+    "static_cast<long>(result.status.detail)",
 )
 FORBIDDEN_DRIVER_CALLS = (
     ".tick(", ".probe(", ".recover(", ".readMeasurement(",

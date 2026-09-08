@@ -130,6 +130,13 @@ def test_failure_token_classification() -> None:
         ("ERROR_COUNT",),
         "nonzero stress error count is a failure",
     )
+    assert_equal(hil.classify_failure_tokens("health operation_fail=0 cancelled=0"), (),
+                 "zero cancellation counter is healthy telemetry")
+    for count in ("1", "01", "10"):
+        assert_equal(hil.classify_failure_tokens(f"health cancelled={count}"), ("CANCELLED",),
+                     "nonzero cancellation counter remains a failure")
+    assert_equal(hil.classify_failure_tokens("status=CANCELLED"), ("CANCELLED",),
+                 "cancelled operation remains a failure")
 
 
 def test_step_pattern_matching() -> None:
@@ -219,6 +226,100 @@ def test_build_steps_timeout_override() -> None:
     assert_true(all(step.timeout_s == 3 for step in steps), "timeout override applies to all steps")
 
 
+def test_live_selfcheck_allows_sensor_silence_and_keeps_timeouts_bounded() -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.now += seconds
+
+    class SelfcheckSerial:
+        def __init__(self, clock, completes):
+            self.clock = clock
+            self.completes = completes
+            self.started = 0.0
+            self.admission_pending = True
+
+        def write(self, data):
+            assert_equal(data, b"selfcheck\n", "selfcheck command")
+            self.started = self.clock.now
+
+        def flush(self):
+            pass
+
+        def read(self, size):
+            del size
+            if self.admission_pending:
+                self.admission_pending = False
+                return b"accepted op=SELF_TEST\n"
+            if self.completes and self.clock.now - self.started >= 10.0:
+                return b"workflow_summary name=selfcheck outcome=\x1b[32mPASS\x1b[0m\n"
+            return b""
+
+    default_idle = hil.parse_args([]).idle_timeout_s
+    safe_step = next(step for step in hil.SAFE_STEPS if step.command == "selfcheck")
+    cases = (
+        (safe_step, True, "pass", 10.0),
+        (safe_step, False, "fail", default_idle),
+        (hil.replace(safe_step, timeout_s=3.0), False, "fail", 3.0),
+    )
+    for step, completes, expected_status, expected_elapsed in cases:
+        clock = Clock()
+        with mock.patch.object(hil.time, "monotonic", clock.monotonic), \
+                mock.patch.object(hil.time, "sleep", clock.sleep):
+            result = hil.run_step(SelfcheckSerial(clock, completes), step, default_idle, [])
+        assert_equal(result["status"], expected_status, "silent selfcheck result")
+        assert_true(abs(result["elapsed_s"] - expected_elapsed) < 0.05,
+                    "live reader respects completion, idle and absolute deadlines")
+
+
+def test_live_final_status_reads_health_and_complete_error_line() -> None:
+    class SerialChunks:
+        def __init__(self, chunks):
+            self.chunks = iter(chunks)
+
+        def write(self, data):
+            assert_equal(data, b"status\n", "final status command")
+
+        def flush(self):
+            pass
+
+        def read(self, size):
+            chunk = next(self.chunks, b"")
+            assert_true(len(chunk) <= size, "serial chunk respects requested size")
+            return chunk
+
+    step = next(step for step in hil.SAFE_STEPS if step.name == "final driver health")
+    runtime = b"runtime bound=yes attached=yes state=\x1b[32mREADY\x1b[0m mode=IDLE\r\n"
+    counters = [b"slot state=IDLE operation=NONE\r\nhealth transfer_ok=90 transfer_fail=0 consecutive=0 expected_",
+                b"nack=3 protocol_fail=0 crc_fail=0 operation_ok=30 operation_fail=0 cancelled=0\r\n"]
+    errors = b"last_errors transfer=OK@0 protocol=OK@0 operation=OK@0 op=NONE request=0 generation=0"
+    cases = (
+        ([runtime, *counters, errors, b"\r", b"\n"], "pass", True),
+        ([runtime, *counters, errors.replace(b"transfer=OK", b"transfer=I2C_TIMEOUT"), b"\r\n"],
+         "fail", True),
+        ([runtime], "fail", False),
+        ([runtime, *counters, errors], "fail", False),
+    )
+    for chunks, expected_status, expected_match in cases:
+        transcript = []
+        with mock.patch.object(hil.time, "monotonic", side_effect=itertools.count(0, 0.01)), \
+                mock.patch.object(hil.time, "sleep"):
+            result = hil.run_step(SerialChunks(chunks), step, 0.1, transcript)
+        raw_output = b"".join(chunks).decode("utf-8")
+        assert_equal(result["status"], expected_status, "complete final health classification")
+        assert_equal(result["matched"], expected_match, "truncated final response cannot match")
+        assert_equal(result["last_output"], raw_output, "final result retains all health evidence")
+        assert_equal("".join(transcript), "\n>>> status\n" + raw_output,
+                     "final transcript retains all serial chunks")
+        if expected_status == "fail" and expected_match:
+            assert_equal(result["failure_tokens"], ["I2C_TIMEOUT"],
+                         "retained error in the last line is classified")
+
+
 def test_environment_metadata_distinguishes_clean_checkout() -> None:
     original_git_text = hil.git_text
     original_command_text = hil.command_text
@@ -305,6 +406,8 @@ def main() -> int:
         test_step_pass_rejects_failure_tokens,
         test_live_step_matches_colored_chunks_and_keeps_raw_evidence,
         test_build_steps_timeout_override,
+        test_live_selfcheck_allows_sensor_silence_and_keeps_timeouts_bounded,
+        test_live_final_status_reads_health_and_complete_error_line,
         test_environment_metadata_distinguishes_clean_checkout,
         test_parser_self_test_mode,
         test_dry_run_writes_not_run_summary_without_pyserial,

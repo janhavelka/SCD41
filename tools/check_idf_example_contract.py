@@ -49,6 +49,7 @@ REQUIRED_IDF_TOKENS = (
     "SCD41::effectStateName(result.effect)",
     "SCD41::sensorVariantName(result.value.identity.variant)",
     "SCD41::operationPhaseName(result.finalPhase)",
+    "static_cast<long>(result.status.detail)",
     "OperationRequest::diagnosticWriteCommand(command)",
     "OperationRequest::diagnosticWriteWord(command, word)",
     "OperationRequest::diagnosticReadWords(",

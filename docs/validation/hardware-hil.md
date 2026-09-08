@@ -48,6 +48,20 @@ PlatformIO version. `hil-results/` is ignored so dry runs and incomplete setup
 attempts do not pollute the checkout; retain only reviewed live evidence that a
 release gate actually requires.
 
+The default serial idle timeout is 15 s so `selfcheck` can finish its 10 s
+sensor self-test without output. Each step still has its own absolute timeout;
+an explicit shorter `--timeout-s` remains authoritative.
+The final status step waits for complete health counters and the `last_errors`
+line before closing serial. `cancelled=0` is healthy counter telemetry;
+nonzero cancellations and a `CANCELLED` operation status remain failures.
+
+Both CLIs include `detail=<signed decimal>` in terminal result lines. For an
+ESP-IDF transport failure this preserves the original `esp_err_t`. If `ATTACH`
+fails with `I2C_BUS`, retain that detail, the final phase, and the raw transcript
+before considering a mapping change. Do not infer the error code from its
+framework-neutral name. A successful IDF attach must be accompanied by the
+health record showing expected NACKs separately from transfer failures.
+
 ## Safe smoke sequence
 
 The default runner executes this sequence. It does not change calibration or

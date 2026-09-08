@@ -9,6 +9,25 @@ All notable changes are documented here. The format follows
 The manifest is staged at `1.3.2` for compatibility validation. No release tag
 is created while physical HIL remains an open release gate.
 
+### HIL readiness follow-up
+
+#### Fixed
+
+- Increased the HIL runner's default serial silence timeout from 8 s to 15 s
+  so the safe `selfcheck` can complete its 10 s sensor self-test. Regression
+  tests preserve bounded idle failures and shorter absolute step deadlines.
+- Final HIL status matching waits for the complete health and error lines,
+  including expected-NACK counters. Healthy `cancelled=0` telemetry no longer
+  causes a false `CANCELLED` failure; actual cancellations remain failures.
+- Both Arduino and native ESP-IDF CLI terminal results now print the retained
+  status detail, including the original `esp_err_t` on IDF transport failure.
+  The existing ESP-IDF NACK mapping remains unchanged.
+
+#### Validation
+
+- Verdict remains `HIL not run`: no connected SCD41 transcript has been
+  captured. Host/parser tests and CI builds do not promote a physical verdict.
+
 ### Audit revalidation (2026-09-08)
 
 #### Fixed

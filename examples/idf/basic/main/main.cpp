@@ -264,7 +264,7 @@ void printResult(const SCD41::OperationResult& result) {
                                      result.outcome == SCD41::OperationOutcome::CANCELLED)
                                         ? LOG_COLOR_YELLOW
                                         : LOG_COLOR_RED);
-  std::printf("result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
+  std::printf("result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s detail=%ld\n",
               static_cast<unsigned long>(result.id.requestId),
               static_cast<unsigned long>(result.id.generation),
               SCD41::operationKindName(result.kind), outcomeColor,
@@ -273,7 +273,8 @@ void printResult(const SCD41::OperationResult& result) {
               SCD41::effectStateName(result.effect),
               SCD41::errorName(result.status.code),
               static_cast<unsigned>(result.callbacksUsed),
-              result.reconciliationRequired ? "yes" : "no");
+              result.reconciliationRequired ? "yes" : "no",
+              static_cast<long>(result.status.detail));
   std::printf("timing started=%lu completed=%lu deadline=%lu phase=%s epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
               static_cast<unsigned long>(result.startedMs),
               static_cast<unsigned long>(result.completedMs),

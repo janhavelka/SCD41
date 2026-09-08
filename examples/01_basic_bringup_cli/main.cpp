@@ -83,7 +83,7 @@ void printResult(const app_driver::OperationResult& result) {
                                         ? LOG_COLOR_YELLOW
                                         : LOG_COLOR_RED);
   LOG_SERIAL.printf(
-      "result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s\n",
+      "result request=%lu generation=%lu op=%s outcome=%s%s%s effect=%s status=%s callbacks=%u reconcile=%s detail=%ld\n",
       static_cast<unsigned long>(result.id.requestId),
       static_cast<unsigned long>(result.id.generation),
       app_driver::operationKindName(result.kind),
@@ -93,7 +93,8 @@ void printResult(const app_driver::OperationResult& result) {
       app_driver::effectStateName(result.effect),
       app_driver::errorName(result.status.code),
       static_cast<unsigned>(result.callbacksUsed),
-      result.reconciliationRequired ? "yes" : "no");
+      result.reconciliationRequired ? "yes" : "no",
+      static_cast<long>(result.status.detail));
   LOG_SERIAL.printf(
       "timing started=%lu completed=%lu deadline=%lu phase=%s epoch=%lu mode=%s evidence=%s fields=0x%04X\n",
       static_cast<unsigned long>(result.startedMs),

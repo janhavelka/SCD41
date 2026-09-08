@@ -31,7 +31,9 @@ MINIMUM_SAFE_COMMANDS = (
     "status",
 )
 HEALTH_COMMAND_ALIASES = ("status", "health", "drv")
-DEFAULT_IDLE_TIMEOUT_S = 8.0
+# Safe selfcheck includes a 10-second sensor self-test without CLI heartbeats.
+# Allow that legitimate silent interval while retaining a bounded idle timeout.
+DEFAULT_IDLE_TIMEOUT_S = 15.0
 
 SERIAL_NUMBER_RE = re.compile(
     r"\bserial(?:_number)?\s*[:=]\s*(?:0x)?([0-9A-Fa-f]{12})\b",
@@ -41,7 +43,9 @@ FAILURE_TOKEN_RE = re.compile(
     r"\b("
     r"NOT_INITIALIZED|INVALID_CONFIG|INVALID_PARAM|RESULT_NOT_READY|STALE_RESULT|"
     r"CRC_MISMATCH|DEVICE_NOT_FOUND|OFFLINE|I2C_ERROR|I2C_NACK|I2C_TIMEOUT|"
-    r"I2C_BUS|I2C_SHORT_TRANSFER|COMMAND_FAILED|UNSUPPORTED|TIMEOUT|CANCELLED|"
+    # A zero-valued health counter is not a cancelled operation. Nonzero
+    # counters and standalone CANCELLED statuses must still fail the run.
+    r"I2C_BUS|I2C_SHORT_TRANSFER|COMMAND_FAILED|UNSUPPORTED|TIMEOUT|CANCELLED(?!\s*=\s*0\b)|"
     r"PARTIAL|INDETERMINATE|RECONCILIATION_REQUIRED|FAILED|FAILURE"
     r")\b",
     re.IGNORECASE,
@@ -89,7 +93,14 @@ SAFE_STEPS: tuple[Step, ...] = (
     Step("power down", "sleep", r"op=POWER_DOWN outcome=SUCCEEDED", timeout_s=12.0),
     Step("wake", "wake", r"op=WAKE_UP outcome=SUCCEEDED", timeout_s=12.0),
     Step("identity after wake", "identity", r"op=READ_IDENTITY outcome=SUCCEEDED.*serial=0x[0-9A-Fa-f]{12}", timeout_s=12.0),
-    Step("final driver health", "status", r"runtime bound=yes attached=yes state=READY", timeout_s=12.0),
+    # Read the full final response before closing serial: the runtime prefix
+    # can arrive before health counters and retained errors in later chunks.
+    Step("final driver health", "status",
+         r"runtime bound=yes attached=yes state=READY\b.*\n"
+         r"health transfer_ok=\d+ transfer_fail=\d+ consecutive=\d+ expected_nack=\d+ "
+         r"protocol_fail=\d+ crc_fail=\d+ operation_ok=\d+ operation_fail=\d+ cancelled=\d+\r?\n"
+         r"last_errors transfer=\S+ protocol=\S+ operation=\S+ op=\S+ request=\d+ generation=\d+\r?\n",
+         timeout_s=12.0),
 )
 
 
