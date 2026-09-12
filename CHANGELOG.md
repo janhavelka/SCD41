@@ -6,8 +6,10 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
-The manifest is staged at `1.3.2` for compatibility validation. No release tag
-is created while physical HIL remains an open release gate.
+No GitHub release has been published. All work below is Unreleased, including
+earlier development milestones. The manifest version is a staging identifier,
+not a published version or a commitment to the first release number. Physical
+HIL remains an open release gate.
 
 ### HIL readiness follow-up
 
@@ -162,7 +164,7 @@ is created while physical HIL remains an open release gate.
 - `Err::I2C_ERROR` is documented by what produces it; the five values the
   driver never returns are marked reserved.
 
-### Planned 1.3.2
+### Operation naming
 
 #### Changed
 
@@ -173,7 +175,7 @@ is created while physical HIL remains an open release gate.
 - Re-audited and retained the source-compatible `CRC_ERROR` alias and the
   domain-specific transfer-adapter names rather than adding parallel APIs.
 
-### Planned 1.3.1
+### Documentation and validation tooling
 
 #### Changed
 
@@ -191,7 +193,7 @@ is created while physical HIL remains an open release gate.
   local Markdown links, Doxygen inputs, generated/one-time artifacts, HIL
   residue, UTF-8 mojibake, and the exact pinned CI tooling contract.
 
-### Planned 1.3.0
+### Health and naming
 
 #### Added
 
@@ -226,7 +228,7 @@ is created while physical HIL remains an open release gate.
 - Proven-unused example-only bus/driver compatibility wrappers, parser, board,
   color, and logging helpers that duplicated active owners or had no caller.
 
-### Planned 1.2.0
+### Diagnostics and command coverage
 
 #### Added
 
@@ -262,7 +264,7 @@ is created while physical HIL remains an open release gate.
   attach retains its intentional expected-NACK stop phase for unknown-mode
   reconciliation.
 
-### Planned 1.1.1
+### Fixed-point conversion
 
 #### Fixed
 
@@ -273,7 +275,7 @@ is created while physical HIL remains an open release gate.
   CLI integer parsing rejects overflow consistently, and the parity gate checks
   operation handlers and accepted boolean tokens rather than help text alone.
 
-### Planned 1.1.0
+### Sensor identity and protocol updates
 
 #### Added
 
@@ -305,7 +307,7 @@ is created while physical HIL remains an open release gate.
 - Ambient-pressure encoding now follows the datasheet's exact integer
   `pressurePa / 100` conversion instead of rounding to the nearest hPa.
 
-### Planned 1.0.0
+### Owner-driven operation API
 
 #### Added
 
@@ -385,18 +387,18 @@ is created while physical HIL remains an open release gate.
 
 #### Compatibility
 
-This is a breaking release. Existing consumers must replace legacy callback
+This unreleased API breaks compatibility with earlier development snapshots.
+Existing consumers must replace legacy callback
 fields and direct command calls with `Config::transfer`, typed
 `OperationRequest`, `start()`, `poll()`, `cancel()`, and `takeResult()`.
 Legacy precise NACK enum values remain for append-only status compatibility,
 but the active unified transport maps ordinary NACKs to `Err::I2C_NACK`.
 
-## [0.1.0] - 2026-04-14
+### Initial development
 
-### Added
+#### Added
 
 - Initial SCD41 package metadata and repository policy files.
 - First SCD41 driver core, examples, native tests, and datasheet reference.
 
-[Unreleased]: https://github.com/janhavelka/SCD41/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/janhavelka/SCD41/releases/tag/v0.1.0
+[Unreleased]: https://github.com/janhavelka/SCD41/tree/main

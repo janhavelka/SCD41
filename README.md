@@ -4,9 +4,9 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
-Release status: `library.json` is staged at `1.3.2` for compatibility and
-release-candidate validation, but no `v1.3.2` release/tag or current physical
-HIL pass is claimed. See [CHANGELOG.md](CHANGELOG.md) and the
+Release status: **Unreleased; no GitHub release has been published.** The
+manifest contains a development identifier, not the first published release
+number. Physical HIL remains unverified. See [CHANGELOG.md](CHANGELOG.md) and the
 [hardware validation guide](docs/validation/hardware-hil.md).
 
 The library is designed for an application-owned I2C bus. It does not configure
@@ -410,9 +410,9 @@ compile-links that package for TunnelMonitor-node's integration target
 `idf_component.yml`, and `Doxyfile` project metadata are generated or checked
 from it.
 
-The 1.0.0 baseline was the breaking API change that replaced direct blocking
-calls and dual transport callbacks with the externally scheduled operation
-model. Per-version detail is in [CHANGELOG.md](CHANGELOG.md).
+The unreleased operation API replaces direct blocking calls and dual transport
+callbacks from earlier development snapshots. The consolidated changes are in
+[CHANGELOG.md](CHANGELOG.md#unreleased).
 
 ## License
 

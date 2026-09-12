@@ -1,14 +1,16 @@
 # Security Policy
 
-## Supported Versions
+## Supported development builds
 
 | Version | Supported |
 | ------- | --------- |
 | 1.3.x release candidates | yes |
-| 0.1.x   | no        |
+| Earlier development snapshots | no |
 
 The `1.3.2` manifest is currently staged for release-candidate validation; this
-table does not claim that a `v1.3.2` tag or physical HIL release gate exists.
+table identifies supported development builds only. No GitHub release has been
+published, no future release number is assigned here, and no physical HIL pass
+is claimed.
 
 ## Reporting a Vulnerability
 
