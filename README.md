@@ -4,6 +4,12 @@ Framework-neutral C++17 driver for the Sensirion SCD41 CO2, temperature, and
 humidity sensor. Arduino and native ESP-IDF examples are included for ESP32-S2
 and ESP32-S3.
 
+The core requires C++17, a bounded synchronous I2C callback, and an
+application-supplied monotonic millisecond clock. It has no framework or MCU
+dependency, and package metadata permits other platforms. ESP32-S2/S3 are the
+reference example targets; other hardware requires its own adapter and
+validation.
+
 Release status: **Unreleased; no GitHub release has been published.** The
 manifest contains a development identifier, not the first published release
 number. Physical HIL remains unverified. See [CHANGELOG.md](CHANGELOG.md) and the
@@ -207,8 +213,9 @@ The detailed owner actions for every outcome/effect combination are in
 The class does not change ownership: all work still advances only through
 caller polling and the supplied callback budget.
 
-Diagnostic command values are arbitrary. The driver cannot prove that even a
-command followed by a read has no side effect, so every dispatched diagnostic
+Diagnostic helpers accept unmanaged 16-bit command words; use typed operations
+for documented commands. The driver cannot prove that even a command followed
+by a read has no side effect, so every dispatched diagnostic
 operation invalidates managed state and requires a new `ATTACH` before normal
 production operations.
 
@@ -236,7 +243,9 @@ timed-out, cancelled, diagnostic, or ambiguous operation marks affected state
 dirty or requires reconciliation as applicable. Reset-like operations advance
 the sensor epoch so an older sample cannot be presented as current sensor state.
 Setting operations read the current value first, skip the write when it already
-matches, and verify after a real write. `dirtyMask` means this driver changed or
+matches, and verify after a real write. Pressure and altitude also select the
+compensation source, so an equal value still needs a write when that selection
+is unknown or different. `dirtyMask` means this driver changed or
 may have changed an EEPROM-persistable field and does not know it to be
 persisted; a field may be both verified and dirty. Ambient pressure is a runtime
 override and never creates persistence work. Persistence is rejected while any
@@ -329,8 +338,10 @@ invent address/data precision. Timeouts and bus errors are not expected NACKs.
 - Allow up to 30 ms after power-up before the first command.
 - Minimum command spacing is 1 ms.
 - All 16-bit commands are MSB-first; every returned data word has CRC-8.
-- The sensor's photoacoustic pulse can draw 175-205 mA at 3.3 V. Provide a sound
-  supply and at least 10 uF local bulk capacitance.
+- The sensor can draw 205 mA at 3.3 V. Connect VDD and VDDH together near the
+  sensor and size the regulator and decoupling for that load; capacitor values
+  are board design choices, not a fixed datasheet requirement. See the
+  [PCB design notes](docs/reference/scd41-protocol.md#device-facts).
 - `persist_settings` is rated for at least 2000 EEPROM write cycles. It is never
   implicit.
 - Forced recalibration requires a known, stable reference. Factory reset and
@@ -395,14 +406,17 @@ toolchain commonly used by PlatformIO does not provide the required UBSan
 runtime.
 
 PlatformIO 6.1.19 or newer builds the Arduino examples for ESP32-S2 and
-ESP32-S3 on the exact-pinned pioarduino `platform-espressif32` `55.03.311`
-stack (Arduino-ESP32 `3.3.11`, ESP-IDF `5.5.5`). This pin controls only this
-repository's examples; consuming applications retain control of their own
-platform version. Native host tests use exact-pinned `native@1.2.1`. CI also
-builds the native ESP-IDF example for both targets
-and validates a packed-library consumer. A separate compatibility job
-compile-links that package for TunnelMonitor-node's integration target
-`esp32-s3-wroom-n16r8` on its retained pioarduino `54.03.20` stack.
+ESP32-S3 on the exact-pinned pioarduino `platform-espressif32` `53.03.13`
+stack (Arduino-ESP32 `3.1.3`, ESP-IDF `5.3.2`). Its Wire backend preserves the
+NACK needed for wake/attach; native ESP-IDF examples use `6.0.1`. These are
+example transport baselines, not core requirements. See
+[backend compatibility](docs/porting/esp-idf.md#backend-compatibility) before
+selecting a different framework version. Native host tests use exact-pinned
+`native@1.2.1`. CI also builds the native ESP-IDF example and standalone
+packed-library consumers for
+both targets. Package consumers use generic board configurations and validate
+the public API without any application repository dependency. These compiler
+checks do not establish physical ACK/NACK behavior or hardware operation.
 
 ## Versioning
 

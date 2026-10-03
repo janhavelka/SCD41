@@ -16,10 +16,11 @@ too detailed for the README.
 | [Hardware/HIL validation](validation/hardware-hil.md) | Hardware evidence rules and smoke-test matrix. |
 | [Feature coverage](validation/feature-coverage.md) | Datasheet v1.7 command-to-core/CLI/test matrix and remaining evidence. |
 
-In the source checkout, `docs/reports/CODE_AUDIT_RESOLUTION.md` is the explicitly
-requested record of finding dispositions and actual validation evidence. It
-is excluded from release packages. Superseded audit inputs and progress logs
-live in git history; stable contracts remain in the guides above.
+In the source checkout, `docs/reports/CODE_AUDIT_RESOLUTION.md` retains
+commit-specific CI evidence from earlier reviews. It is excluded from release
+packages and does not validate subsequent changes or hardware. Closed audit
+discussions and progress logs live in git history; stable contracts remain in
+the guides above.
 
 ## Generated API Reference
 

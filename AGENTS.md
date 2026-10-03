@@ -10,10 +10,22 @@ On Windows, use `.\scripts\pio.cmd <arguments>`; it selects the current user's
 VS Code-managed installation. Never install another PlatformIO Core; if the
 wrapper cannot find it, stop and report the missing installation.
 
+## Workflow and Communication
+
+- After each verified prompt or logical block, commit only the owned changes,
+  push to the intended upstream branch, and confirm synchronization.
+- Preserve unrelated work. Never include another task's changes in a commit.
+- Use simple engineering language in documentation, comments, and reports.
+- Check CI for the pushed commit and fix failures within the current scope.
+- A green build is not physical HIL evidence. Do not tag a release while a
+  required hardware gate remains open.
+
 ## Role and Target
 You are a professional embedded software engineer building a production-grade SCD41 library.
 
-- Target: ESP32-S2 / ESP32-S3, Arduino and native ESP-IDF consumers.
+- Core: general framework- and MCU-neutral C++17 library with injected transport.
+- Reference examples and validation targets: ESP32-S2 / ESP32-S3, Arduino and native ESP-IDF.
+- Application-specific dependencies, board definitions, and product policy do not belong in this repository's library or validation fixtures.
 - Device: Sensirion SCD41 photoacoustic NDIR CO2 sensor with integrated temperature and humidity outputs.
 - Goals: deterministic behavior, long-term stability, clean API contracts, portability, no surprises in the field.
 - These rules are binding.

@@ -48,6 +48,11 @@ struct TransferRequest {
 /// Result of exactly one physical transport attempt.
 /// `completedMs` is in the same monotonic 32-bit clock domain supplied to
 /// operation start and poll calls.
+/// `NOT_STARTED` requires zero transferred bytes. `NO_EFFECT` may describe a
+/// partial write only when the adapter proves no effectful data was accepted;
+/// it cannot accompany a fully transferred effectful command. Counts exceeding
+/// the request or invalid enum values fail conservatively and cannot be
+/// accepted as expected NACKs.
 struct TransferResult {
   TransferCode code = TransferCode::FAILED; ///< Framework-neutral attempt result.
   TransferDisposition disposition = TransferDisposition::NOT_STARTED; ///< Proven effect.

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Build a packed SCD41 consumer for TunnelMonitor-node's exact ESP32 target."""
+"""Build isolated public-API package consumers on native and Arduino S2/S3.
+
+Strict dependency compatibility checks ensure packaging does not unnecessarily
+restrict the framework-neutral core. No example headers, board fixture, bus,
+pins, or application-specific defines are needed by these consumers.
+"""
 from __future__ import annotations
 
-import glob
+import configparser
 import os
 import pathlib
 import shutil
@@ -11,181 +16,101 @@ import sys
 import tarfile
 import tempfile
 
-PLATFORM_URL = "https://github.com/pioarduino/platform-espressif32/releases/download/54.03.20/platform-espressif32.zip"
+from check_clean_consumer_compile import (
+    CONSUMER_SOURCE, expand_args, find_library_root, safe_extract,
+)
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BOARD_FIXTURE = ROOT / "tools" / "fixtures" / "esp32-s3-wroom-n16r8.json"
-BOARD_FIXTURE_SOURCE_REVISION = "b708f511964db6c51e949e99c67820476f00f9c7"
+ENVIRONMENTS = ("native_consumer", "esp32s2_consumer", "esp32s3_consumer")
 
-PLATFORMIO_INI = f"""[platformio]
-default_envs = target_consumer
-
-[env:target_consumer]
-platform = {PLATFORM_URL}
-board = esp32-s3-wroom-n16r8
-framework = arduino
-board_build.flash_size = 16MB
-board_upload.flash_size = 16MB
-board_build.flash_mode = qio
-board_build.arduino.memory_type = qio_opi
-board_build.psram_type = opi
-build_unflags =
-  -std=gnu++11
-build_flags =
-  -std=gnu++17
-  -Ilib/SCD41/examples
-  -DTUNNELMONITOR_DIAGNOSTICS_ENGLISH=1
-  -DARDUINO_USB_MODE=1
-  -DARDUINO_USB_CDC_ON_BOOT=1
-  -DARDUINO_LOOP_STACK_SIZE=24576
-  -DBOARD_HAS_PSRAM
-  -DTUNNELMONITOR_TARGET_ESP32S3=1
-  -DTUNNELMONITOR_REQUIRE_PSRAM=1
-  -DTUNNELMONITOR_ENABLE_I2C=1
-  -DTUNNELMONITOR_ENABLE_MEASUREMENT=1
-"""
-
-CONSUMER = r'''
-#include <Arduino.h>
-#include <Wire.h>
-#include <SCD41/SCD41.h>
-#include "common/I2cTransport.h"
-
-namespace {
-SCD41::SCD41 sensor;
+# Run the same zero-I2C public-contract consumer on the host, and compile/link
+# it through Arduino's entry points for the reference targets. This is test
+# firmware; building it does not claim execution on a physical board.
+CONSUMER = CONSUMER_SOURCE.replace("int main()", "int runConsumer()") + r'''
+#if defined(ARDUINO)
 volatile int consumerResult = 0;
-}  // namespace
-
-void setup() {
-  if (!transport::initWire(8, 9, 400000U, 20U)) {
-    consumerResult = 1;
-    return;
-  }
-  SCD41::Config config;
-  config.transfer = transport::wireTransfer;
-  config.transferUser = &Wire;
-  config.transferTimeoutMs = 20U;
-  if (!sensor.begin(config).ok()) {
-    consumerResult = 2;
-    return;
-  }
-
-  const auto request =
-      SCD41::OperationRequest::make(SCD41::OperationKind::ATTACH);
-  const auto limits = SCD41::SCD41::limits(request.kind);
-  SCD41::OperationOptions options;
-  options.requestId = 1U;
-  options.nowMs = millis();
-  options.deadlineMs = options.nowMs + limits.maxWaitMs +
-      static_cast<uint32_t>(limits.maxCallbacks) * config.transferTimeoutMs + 1000U;
-  SCD41::OperationId id;
-  if (!sensor.start(request, options, id).inProgress()) {
-    consumerResult = 3;
-    return;
-  }
-  if (!sensor.cancel(id, options.nowMs).ok()) {
-    consumerResult = 4;
-    return;
-  }
-  SCD41::OperationResult result;
-  consumerResult = sensor.takeResult(id, result).ok() ? 0 : 5;
-}
-
+void setup() { consumerResult = runConsumer(); }
 void loop() {}
+#else
+int main() { return runConsumer(); }
+#endif
 '''
 
 
+def platformio_configuration() -> str:
+    config = configparser.ConfigParser(interpolation=None)
+    config.read(ROOT / "platformio.ini", encoding="utf-8")
+    platform = config["dependency_pins"]["platform"]
+    native = config["env:native"]["platform"]
+    return f"""[env]
+lib_compat_mode = strict
+build_unflags = -std=gnu++11
+build_flags = -std=gnu++17
+
+[env:native_consumer]
+platform = {native}
+
+[env:esp32s2_consumer]
+platform = {platform}
+framework = arduino
+board = esp32-s2-saola-1
+
+[env:esp32s3_consumer]
+platform = {platform}
+framework = arduino
+board = esp32-s3-devkitc-1
+"""
+
+
 def fail(message: str) -> int:
-    print(f"Exact target package consumer FAILED: {message}")
+    print(f"Target package consumers FAILED: {message}")
     return 1
 
 
-def safe_extract(package: tarfile.TarFile, destination: pathlib.Path) -> None:
-    root = destination.resolve()
-    for member in package.getmembers():
-        target = (root / member.name).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError as exc:
-            raise RuntimeError(f"unsafe archive member: {member.name}") from exc
-    try:
-        package.extractall(root, filter="data")
-    except TypeError:
-        package.extractall(root)
-
-
-def find_library_root(root: pathlib.Path) -> pathlib.Path | None:
-    if (root / "include" / "SCD41" / "SCD41.h").is_file():
-        return root
-    for header in root.rglob("include/SCD41/SCD41.h"):
-        return header.parent.parent.parent
-    return None
-
-
 def main(arguments: list[str]) -> int:
-    matches: list[pathlib.Path] = []
-    for argument in arguments:
-        expanded = glob.glob(argument)
-        matches.extend(pathlib.Path(path) for path in expanded)
-    if len(matches) != 1 or not matches[0].is_file():
+    packages = expand_args(arguments)
+    if len(packages) != 1 or not packages[0].is_file():
         return fail("provide exactly one packed .tar.gz library")
-    if not BOARD_FIXTURE.is_file():
-        return fail(f"missing exact-target board fixture: {BOARD_FIXTURE}")
-    with tempfile.TemporaryDirectory(prefix="scd41-target-consumer-") as tmp:
-        root = pathlib.Path(tmp)
-        unpacked = root / "unpacked"
+    with tempfile.TemporaryDirectory(prefix="scd41-package-consumers-") as tmp:
+        project = pathlib.Path(tmp)
+        unpacked = project / "unpacked"
         unpacked.mkdir()
-        with tarfile.open(matches[0], "r:gz") as package:
+        with tarfile.open(packages[0], "r:gz") as package:
             safe_extract(package, unpacked)
         library_root = find_library_root(unpacked)
         if library_root is None:
-            return fail("package does not contain include/SCD41/SCD41.h")
+            return fail("package does not contain public headers and src/SCD41.cpp")
 
-        project = root / "project"
-        (project / "src").mkdir(parents=True)
+        (project / "src").mkdir()
         (project / "lib").mkdir()
-        (project / "boards").mkdir()
         shutil.copytree(library_root, project / "lib" / "SCD41")
-        shutil.copy2(BOARD_FIXTURE, project / "boards" / BOARD_FIXTURE.name)
-        (project / "platformio.ini").write_text(PLATFORMIO_INI, encoding="utf-8", newline="\n")
+        (project / "platformio.ini").write_text(
+            platformio_configuration(), encoding="utf-8", newline="\n")
         (project / "src" / "main.cpp").write_text(CONSUMER, encoding="utf-8", newline="\n")
 
         if os.name == "nt":
             wrapper = ROOT / "scripts" / "pio.cmd"
             if not wrapper.is_file():
                 return fail(f"missing prescribed PlatformIO wrapper: {wrapper}")
-            command = [
-                os.environ.get("COMSPEC", "cmd.exe"),
-                "/d",
-                "/s",
-                "/c",
-                str(wrapper),
-                "run",
-                "-d",
-                str(project),
-                "-e",
-                "target_consumer",
-            ]
+            command = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", str(wrapper)]
         else:
-            command = [
-                sys.executable,
-                "-m",
-                "platformio",
-                "run",
-                "-d",
-                str(project),
-                "-e",
-                "target_consumer",
-            ]
-        result = subprocess.run(command, cwd=project, text=True, capture_output=True)
+            command = [sys.executable, "-m", "platformio"]
+        command += ["run", "-d", str(project)]
+        for environment in ENVIRONMENTS:
+            command += ["-e", environment]
+        result = subprocess.run(command, cwd=project, text=True, capture_output=True, timeout=900)
         sys.stdout.write(result.stdout)
         sys.stderr.write(result.stderr)
         if result.returncode != 0:
             return fail(f"PlatformIO exited with {result.returncode}")
 
-    print(
-        "Exact target package consumer PASSED "
-        f"(board contract from TunnelMonitor-node {BOARD_FIXTURE_SOURCE_REVISION})"
-    )
+        executable = project / ".pio/build/native_consumer" / (
+            "program.exe" if os.name == "nt" else "program")
+        ran = subprocess.run([str(executable)], text=True, capture_output=True, timeout=10)
+        if ran.returncode != 0:
+            return fail(f"native consumer exited with {ran.returncode}: {ran.stdout}{ran.stderr}")
+
+    print("Target package consumers PASSED (native executed; Arduino S2/S3 compile/link only)")
     return 0
 
 

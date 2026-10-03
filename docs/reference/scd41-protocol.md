@@ -6,6 +6,11 @@ plus this repository's command table. The local vendor PDF is
 `docs/reference/vendor/SCD41_datasheet.pdf` and is deliberately synchronized
 to that current vendor revision.
 
+The vendor download and local PDF were byte-identical when checked on
+2026-10-03 (SHA-256 `9bbb142d27ba1b92f6701d88a3994c99b1b6a79f2036d022076f74cadc1a3f86`).
+All 30 command forms in Table 9 (29 distinct opcodes) are exposed by typed
+operations; pressure get/set share an opcode.
+
 This file is the compact device-behavior reference for implementation work. It
 is not a replacement for the vendor datasheet.
 
@@ -37,14 +42,29 @@ are SCD40 `0x0440`/CRC `0x3F`, SCD41 `0x1440`/CRC `0x51`, and SCD43
 `0x5441`/CRC `0xE9`. The driver retains the full CRC-verified word in
 `Identity::variantWord` while policy uses only bits `[15:12]`.
 
-Recommended board design:
+PCB design requirements from datasheet sections 2.1-2.4 and 4:
 
-- Place 100 nF near VDD/GND.
-- Add bulk capacitance on the sensor rail; the measurement pulse can exceed
-  175 mA.
-- Keep the unloaded supply ripple below 30 mV peak-to-peak.
-- Keep pullups, pin choice, clock speed, rail switching, and reset circuitry
-  owned by the application or board layer.
+- Connect VDD and VDDH together close to the sensor. Size the supply for the
+  205 mA maximum at 3.3 V (137 mA at 5 V), with unloaded ripple below 30 mV.
+  Choose local decoupling for the regulator and layout; v1.7 specifies no
+  universal 100 nF or 10 uF value.
+- Solder DNC contacts to isolated floating pads. Use the vendor top-view pin
+  assignment and land pattern; leave the protective membrane in place.
+- I2C logic follows sensor VDD. A 5 V sensor supply requires checking ESP32
+  level compatibility; a 3.3 V supply avoids that mismatch. Use external pullups
+  sized for actual bus capacitance and speed, at most 400 kHz.
+- Respect the footprint's thermal-relief-hole keep-free area. The assembly
+  process allows one IR/convection reflow, at most 245 C anywhere on the sensor
+  and less than 30 seconds at peak. Vapor-phase reflow, extra flux, board wash,
+  and wetting/removing the protective membrane are not permitted. Allow up to
+  five days for CO2 accuracy to recover after soldering (powered or unpowered).
+
+The [Sensirion design-in guide](https://sensirion.com/media/documents/0D0C9129/623B1183/Sensirion_CO2_Sensors_SCD4x_design-in_guide.pdf)
+recommends ambient-air access with little trapped volume, separation from MCU,
+radio and regulator heat, and protection from direct airflow, vibration and
+sunlight. Allow thermal equilibration before setting temperature offset in the
+finished enclosure. Supply integrity, actual I2C waveforms and environmental
+accuracy remain physical validation tasks.
 
 ## Performance Summary
 
@@ -226,9 +246,12 @@ interval; the sensor empties the buffer on readout. If no data is available,
 the sensor can NACK the read. Poll `get_data_ready_status` first when the
 application wants to avoid no-data NACKs.
 
-The shortest single-shot measurement interval is 5 seconds. Averaging several
-single-shot measurements can reduce noise. ASC is not available for
-power-cycled single-shot operation. Datasheet v1.7 removed the older
+The shortest full single-shot measurement interval is 5 seconds. Averaging
+several single-shot measurements can reduce noise. ASC is not available for
+power-cycled single-shot operation, including `power_down`/`wake_up` cycles.
+When physically power-cycling, remove and reapply both supply and I2C voltages
+(datasheet section 3.11); the application owns that electrical sequencing.
+Datasheet v1.7 removed the older
 recommendation to discard the first single-shot value after a power cycle; any
 warm-up/publication filter is application policy.
 
@@ -275,7 +298,19 @@ Compensation ranges and effects:
 
 Pressure or altitude compensation improves CO2 accuracy across pressure
 changes. Determine temperature offset in the final device under typical thermal
-conditions and airflow.
+conditions, measurement mode and airflow. Recalculate the offset as
+`measured_temperature - reference_temperature + previous_offset`, using the
+same temperature units throughout. Read the previous offset first; applying
+only the temperature difference would discard the existing correction.
+
+Each pressure write activates pressure compensation; each altitude write
+switches back to altitude compensation, as specified in
+[Sensirion's altitude-setter documentation](https://sensirion.github.io/python-i2c-scd4x/_modules/sensirion_i2c_scd4x/device.html#Scd4xDevice.set_sensor_altitude).
+Saved readback values alone do not prove
+the active selection. The driver skips an equal-word write only when its
+selection evidence also agrees, and loses that evidence after reconciliation
+or uncertain work. Selecting an unchanged altitude does not create new EEPROM
+configuration work.
 
 The 0..20 C offset guidance is a recommendation, not the protocol domain. The
 ASC target and FRC reference are uint16 ppm words with no narrower valid range
@@ -323,7 +358,13 @@ is still a protocol failure and must not enter a verified cache.
 
 - Automatic self-calibration (ASC) is enabled by default and assumes regular
   exposure to fresh-air CO2 near the configured target.
+- Default ASC assumes more than three minutes near 400 ppm weekly, accumulated
+  in measurement sessions lasting at least four hours. An enclosed CO2-control
+  application that never reaches that baseline needs an explicit calibration
+  policy; automatic calibration must not silently establish a false baseline.
 - Forced recalibration requires a stable known reference concentration.
+- After sensor assembly, wait at least five days before FRC (Table 1, footnote
+  6), so temporary reflow-related accuracy changes have recovered.
 - FRC should be performed in the operation mode later used by the application,
   at the intended application voltage, in a homogeneous and constant CO2
   concentration. Operate for at least 3 minutes in periodic modes, or for more
@@ -335,9 +376,17 @@ is still a protocol failure and must not enter a verified cache.
 - Self-test returns `0x0000` when no malfunction is detected; any nonzero word
   indicates a malfunction.
 - ASC initial period defaults to 44 h. ASC standard period defaults to 156 h.
-  Both are integer multiples of 4 h; an initial period of 0 h requests immediate
-  correction. The period guidance assumes about a 5 minute average single-shot
-  interval and should be scaled for other intervals.
+  Both are integer multiples of 4 h in 0..65532 h; **either** period set to 0 h
+  requests immediate correction. The initial period runs exactly once after
+  first operation or factory reset; the standard period then repeats.
+- In single-shot mode the sensor counts measurements assuming a 5-minute
+  interval. Set each ASC parameter to `desired_elapsed_hours * 5 minutes /
+  actual_interval`, rounded to a supported 4-hour multiple according to the
+  application's calibration policy. For example, a 10-minute cadence uses
+  half the desired hours. Powering down between shots prevents ASC altogether.
+- Single-shot intervals shorter than 5 minutes with ASC enabled reduce the
+  calibration-history EEPROM lifetime proportionally (section 3.11). Scaling
+  the ASC period does not waive this stated lifetime limitation.
 - `persist_settings` writes EEPROM. It must never run implicitly from examples,
   diagnostics, or normal telemetry loops.
 - EEPROM-backed configuration storage is rated for at least 2000 write cycles.

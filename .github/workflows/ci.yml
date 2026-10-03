@@ -176,7 +176,7 @@ jobs:
       - name: Compile clean package consumer
         run: python tools/check_clean_consumer_compile.py dist/*.tar.gz
 
-      - name: Build exact TunnelMonitor-node target package consumer
+      - name: Build native and Arduino S2/S3 package consumers
         run: python tools/check_target_package_consumer.py dist/*.tar.gz
 
   esp-idf-build:

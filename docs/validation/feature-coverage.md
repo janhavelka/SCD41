@@ -5,6 +5,12 @@ This matrix audits the library against the Sensirion SCD4x datasheet v1.7
 of physical, optical, electrical, long-duration, or hardware-in-the-loop
 validation; those gates remain in [hardware-hil.md](hardware-hil.md).
 
+CLI entries below mean that the command handler is implemented. The examples
+select Arduino-ESP32 3.1.3's legacy Wire backend and native ESP-IDF 6.0.1 for
+their distinct NACK mappings. Source and build checks do not establish physical
+operation; both examples still need HIL. See
+[backend compatibility](../porting/esp-idf.md#backend-compatibility).
+
 ## Datasheet command matrix
 
 All command and response words are MSB-first. Returned words are CRC-8 checked
@@ -55,15 +61,15 @@ individually, and every payload word written by the driver carries CRC-8.
 | Aggregate self-check | `selfcheck` requires attached idle mode and sequences identity, variant, full configuration, and the 10 s sensor self-test with pass/warn/fail summary. The direct `selftest` command remains available. |
 | Raw diagnostics | `command read_words`, `write`, and `write_word` require an explicit `confirm`. Managed command words are rejected, response words remain CRC-checked, and every dispatched raw command requires a later attach/recover. |
 | CLI parity | `tools/check_cli_contract.py` proves Arduino handlers exist in `processCommand`; `tools/check_idf_example_contract.py` checks help, parser, handler semantics, workflow dispatch, confirmations, required owner-safe tokens, and native-IDF purity. |
+| Framework adapters | `tools/test_audit_guards.py` executes the actual Arduino and ESP-IDF adapters with host framework stubs. It checks success/NACK/timeout/fault distinction, byte/effect evidence, bounded request validation, one attempt, and completion timestamps; physical controllers are not exercised. |
 | External owner | Core lifecycle and operations are non-owning and fixed-memory. `start` is zero-I2C, `poll` consumes an explicit callback budget, results are exactly once, callbacks may not re-enter, and callers serialize the instance. |
 
 ## Single-owner integration fit
 
-This library is designed to sit under an application that owns the I2C
-controller: one bus-owner task, a fixed device table, a one-attempt transport,
-owner-context lifecycle calls, and passive results copied out for consumers.
-The table below maps that shape onto the public API. It is an architecture-fit
-statement, not an integration or build claim for any particular product.
+Any application can provide the synchronous transport callback and monotonic
+clock, then advance the driver from its main loop or a serialized task. No
+RTOS, queue, device registry, or particular application architecture is required.
+The table below maps common integration needs onto the public API.
 
 | Owner-side boundary | SCD41 fit |
 | --- | --- |
@@ -74,9 +80,9 @@ statement, not an integration or build claim for any particular product.
 | bounded published device status | copy `runtimeSnapshot`, `healthSnapshot`, configuration/identity/sample evidence after owner-context work |
 | bus invalidation/recovery | owner cancels/ends, performs controller/rail recovery, then submits a fresh `ATTACH`; the library never resets the bus |
 
-No product header, type, task, queue, mutex, or policy is added to this
-library. A product adapter should stay private to that product and translate
-fixed owner requests/results at its own binding boundary.
+Framework transport adapters and scheduling policy belong in the consuming
+application. The examples demonstrate Arduino and native ESP-IDF adapters;
+neither framework is a dependency of the public headers or core implementation.
 
 ## Response-domain policy
 

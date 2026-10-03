@@ -11,6 +11,92 @@ earlier development milestones. The manifest version is a staging identifier,
 not a published version or a commitment to the first release number. Physical
 HIL remains an open release gate.
 
+### Framework independence and datasheet coverage
+
+#### Changed
+
+- Removed application-specific integration guidance, dependencies, board
+  profiles, and historical product references. The public API and core remain
+  framework-neutral; Arduino and native ESP-IDF are independent examples.
+- Packed-library checks use generic ESP32-S2/S3 consumers. Application clocks,
+  bus ownership, deadlines, recovery and scheduling remain application policy.
+- PlatformIO metadata permits any framework/platform, and ESP-IDF component
+  metadata does not restrict the MCU. The C++17 core needs only an injected
+  bounded transport and monotonic clock; reference example coverage remains
+  ESP32-S2/S3.
+- The Arduino examples use pioarduino `53.03.13` (Arduino-ESP32 `3.1.3`, ESP-IDF
+  `5.3.2`), whose legacy Wire backend preserves wake-NACK evidence. The native
+  ESP-IDF example remains pinned to `6.0.1`. These example choices do not
+  constrain framework versions used with an application's own core adapter.
+- Clarified both ASC periods' zero behavior, one-time initial versus repeating
+  standard period, single-shot cadence/storage-life assumptions, power-cycled
+  ASC restrictions, temperature-offset calibration, and reflow/pre-FRC handling
+  from datasheet v1.7. All 30 command forms remain covered by the typed API.
+- Reduced the closed audit report to commit-specific CI evidence; current
+  hardware validation remains unperformed.
+
+#### Fixed
+
+- Active-operation `nextDueMs` now reports the earlier of the next sensor phase
+  and the operation deadline, including across clock wrap. An owner that sleeps
+  until this hint can observe timeout promptly without shortening the separate
+  command-safety/settle gate.
+- The Arduino adapter reports clock-configuration failure, rejects invalid or
+  overflowing timeout values before narrowing, bounds short-read cleanup, and
+  preserves uncertainty when a local buffered write is incomplete.
+- The native ESP-IDF example rejects SDK versions below 6.0 instead of building
+  against a master backend that loses the NACK evidence needed for attach.
+
+#### Added
+
+- Host execution tests of the actual Arduino and native ESP-IDF adapters with
+  framework stubs, covering exact success, NACK, timeout, generic faults,
+  completion timestamps, one-attempt behavior, and invalid requests. These are
+  adapter contract tests, not controller or hardware validation.
+- Explicit ASC period transaction coverage for zero and the largest valid
+  multiple of four hours.
+
+### Datasheet and HIL readiness
+
+#### Fixed
+
+- Altitude and ambient-pressure setters now establish the requested compensation
+  source even when its stored word already matches. A verified duplicate still
+  skips the write; reselecting unchanged altitude does not create EEPROM work.
+- Invalid transfer enums, impossible byte counts and contradictory effect evidence
+  fail conservatively, retain command settle windows and require reconciliation
+  when a write may have reached the sensor. Such results cannot count as an
+  expected wake NACK.
+- Unknown operation kinds are rejected before mutating admission state.
+- Non-strict SCD40 attachment cannot admit a composite configuration read that
+  includes unsupported single-shot-family ASC period commands.
+- Console input is bounded per owner iteration. Native ESP-IDF explicitly uses
+  nonblocking input and yields for at least one RTOS tick, avoiding zero-tick
+  loops at the default 100 Hz tick rate.
+- HIL verdicts now require complete, correlated admission/result records,
+  verified identity, fresh sample provenance, valid values and clean numeric
+  health counters. Truncated, stale or replayed output cannot qualify a pass.
+
+#### Added
+
+- Native regressions for malformed transport evidence, compensation selection,
+  admission preservation and independent datasheet command/CRC vectors, plus
+  executable console flood/partial-input and HIL protocol regressions.
+- Opt-in volatile configuration sweep with value restoration, bounded periodic,
+  low-power and single-shot HIL soak, firmware/build metadata, and explicit
+  not-run evidence for skipped and manual hardware gates.
+
+#### Changed
+
+- Rechecked the local vendor PDF against the official v1.7 April 2025 download:
+  byte-identical, with all 30 command forms already exposed. Clarified PCB supply,
+  VDDH, floating DNC pads, I2C levels and calibration requirements.
+- Documented the ESP-IDF 5.5.5 / Arduino 3.3.11 Wire limitation that loses
+  wake-NACK evidence. Neither compile success nor a generic bus error can be
+  treated as a working attachment.
+- Updated standalone package-consumer compiler coverage. This does not claim
+  application integration or physical validation.
+
 ### HIL readiness follow-up
 
 #### Fixed
@@ -61,7 +147,7 @@ HIL remains an open release gate.
 
 - The reintroduced, superseded `docs/CODE_AUDIT.md` working input, whose stale
   root-relative datasheet link failed repository hygiene. Its original text
-  remains in git history and is linked from the resolution report.
+  remains in git history.
 
 ### Audit verification and corrections
 
@@ -336,7 +422,7 @@ HIL remains an open release gate.
 
 - Exact-pinned the Arduino ESP32-S2/S3 example builds to pioarduino
   `platform-espressif32` `55.03.311` (Arduino-ESP32 `3.3.11`, ESP-IDF `5.5.5`)
-  while retaining the `54.03.20` TunnelMonitor target-package compatibility
+  while retaining the `54.03.20` target-package compatibility
   build. The ESP32-S3 example now explicitly selects its 4 MB flash / QSPI
   PSRAM memory type instead of relying on platform defaults. CI pins the
   platform's minimum supported PlatformIO Core version, `6.1.19`.

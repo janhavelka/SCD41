@@ -160,7 +160,7 @@ enum class OperationKind : uint8_t {
   SET_ASC_INITIAL_PERIOD,    ///< Set and verify ASC initial period.
   READ_ASC_STANDARD_PERIOD,  ///< Read ASC standard period in hours.
   SET_ASC_STANDARD_PERIOD,   ///< Set and verify ASC standard period.
-  READ_CONFIGURATION,        ///< Read all supported configuration fields.
+  READ_CONFIGURATION,        ///< Read all seven fields; requires SCD41/SCD43 ASC-period commands.
   POWER_DOWN,                ///< Enter sensor power-down mode.
   WAKE_UP,                   ///< Wake and verify the sensor identity.
   REINIT,                    ///< Reload persisted settings and reconcile state.
@@ -481,7 +481,10 @@ struct OperationRequest {
     return request;
   }
   /// Construct a temperature-offset request in milli-degrees Celsius.
-  /// @param valueMilliC Desired offset; validated during admission.
+  /// Determine the offset in the assembled device at thermal equilibrium in
+  /// its normal measurement mode. It corrects RH/T, not CO2. The datasheet
+  /// recommends 0..20000 mC, within the full encoded 0..175000 mC domain.
+  /// @param valueMilliC Desired offset in 0..175000 mC; checked at admission.
   /// @return Typed setting request.
   static OperationRequest setTemperatureOffsetMilliC(int32_t valueMilliC) {
     OperationRequest request = make(OperationKind::SET_TEMPERATURE_OFFSET);
@@ -489,7 +492,9 @@ struct OperationRequest {
     return request;
   }
   /// Construct a sensor-altitude request.
-  /// @param altitudeM Desired altitude in meters.
+  /// Also selects altitude-based pressure compensation. A matching stored
+  /// value skips the write only when this binding already selected altitude.
+  /// @param altitudeM Desired altitude in meters, 0..3000; checked at admission.
   /// @return Typed setting request.
   static OperationRequest setSensorAltitudeM(uint16_t altitudeM) {
     OperationRequest request = make(OperationKind::SET_SENSOR_ALTITUDE);
@@ -497,7 +502,11 @@ struct OperationRequest {
     return request;
   }
   /// Construct a runtime ambient-pressure request.
-  /// @param pressurePa Desired pressure in pascals.
+  /// Also selects ambient-pressure compensation. A matching stored value
+  /// skips the write only when this binding already selected ambient pressure.
+  /// This runtime override is not persisted by PERSIST_SETTINGS.
+  /// @param pressurePa Desired pressure in pascals, 70000..120000; encoded by
+  /// truncating to 100 Pa units. The result reports the actual encoded value.
   /// @return Typed setting request.
   static OperationRequest setAmbientPressurePa(uint32_t pressurePa) {
     OperationRequest request = make(OperationKind::SET_AMBIENT_PRESSURE);
@@ -505,6 +514,9 @@ struct OperationRequest {
     return request;
   }
   /// Construct an ASC enable request.
+  /// Default ASC requires regular exposure to the configured fresh-air
+  /// baseline. Power-cycled single-shot operation cannot use ASC, including
+  /// cycles performed with POWER_DOWN/WAKE_UP.
   /// @param enabled Desired enable state.
   /// @return Typed setting request.
   static OperationRequest setAscEnabled(bool enabled) {
@@ -513,7 +525,8 @@ struct OperationRequest {
     return request;
   }
   /// Construct an ASC target request.
-  /// @param ppm Target concentration in ppm.
+  /// @param ppm Known background concentration in ppm, 0..65535. This is the
+  /// wire domain; the application must choose a physically justified baseline.
   /// @return Typed setting request.
   static OperationRequest setAscTargetPpm(uint16_t ppm) {
     OperationRequest request = make(OperationKind::SET_ASC_TARGET);
@@ -521,7 +534,12 @@ struct OperationRequest {
     return request;
   }
   /// Construct an ASC initial-period request.
-  /// @param hours Desired period in hours; validated against the device step.
+  /// Used once after first operation or FACTORY_RESET. In single-shot mode,
+  /// elapsed time is inferred assuming one shot every 5 minutes: scale the
+  /// desired real-time period by 5 minutes / actual interval, then choose a
+  /// multiple of 4 hours. The driver does not infer the application's cadence.
+  /// @param hours Encoded period in hours, 0..65532 in multiples of 4; zero
+  /// requests immediate correction. Validated during admission.
   /// @return Typed setting request.
   static OperationRequest setAscInitialPeriodHours(uint16_t hours) {
     OperationRequest request = make(OperationKind::SET_ASC_INITIAL_PERIOD);
@@ -529,7 +547,11 @@ struct OperationRequest {
     return request;
   }
   /// Construct an ASC standard-period request.
-  /// @param hours Desired period in hours; validated against the device step.
+  /// Repeating period after the initial correction. Single-shot cadence must
+  /// be scaled as for setAscInitialPeriodHours(). With ASC enabled, intervals
+  /// shorter than 5 minutes proportionally reduce calibration EEPROM life.
+  /// @param hours Encoded period in hours, 0..65532 in multiples of 4; zero
+  /// requests immediate correction. Validated during admission.
   /// @return Typed setting request.
   static OperationRequest setAscStandardPeriodHours(uint16_t hours) {
     OperationRequest request = make(OperationKind::SET_ASC_STANDARD_PERIOD);
@@ -537,7 +559,14 @@ struct OperationRequest {
     return request;
   }
   /// Construct an explicitly confirmed forced-recalibration request.
-  /// @param referencePpm Known stable reference concentration in ppm.
+  /// The caller must establish stable reference gas and operate in the intended
+  /// mode and at the intended voltage for at least 3 minutes (single-shot:
+  /// more than 3 shots at 1-minute intervals), applying pressure or altitude
+  /// compensation first. Stop periodic operation before this request; the
+  /// driver enforces its 500 ms settle. Wait at least 5 days after assembly
+  /// before FRC. These environmental conditions cannot be checked by the driver.
+  /// @param referencePpm Known stable reference concentration in ppm, 0..65535
+  /// as the wire domain; the caller supplies a valid calibration reference.
   /// @return Confirmed maintenance request.
   static OperationRequest forcedRecalibration(uint16_t referencePpm) {
     OperationRequest request = make(OperationKind::FORCED_RECALIBRATION);
@@ -650,7 +679,10 @@ struct RuntimeSnapshot {
   OperationState operationState = OperationState::IDLE; ///< Slot ownership state.
   OperationId operationId = {}; ///< Active or retained operation identity.
   OperationKind operationKind = OperationKind::NONE; ///< Active or retained kind.
-  uint32_t nextDueMs = 0; ///< Earliest useful poll time for active work.
+
+  /// Earliest useful poll time for active work, including deadline expiry.
+  /// Zero is a valid wrapping timestamp when `operationState` is `ACTIVE`.
+  uint32_t nextDueMs = 0;
   uint32_t nextSafeCommandMs = 0; ///< Earliest safe admission when validity is true.
   bool nextSafeCommandValid = false; ///< Whether `nextSafeCommandMs` is meaningful.
   uint32_t sensorEpoch = 0; ///< Current cache/provenance epoch.
@@ -739,7 +771,10 @@ struct PollResult {
   OperationId id = {}; ///< Active or retained identity, when present.
   OperationKind kind = OperationKind::NONE; ///< Active or retained operation kind.
   Status status = Status::Ok(); ///< Progress/admission/terminal status.
-  uint32_t nextDueMs = 0; ///< Earliest useful poll time for active work.
+
+  /// Earliest useful poll time for active work, including deadline expiry.
+  /// Zero is a valid wrapping timestamp when `state` is `ACTIVE`.
+  uint32_t nextDueMs = 0;
   uint8_t callbacksUsed = 0; ///< Physical attempts used by this poll call.
 };
 
@@ -916,6 +951,7 @@ private:
     uint8_t fieldIndex = 0;
     uint8_t callbacksUsed = 0;
     bool effectfulWriteAttempted = false;
+    bool settingValueChanged = false;
   };
 
   Status _validateConfig(const Config& config) const;
@@ -960,6 +996,7 @@ private:
   void _recordProtocolFailure(const Status& status, uint32_t nowMs);
   void _recordOperationOutcome(const OperationResult& result);
 
+  uint32_t _nextPollDueMs() const;
   static bool _timeReached(uint32_t nowMs, uint32_t targetMs);
   static bool _deadlineValid(uint32_t nowMs, uint32_t deadlineMs);
   static bool _isSettingWrite(OperationKind kind);
@@ -995,6 +1032,7 @@ private:
 
   Identity _identity = {};
   ConfigurationSnapshot _configuration = {};
+  ConfigurationField _pressureCompensation = ConfigurationField::NONE;
   FixedSample _latestSample = {};
   bool _latestSampleValid = false;
   HealthSnapshot _health = {};

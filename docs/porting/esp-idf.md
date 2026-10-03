@@ -1,10 +1,14 @@
 # ESP-IDF Porting Guide
 
-The core library is a native C++17 ESP-IDF component. It does not use Arduino,
-`Wire`, FreeRTOS, `esp_timer`, logging, or the ESP-IDF I2C driver internally.
-Those dependencies belong to the application adapter and owner task.
+The framework-neutral C++17 core can be consumed as a native ESP-IDF component.
+It does not use Arduino, `Wire`, FreeRTOS, `esp_timer`, logging, or the ESP-IDF
+I2C driver internally. Those dependencies belong to the application adapter and
+owner task. Component metadata does not restrict the target MCU; the bundled
+examples and CI builds target ESP32-S2 and ESP32-S3.
 
-The complete native example is in `examples/idf/basic`.
+The complete native example is in `examples/idf/basic`. Its transport requires
+ESP-IDF 6 or newer and CI pins `6.0.1`; that example-only requirement does not
+apply to consumers supplying their own transport.
 
 ## Component use
 
@@ -147,6 +151,35 @@ NACK codes. The driver marks only those transfers with
 `TransferIntent::EXPECTED_WRITE_NACK`; a generic `NACK` is accepted only in a
 marked phase. Timeout and bus error remain failures.
 
+## Backend compatibility
+
+Framework version support depends on the consuming application's transport,
+not on the framework-neutral core. The included adapters use two specific
+baselines whose error contracts preserve a genuine NACK:
+
+- Native ESP-IDF `6.0.1`, using the synchronous master API described above.
+- Arduino-ESP32 `3.1.3` / ESP-IDF `5.3.2`, pinned by
+  [pioarduino `53.03.13`](https://github.com/pioarduino/platform-espressif32/releases/tag/53.03.13).
+  Its [legacy I2C HAL](https://github.com/espressif/arduino-esp32/blob/3.1.3/cores/esp32/esp32-hal-i2c.c)
+  uses the legacy driver's distinct NACK result, and
+  [Wire](https://github.com/espressif/arduino-esp32/blob/3.1.3/libraries/Wire/src/Wire.cpp)
+  maps that result to error 2. The example maps it to framework-neutral `NACK`.
+
+ESP-IDF 5.5.5's new master backend does **not** provide that error contract: its
+[synchronous transfer implementation](https://github.com/espressif/esp-idf/blob/v5.5.5/components/esp_driver_i2c/i2c_master.c#L683-L687)
+returns `ESP_ERR_INVALID_STATE` for multiple failed transfer conditions. Arduino
+3.3.11 forwards that result through its new I2C HAL, and Wire reports generic
+error 4. That Wire backend cannot qualify wake-up NACKs reliably. Do not map
+error 4 or `INVALID_STATE` to NACK or success: doing so also hides bus faults.
+The native example rejects pre-6 ESP-IDF builds instead of silently accepting
+that incompatible error contract. Arduino's separate legacy backend is why
+the Arduino example uses its selected older baseline.
+
+These are source-level transport distinctions, not physical validation.
+Verify wake NACK, an unrelated bus fault, and bounded callback latency on the
+actual board before claiming a backend works. A consumer may use another
+framework or version with its own adapter that preserves this same contract.
+
 ## Owner-task loop
 
 Bind without I2C:
@@ -196,7 +229,7 @@ for (;;) {
     break;
   }
   // A real owner schedules other bus work and wakes at progress.nextDueMs.
-  vTaskDelay(pdMS_TO_TICKS(1));
+  vTaskDelay(1); // At least one RTOS tick, including a 100 Hz tick configuration.
 }
 ```
 
@@ -217,6 +250,11 @@ The ESP-IDF example intentionally uses:
 It must not use `Arduino.h`, `Wire.h`, `TwoWire`, `String`, `Serial`,
 Arduino-compatibility facades, or the Arduino CLI implementation. Command parity
 is checked by `tools/check_idf_example_contract.py`.
+
+Console input uses `O_NONBLOCK` and consumes at most 128 bytes per owner-loop
+iteration, including discarded overlong lines. Partial input cannot block the
+operation engine. The loop yields for one FreeRTOS tick; converting 1 ms to
+ticks can yield zero at the default 100 Hz tick rate.
 
 ## Build checks
 

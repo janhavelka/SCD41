@@ -1,9 +1,11 @@
 # External I2C Owner Integration
 
-This guide is for systems where one application task owns the I2C controller
-and schedules several device drivers. The SCD41 library is a protocol state
-machine below that owner. It does not own a bus, task, mutex, queue, deadline,
-retry policy, recovery policy, or sensor power rail.
+This guide covers a shared I2C bus whose application owns the controller and
+serializes driver access. The owner can be a main loop or a task. The SCD41
+library is a protocol state machine below that owner. It does not own a bus,
+task, mutex, queue, retry policy, recovery policy, or sensor power rail. The
+owner chooses deadlines; the driver enforces the immutable deadline of each
+admitted operation.
 
 ## Ownership boundary
 
@@ -25,8 +27,8 @@ The driver owns:
 - SCD41-local mode, identity, configuration, sample, and diagnostic health
 - conservative cache invalidation and hardware-effect reporting
 
-No core method takes a platform lock. Call the instance only from the owner task
-or serialize it externally. Public APIs are not ISR-safe.
+No core method takes a platform lock. Call the instance only from its owner
+context or serialize it externally. Public APIs are not ISR-safe.
 
 Transport callbacks are synchronous leaves: they must not call `begin`,
 `start`, `poll`, `cancel`, `takeResult`, `end`, or any cache accessor on the
@@ -106,7 +108,8 @@ options.deadlineMs = nowMs + limits.maxWaitMs +
     ownerSchedulingMarginMs;
 
 SCD41::OperationId id;
-Status status = sensor.start(OperationRequest::make(kind), options, id);
+SCD41::Status status = sensor.start(
+    SCD41::OperationRequest::make(kind), options, id);
 ```
 
 `start()` performs admission and validation only. It performs zero I2C. The
@@ -121,7 +124,14 @@ The driver accepts any such finite deadline; the application owns queueing and
 scheduling slack. A practical minimum budget is the published sensor wait plus
 `maxCallbacks * transferTimeoutMs`, followed by an explicit owner margin.
 
-### 4. Advance from the owner task
+For a 64-bit monotonic clock, validate that the remaining deadline is positive
+and at most `INT32_MAX` milliseconds before projecting now, deadline, poll,
+cancellation, and callback completion to `uint32_t`. Keep one clock domain;
+do not mix uptime with an independent framework clock or wall time. Reconstruct
+a future `nextDueMs` from its wrapping delta to the same 32-bit now, rather than
+directly widening the timestamp.
+
+### 4. Advance from the owner context
 
 ```cpp
 const SCD41::PollResult progress = sensor.poll(nowMs, 1);
@@ -130,8 +140,12 @@ const SCD41::PollResult progress = sensor.poll(nowMs, 1);
 The numeric budget is a hard cap on callback invocations in that call. With a
 budget of one, the owner regains control after at most one configured transfer
 timeout plus bounded CPU work. A wait gate calls no transport and returns the
-next due time. The owner should schedule again at or after `nextDueMs`; frequent
-early polling is safe but unnecessary.
+next due time. For active work, `nextDueMs` in both the poll result and runtime
+snapshot is the earlier of the next sensor phase and the operation deadline.
+The owner should schedule at that time; later polling delays observation of
+completion or timeout. Frequent early polling is safe but unnecessary. This
+scheduling hint does not shorten `nextSafeCommandMs`: a timed-out or cancelled
+command can still require its full sensor settle window before new admission.
 
 The driver does not sleep between the command-write and response-read phases.
 Those are separate poll calls when the budget is one.
@@ -142,7 +156,7 @@ When `progress.state == RESULT_PENDING`, consume the matching result:
 
 ```cpp
 SCD41::OperationResult result;
-Status status = sensor.takeResult(progress.id, result);
+SCD41::Status status = sensor.takeResult(progress.id, result);
 ```
 
 The result is delivered exactly once. A mismatched ID is stale and cannot drain
@@ -198,6 +212,9 @@ argument, that result uses the last owner timestamp accepted by the driver.
 
 Rare work is not forced into a steady-state latency. Self-test can wait 10 s,
 for example, while each poll still performs no more than the owner budget.
+The application may service other devices during zero-I2C waits; the driver
+does not schedule that work. Retain requests and their results long enough for
+the chosen operation deadline, including queue and scheduling delays.
 
 Current per-operation limits are:
 
@@ -363,7 +380,7 @@ the session history until the next successful bind.
 
 ## Integration checklist
 
-- [ ] One task owns the instance and bus serialization.
+- [ ] One execution context owns the instance and bus serialization.
 - [ ] Adapter timeout is compatible with the owner's per-slot latency budget.
 - [ ] Adapter returns one attempt, exact byte counts, disposition, and clock.
 - [ ] Every start uses a nonzero correlation ID and explicit deadline.

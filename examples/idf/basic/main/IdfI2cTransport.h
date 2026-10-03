@@ -3,6 +3,11 @@
 #pragma once
 
 #include <driver/i2c_master.h>
+#include <esp_idf_version.h>
+
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
+#error "This example adapter requires ESP-IDF 6.0+ for distinct synchronous NACK reporting."
+#endif
 
 #include "SCD41/Config.h"
 

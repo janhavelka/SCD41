@@ -161,6 +161,7 @@ Status SCD41::begin(const Config& config) {
   _workingValue = {};
   _identity = {};
   _configuration = {};
+  _pressureCompensation = ConfigurationField::NONE;
   _latestSample = {};
   _latestSampleValid = false;
   _health = {};
@@ -201,7 +202,7 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
     result.state = OperationState::ACTIVE;
     result.status =
         Status::Error(Err::INVALID_PARAM, "Owner clock moved backwards");
-    result.nextDueMs = _active.nextDueMs;
+    result.nextDueMs = _nextPollDueMs();
     return result;
   }
   uint8_t callbacksRemaining = maxCallbacks;
@@ -257,7 +258,7 @@ PollResult SCD41::poll(uint32_t nowMs, uint8_t maxCallbacks) {
     result.id = _active.id;
     result.kind = _active.request.kind;
     result.status = Status::Error(Err::IN_PROGRESS, "Operation active");
-    result.nextDueMs = _active.nextDueMs;
+    result.nextDueMs = _nextPollDueMs();
   } else {
     result.state = OperationState::IDLE;
     result.status = Status::Ok();
@@ -367,6 +368,7 @@ void SCD41::end() {
   _config = {};
   _identity.valid = false;
   _configuration.verifiedMask = 0;
+  _pressureCompensation = ConfigurationField::NONE;
   _latestSampleValid = false;
   _health.state = DriverState::UNINIT;
 }
@@ -389,7 +391,7 @@ RuntimeSnapshot SCD41::runtimeSnapshot() const {
   if (_activeValid) {
     snapshot.operationId = _active.id;
     snapshot.operationKind = _active.request.kind;
-    snapshot.nextDueMs = _active.nextDueMs;
+    snapshot.nextDueMs = _nextPollDueMs();
   } else if (_terminalValid) {
     snapshot.operationId = _terminal.id;
     snapshot.operationKind = _terminal.kind;
@@ -612,6 +614,9 @@ Status SCD41::_validateStart(const OperationRequest& request,
   if (request.kind == OperationKind::NONE || options.requestId == 0U) {
     return Status::Error(Err::INVALID_PARAM, "Invalid operation request");
   }
+  if (limits(request.kind).maxCallbacks == 0U) {
+    return Status::Error(Err::UNSUPPORTED, "Unsupported operation");
+  }
   if (!_deadlineValid(options.nowMs, options.deadlineMs)) {
     return Status::Error(Err::INVALID_PARAM, "Invalid operation deadline");
   }
@@ -748,6 +753,7 @@ Status SCD41::_validateAdmission(OperationKind kind) const {
       case OperationKind::SET_ASC_INITIAL_PERIOD:
       case OperationKind::READ_ASC_STANDARD_PERIOD:
       case OperationKind::SET_ASC_STANDARD_PERIOD:
+      case OperationKind::READ_CONFIGURATION:
       case OperationKind::POWER_DOWN:
       case OperationKind::WAKE_UP:
         return Status::Error(Err::UNSUPPORTED,
@@ -1259,9 +1265,15 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
               _lastTransferDisposition == TransferDisposition::INDETERMINATE) {
             _configuration.verifiedMask &=
                 static_cast<uint16_t>(~fieldMask);
-            _configuration.dirtyMask |=
-                static_cast<uint16_t>(fieldMask &
-                                      PERSISTABLE_CONFIGURATION_FIELDS);
+            if (_active.settingValueChanged) {
+              _configuration.dirtyMask |=
+                  static_cast<uint16_t>(fieldMask &
+                                        PERSISTABLE_CONFIGURATION_FIELDS);
+            }
+            if (kind == OperationKind::SET_SENSOR_ALTITUDE ||
+                kind == OperationKind::SET_AMBIENT_PRESSURE) {
+              _pressureCompensation = ConfigurationField::NONE;
+            }
           }
           if (!status.ok()) {
             return status;
@@ -1306,7 +1318,14 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                 static_cast<uint16_t>(~fieldMask);
             _recordProtocolFailure(validation, nowMs);
           }
-          if (word == _active.desiredRaw) {
+          _active.settingValueChanged = word != _active.desiredRaw;
+          // The compensation setters also choose which pressure source is
+          // active. Their readable words alone do not reveal that selection.
+          const bool selectionRequired =
+              (kind == OperationKind::SET_SENSOR_ALTITUDE ||
+               kind == OperationKind::SET_AMBIENT_PRESSURE) &&
+              _pressureCompensation != _fieldFor(kind);
+          if (!_active.settingValueChanged && !selectionRequired) {
             if (!validation.ok()) {
               return validation;
             }
@@ -1336,6 +1355,10 @@ Status SCD41::_stepWriteLike(uint32_t& nowMs, uint8_t& callbacksRemaining) {
                   Status::Error(Err::COMMAND_FAILED,
                                 "Setting readback mismatch", word), nowMs);
           return Status::Ok();
+        }
+        if (kind == OperationKind::SET_SENSOR_ALTITUDE ||
+            kind == OperationKind::SET_AMBIENT_PRESSURE) {
+          _pressureCompensation = _fieldFor(kind);
         }
         _finishOperation(OperationOutcome::SUCCEEDED, EffectState::VERIFIED, Status::Ok(),
                 nowMs);
@@ -1928,6 +1951,28 @@ Status SCD41::_attemptTransfer(const uint8_t* writeData, size_t writeLength,
     }
   }
   const size_t expectedBytes = writeLength + readLength;
+  const bool invalidCode =
+      static_cast<uint8_t>(normalized.code) >
+      static_cast<uint8_t>(TransferCode::FAILED);
+  const bool invalidDisposition =
+      static_cast<uint8_t>(normalized.disposition) >
+      static_cast<uint8_t>(TransferDisposition::INDETERMINATE);
+  const bool contradictoryBytes =
+      normalized.bytesTransferred > expectedBytes ||
+      (normalized.disposition == TransferDisposition::NOT_STARTED &&
+       normalized.bytesTransferred != 0U) ||
+      (effectful && normalized.disposition == TransferDisposition::NO_EFFECT &&
+       normalized.bytesTransferred == expectedBytes);
+  if (invalidCode || invalidDisposition || contradictoryBytes) {
+    normalized.code = TransferCode::FAILED;
+    if (invalidDisposition || contradictoryBytes ||
+        normalized.disposition != TransferDisposition::NOT_STARTED) {
+      normalized.disposition = TransferDisposition::INDETERMINATE;
+    }
+    _recordProtocolFailure(
+        Status::Error(Err::I2C_ERROR, "Invalid transport result", normalized.detail),
+        normalized.completedMs);
+  }
   if (normalized.code == TransferCode::OK &&
       (normalized.disposition != TransferDisposition::COMPLETE ||
        normalized.bytesTransferred != expectedBytes)) {
@@ -2167,6 +2212,7 @@ void SCD41::_markReconciliationRequired() {
   _reconciliationRequired = true;
   _setMode(OperatingMode::UNKNOWN, ModeEvidence::UNKNOWN);
   _configuration.verifiedMask = 0;
+  _pressureCompensation = ConfigurationField::NONE;
   _latestSampleValid = false;
 }
 
@@ -2176,6 +2222,7 @@ void SCD41::_advanceSensorEpoch() {
     _sensorEpoch = 1U;
   }
   _sampleSequence = 0U;
+  _pressureCompensation = ConfigurationField::NONE;
   _latestSampleValid = false;
 }
 
@@ -2244,6 +2291,14 @@ void SCD41::_recordOperationOutcome(const OperationResult& result) {
       _health.lastOperationErrorKind = result.kind;
       break;
   }
+}
+
+uint32_t SCD41::_nextPollDueMs() const {
+  // Expiring host work is useful even while the sensor must keep settling.
+  // Keep the internal phase wait and physical command-safety gate unchanged.
+  return _timeReached(_active.nextDueMs, _active.deadlineMs)
+             ? _active.deadlineMs
+             : _active.nextDueMs;
 }
 
 bool SCD41::_timeReached(uint32_t nowMs, uint32_t targetMs) {

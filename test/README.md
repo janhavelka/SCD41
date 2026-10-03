@@ -9,6 +9,8 @@ Coverage includes:
 - zero-I2C bind/admission/cancel/result/end contracts
 - callback budgets, exact operation identity, deadlines, cancellation, and
   32-bit clock wrap across the distinct state-machine topologies
+- deadline-aware next-poll hints during sensor waits, including clock wrap,
+  without shortening retained command-safety windows
 - successful execution and per-transfer fault injection for every public
   `OperationKind`
 - attach convergence, mode admission, expected NACKs, and retained safety gates
@@ -32,6 +34,14 @@ Coverage includes:
   at, and after settle (including clock wrap), and persistence uncertainty
   after failed identity verification
 - fixed-width/copy/size checks for owner-boundary value types
+- independent literal command/payload/CRC vectors from the datasheet
+- both ASC periods accepting zero, the 4-hour minimum step and 65532-hour
+  maximum, rejecting unsupported encodings without I2C, verifying readback,
+  skipping unchanged writes, and persisting only with explicit confirmation
+- equal-value compensation-source selection and its lifecycle invalidation
+- malformed transfer enums/counts retaining reconciliation and settle windows
+- unknown operation admission preserving the accepted owner clock
+- non-strict SCD40 composite reads rejecting unsupported ASC period commands
 
 Prefer public API assertions. Do not expose private driver state to make a test
 easy; observable snapshots and terminal results are part of the contract.

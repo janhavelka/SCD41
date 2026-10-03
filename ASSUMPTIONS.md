@@ -22,7 +22,9 @@ core driver cannot determine by itself.
   datasheet v1.7 states no narrower valid subrange. Selecting a physically
   useful target/reference remains application policy.
 - ASC initial and standard periods are uint16 hours in integer multiples of
-  four; zero requests immediate correction.
+  four; zero requests immediate correction for either period. The initial
+  period applies once after first operation or factory reset; subsequent
+  corrections use the standard period.
 - A generic write NACK for a request marked `EXPECTED_WRITE_NACK` is sufficient
   evidence for the documented wake-up behavior. Timeout, bus error, short
   transfer, and generic failure are not accepted as expected wake behavior.
@@ -33,8 +35,26 @@ core driver cannot determine by itself.
   EEPROM dimensioned for the specified sensor lifetime. Forced recalibration is
   therefore classified as nonvolatile maintenance even though it does not use
   the 2000-cycle user-settings EEPROM budget.
+- Single-shot ASC assumes one measurement every five minutes. Faster
+  ASC-enabled measurements shorten calibration-storage lifetime in proportion;
+  changing cadence also changes the real time represented by its shot-counted
+  periods. ASC cannot be used with power-cycled single shots, including sensor
+  power-down/wake cycles. See `docs/reference/scd41-protocol.md`.
+- Pressure and altitude writes select different compensation sources. Reading
+  their saved values does not reveal which source is active; equal-word setters
+  must establish the selection when the driver lacks evidence of it.
 
 ## Host integration assumptions
+
+- The core requires C++17 and has no framework, RTOS, MCU, or bus-controller
+  dependency. Arduino and native ESP-IDF adapters are examples; ESP32-S2/S3
+  compiler coverage does not establish hardware validation on those or other
+  targets.
+- Expected wake-up NACKs require a transport that preserves a real NACK result.
+  The examples select Arduino 3.1.3's legacy Wire backend and native ESP-IDF
+  6.0.1 for their distinct NACK mappings. Arduino 3.3.11 / ESP-IDF 5.5.5 loses
+  that evidence; source or build compatibility alone does not prove a usable
+  transport. See the backend contract in `docs/porting/esp-idf.md`.
 
 - `TransferResult::completedMs`, operation `nowMs`, and poll `nowMs` use the same
   wrapping 32-bit monotonic millisecond clock.

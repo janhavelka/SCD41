@@ -7,17 +7,24 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <limits>
 
 #include "SCD41/Config.h"
 
 namespace transport {
 
 inline bool initWire(int sda, int scl, uint32_t freqHz, uint32_t timeoutMs) {
+  if (timeoutMs == 0U ||
+      timeoutMs > std::numeric_limits<uint16_t>::max()) {
+    return false;
+  }
   if (!Wire.begin(sda, scl)) {
     return false;
   }
-  Wire.setClock(freqHz);
-  Wire.setTimeOut(timeoutMs);
+  if (!Wire.setClock(freqHz)) {
+    return false;
+  }
+  Wire.setTimeOut(static_cast<uint16_t>(timeoutMs));
   return true;
 }
 
@@ -33,6 +40,7 @@ inline SCD41::TransferResult wireTransfer(
     void* user) {
   TwoWire* wire = static_cast<TwoWire*>(user);
   if (wire == nullptr || request.timeoutMs == 0U ||
+      request.timeoutMs > std::numeric_limits<uint16_t>::max() ||
       (request.writeLength == 0U && request.readLength == 0U) ||
       (request.writeLength > 0U && request.writeData == nullptr) ||
       (request.readLength > 0U && request.readData == nullptr)) {
@@ -40,7 +48,7 @@ inline SCD41::TransferResult wireTransfer(
                   SCD41::TransferDisposition::NOT_STARTED, 0, 0);
   }
 
-  wire->setTimeOut(request.timeoutMs);
+  wire->setTimeOut(static_cast<uint16_t>(request.timeoutMs));
   size_t transferred = 0;
 
   if (request.writeLength > 0U) {
@@ -53,7 +61,7 @@ inline SCD41::TransferResult wireTransfer(
     if (written != request.writeLength) {
       return result(SCD41::TransferCode::SHORT_TRANSFER,
                     SCD41::TransferDisposition::INDETERMINATE,
-                    static_cast<int32_t>(wireStatus), transferred);
+                    static_cast<int32_t>(wireStatus), 0U);
     }
     switch (wireStatus) {
       case 0:
@@ -61,7 +69,7 @@ inline SCD41::TransferResult wireTransfer(
       case 1:
         return result(SCD41::TransferCode::SHORT_TRANSFER,
                       SCD41::TransferDisposition::INDETERMINATE, wireStatus,
-                      transferred);
+                      0U);
       case 2:
       case 3:
         // Arduino-ESP32 returns 2 for any unacknowledged byte and cannot prove
@@ -95,7 +103,7 @@ inline SCD41::TransferResult wireTransfer(
                     SCD41::TransferDisposition::INDETERMINATE, 0, transferred);
     }
     if (received != request.readLength) {
-      while (wire->available() > 0) {
+      for (size_t i = 0; i < received && wire->available() > 0; ++i) {
         (void)wire->read();
       }
       return result(SCD41::TransferCode::SHORT_TRANSFER,

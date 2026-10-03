@@ -13,7 +13,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <sys/select.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "IdfI2cTransport.h"
@@ -149,15 +149,11 @@ bool readLine(Line& output) {
   static char buffer[CLI_LINE_CAPACITY]{};
   static size_t length = 0;
   static bool overflow = false;
-  fd_set readSet;
-  FD_ZERO(&readSet);
-  FD_SET(STDIN_FILENO, &readSet);
-  timeval timeout{};
-  const int ready = select(STDIN_FILENO + 1, &readSet, nullptr, nullptr, &timeout);
-  if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &readSet)) return false;
-
   char value = '\0';
-  while (read(STDIN_FILENO, &value, 1) == 1) {
+  // stdin is explicitly nonblocking; partial or continuous input must never
+  // hold up driver polling, operation deadlines, or the other owner work.
+  for (size_t consumed = 0; consumed < CLI_LINE_CAPACITY; ++consumed) {
+    if (read(STDIN_FILENO, &value, 1) != 1) break;
     if (value == '\b' || value == 0x7F) {
       if (!overflow && length > 0U) --length;
       continue;
@@ -790,6 +786,12 @@ esp_err_t addSensor() {
 }  // namespace
 
 extern "C" void app_main(void) {
+  const int inputFlags = fcntl(STDIN_FILENO, F_GETFL, 0);
+  if (inputFlags < 0 ||
+      fcntl(STDIN_FILENO, F_SETFL, inputFlags | O_NONBLOCK) < 0) {
+    LOGE("Cannot configure nonblocking console input: errno=%d", errno);
+    return;
+  }
   ESP_ERROR_CHECK(createBus());
   ESP_ERROR_CHECK(addSensor());
   i2cContext.device = sensorHandle;
@@ -803,6 +805,7 @@ extern "C" void app_main(void) {
     serviceWorkflow();
     Line line;
     if (readLine(line)) { processCommand(line); printPrompt(); }
-    vTaskDelay(pdMS_TO_TICKS(1));
+    // pdMS_TO_TICKS(1) is zero with the default 100 Hz FreeRTOS tick.
+    vTaskDelay(1);
   }
 }

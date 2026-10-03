@@ -18,7 +18,9 @@ inline bool readLine(String& outLine) {
     reserved = true;
   }
 
-  while (LOG_SERIAL.available() > 0) {
+  // A continuous stream (including an overlong line) must yield to poll().
+  for (size_t consumed = 0; consumed <= MAX_LINE_LENGTH &&
+                            LOG_SERIAL.available() > 0; ++consumed) {
     const char c = static_cast<char>(LOG_SERIAL.read());
 
     if (c == '\b' || c == 0x7F) {
