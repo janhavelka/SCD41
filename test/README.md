@@ -4,6 +4,43 @@
 framework-neutral SCD41 core. It uses an injected fixed-memory sensor transport
 model; production code contains no fake transport.
 
+## Running tests
+
+Run from the full source checkout root. Use Python 3.11 and a C++17 GCC/Clang
+compiler on `PATH`; `CXX` can name a compiler executable. Adapter regressions
+compile host harnesses, so they also need that compiler. On Windows, use the
+repository wrapper and the existing VS Code-managed PlatformIO installation:
+
+```powershell
+.\scripts\pio.cmd test -e native
+python tools/test_audit_guards.py
+python tools/test_scd41_hil_runner.py
+python tools/scd41_hil_runner.py --parser-self-test
+python tools/scd41_hil_runner.py --dry-run --output-dir hil-results
+```
+
+These tests do not need `pyserial` or hardware. `test_audit_guards.py` covers
+package boundaries, CLI guards, and actual example adapters compiled against
+host framework stubs. `test_scd41_hil_runner.py` exercises serial parsing and
+evidence validation with controlled input; it is not a physical HIL run.
+
+Linux CI also runs the same Unity suite with undefined-behavior sanitizer:
+
+```bash
+python -m platformio test -e native
+python -m platformio test -e native_ubsan
+```
+
+The Windows wrapper can select `native_ubsan`, but the installed compiler must
+provide its UBSan runtime. A missing runtime is an unavailable check, not a
+passing sanitizer result. The complete static, package, Arduino, and Doxygen
+commands are in [README.md](../README.md#examples-and-validation); native
+ESP-IDF commands are in the [porting guide](../docs/porting/esp-idf.md#build-checks).
+Run those relevant checks after the focused regressions pass. Record actual
+command output and do not infer hardware behavior from a firmware build.
+
+## Public-contract coverage
+
 Coverage includes:
 
 - zero-I2C bind/admission/cancel/result/end contracts

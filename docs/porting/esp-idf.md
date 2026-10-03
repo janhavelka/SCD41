@@ -258,24 +258,45 @@ ticks can yield zero at the default 100 Hz tick rate.
 
 ## Build checks
 
-Repository checks on Windows:
+Repository checks on Windows require the complete source checkout. Installed
+library packages include the native example and core, but omit the repository
+tools and PlatformIO wrapper. The complete host/package/Doxygen sequence is in
+[README.md](../../README.md#examples-and-validation); focused example checks are:
 
 ```powershell
 python tools/check_core_timing_guard.py
 python tools/check_repository_hygiene.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
+python tools/test_audit_guards.py
 .\scripts\pio.cmd test -e native
 ```
 
-In an ESP-IDF v6.0.1 environment:
+For the native firmware, open an ESP-IDF v6.0.1 PowerShell environment and run
+from the repository root. Use separate build directories and `SDKCONFIG` files
+so building S2 does not replace S3's configuration. These absolute paths keep
+both generated outputs under ignored `.pio/`:
 
-```bash
-idf.py -C examples/idf/basic -B build-esp32s3 set-target esp32s3
-idf.py -C examples/idf/basic -B build-esp32s3 build
-idf.py -C examples/idf/basic -B build-esp32s2 set-target esp32s2
-idf.py -C examples/idf/basic -B build-esp32s2 build
+```powershell
+New-Item -ItemType Directory -Force .pio | Out-Null
+$scd41IdfS3Build = Join-Path $PWD '.pio/idf-esp32s3'
+$scd41IdfS3Config = Join-Path $PWD '.pio/sdkconfig.esp32s3'
+$scd41IdfS2Build = Join-Path $PWD '.pio/idf-esp32s2'
+$scd41IdfS2Config = Join-Path $PWD '.pio/sdkconfig.esp32s2'
+idf.py --version
+idf.py -C examples/idf/basic -B $scd41IdfS3Build -D "SDKCONFIG=$scd41IdfS3Config" set-target esp32s3
+idf.py -C examples/idf/basic -B $scd41IdfS3Build -D "SDKCONFIG=$scd41IdfS3Config" build
+idf.py -C examples/idf/basic -B $scd41IdfS2Build -D "SDKCONFIG=$scd41IdfS2Config" set-target esp32s2
+idf.py -C examples/idf/basic -B $scd41IdfS2Build -D "SDKCONFIG=$scd41IdfS2Config" build
 ```
+
+Run `set-target` for initial configuration or a deliberate reset of that
+target's settings; repeat only the `build` command for incremental builds.
+ESP-IDF documents the configurable `SDKCONFIG` output path in its
+[build-system guide](https://docs.espressif.com/projects/esp-idf/en/v6.0.1/esp32/api-guides/build-system.html).
+On other shells, use equivalent absolute paths with the same `-C`, `-B`, and
+`-D SDKCONFIG=...` arguments. The repository's CI uses isolated checkouts for
+each target instead.
 
 Do not claim a local ESP-IDF or hardware pass without retaining the command
 output or hardware transcript.

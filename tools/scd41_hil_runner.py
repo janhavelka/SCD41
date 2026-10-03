@@ -525,6 +525,7 @@ def validate_evidence(step: Step, output: str, state: dict) -> dict[str, object]
                 "terminal result is unsuccessful or requires reconciliation")
         require(number(start, "deadline") == number(timing, "deadline"), "operation deadline changed")
         require(all(0 <= number(timing, field) <= UINT32_MASK for field in ("started", "completed", "deadline")), "invalid 32-bit operation timestamp")
+        require(0 < number(timing, "epoch") <= UINT32_MASK, "operation lacks a valid sensor epoch")
         duration = (number(timing, "completed") - number(timing, "started")) & UINT32_MASK
         budget = (number(timing, "deadline") - number(timing, "started")) & UINT32_MASK
         require(duration < budget < 0x80000000, "successful result reached or exceeded its deadline")
@@ -542,6 +543,9 @@ def validate_evidence(step: Step, output: str, state: dict) -> dict[str, object]
         block_end = starts[index + 1][0] if index + 1 < len(starts) else len(clean)
         block = clean[result_at:block_end]
         require(response_complete(Step("operation payload", "operation", ""), block), "successful operation is missing its payload")
+        for _position, identity_record in records(block, "identity"):
+            require(number(identity_record, "epoch") == number(timing, "epoch"),
+                    "identity epoch differs from operation")
         if result["op"] == "READ_CONFIGURATION":
             require(number(records(block, "config")[0][1], "verified") == 0x7F, "configuration operation has unverified fields")
         if result["op"] == "PERSIST_SETTINGS":
@@ -571,7 +575,8 @@ def validate_evidence(step: Step, output: str, state: dict) -> dict[str, object]
         require(identity.get("valid") == "yes" and parse_serial_number(f"serial={serial}") is not None,
                 "identity is not verified")
         require(number(identity, "serial") not in (0, 0xFFFFFFFFFFFF), "invalid sensor serial")
-        require(identity.get("variant") == "SCD41" and (number(identity, "variant_word") & 0xF000) == 0x1000,
+        require(identity.get("variant") == "SCD41" and 0 <= number(identity, "variant_word") <= 0xFFFF
+                and (number(identity, "variant_word") & 0xF000) == 0x1000,
                 "dedicated variant word does not identify SCD41")
         require(state.get("serial", serial) == serial, "sensor identity changed during run")
         state["serial"] = serial
@@ -615,7 +620,9 @@ def validate_evidence(step: Step, output: str, state: dict) -> dict[str, object]
     for _position, selftest in records(clean, "selftest"):
         require(number(selftest, "raw") == 0, "sensor self-test reports a fault")
     for _position, sample in records(clean, "sample"):
-        require(0 < number(sample, "seq") <= UINT32_MASK and number(sample, "epoch") > 0, "sample lacks provenance")
+        require(0 < number(sample, "seq") <= UINT32_MASK and 0 < number(sample, "epoch") <= UINT32_MASK,
+                "sample lacks valid provenance")
+        require(0 <= number(sample, "at") <= UINT32_MASK, "invalid 32-bit sample timestamp")
         require(-45000 <= number(sample, "temp_mC") <= 130000 and 0 <= number(sample, "rh_mPct") <= 100000,
                 "sample exceeds representable sensor range")
         flags = number(sample, "flags")
@@ -661,34 +668,40 @@ def read_until_match(
     transcript: list[str],
     step: Optional[Step] = None,
 ) -> tuple[bool, str]:
-    deadline = time.monotonic() + timeout_s
-    idle_deadline = time.monotonic() + idle_timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
+    idle_deadline = started + idle_timeout_s
     read_timeout = getattr(ser, "timeout", 0.1)
     buffer = ""
-    while time.monotonic() < deadline:
-        ser.timeout = max(0.0, min(read_timeout, deadline - time.monotonic(), idle_deadline - time.monotonic()))
-        chunk = ser.read(512)
-        if chunk:
-            text = chunk.decode("utf-8", errors="replace")
-            transcript.append(text)
-            require(len(transcript) <= MAX_TRANSCRIPT_CHUNKS, "serial transcript exceeded its bounded capture limit")
-            buffer += text
-            if len(buffer.encode("utf-8")) > MAX_STEP_BYTES:
-                raise RunnerError("serial response exceeded the bounded step buffer")
-            idle_deadline = time.monotonic() + idle_timeout_s
-            # The CLI colourizes the very tokens the expectations match, so the
-            # buffer must be normalized exactly like step_output_matches().
-            complete = response_complete(step, buffer) if step is not None else buffer.endswith("\n")
-            if complete:
-                ser.timeout = read_timeout
-                return pattern.search(strip_ansi(buffer)) is not None, buffer
-        else:
-            if time.monotonic() >= idle_deadline:
-                ser.timeout = read_timeout
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= deadline or now >= idle_deadline:
                 return False, buffer
-            time.sleep(0.02)
-    ser.timeout = read_timeout
-    return False, buffer
+            ser.timeout = min(read_timeout, deadline - now, idle_deadline - now)
+            chunk = ser.read(512)
+            received_at = time.monotonic()
+            if chunk:
+                text = chunk.decode("utf-8", errors="replace")
+                transcript.append(text)
+                require(len(transcript) <= MAX_TRANSCRIPT_CHUNKS, "serial transcript exceeded its bounded capture limit")
+                buffer += text
+                if len(buffer.encode("utf-8")) > MAX_STEP_BYTES:
+                    raise RunnerError("serial response exceeded the bounded step buffer")
+            # A backend may return late after a host scheduling delay. Keep that
+            # data as evidence, but it cannot satisfy an expired deadline.
+            if received_at >= deadline or received_at >= idle_deadline:
+                return False, buffer
+            if chunk:
+                idle_deadline = received_at + idle_timeout_s
+                # The CLI colourizes the very tokens the expectations match.
+                complete = response_complete(step, buffer) if step is not None else buffer.endswith("\n")
+                if complete:
+                    return pattern.search(strip_ansi(buffer)) is not None, buffer
+            else:
+                time.sleep(min(0.02, deadline - received_at, idle_deadline - received_at))
+    finally:
+        ser.timeout = read_timeout
 
 
 def drain_pending(ser, transcript: list[str], *, boot: bool = False) -> None:
@@ -801,6 +814,9 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
         f"- Python: `{summary['python_version']}`",
         f"- PlatformIO: `{summary['platformio_version']}`",
         f"- Include destructive: `{summary['include_destructive']}`",
+        f"- Include configuration writes: `{summary['include_config_writes']}`",
+        f"- Requested final compensation source: `{summary['configuration_final_compensation_requested']}`",
+        f"- Requested soak: `{summary['soak_samples_requested']}` samples in `{summary['soak_mode']}` mode",
         f"- Overall status: `{summary['status']}`",
         f"- Result counts: pass `{counts['pass']}`, fail `{counts['fail']}`, unknown `{counts['unknown']}`, not-run `{counts['not-run']}`",
         "",
@@ -820,6 +836,10 @@ def write_markdown(path: pathlib.Path, summary: dict[str, object]) -> None:
         )
     lines.extend(
         [
+            "",
+            "Manual hardware gates (the runner does not perform these):",
+            "",
+            *[f"- {gate.replace('_', ' ')}: `{status}`" for gate, status in summary["manual_gates"].items()],
             "",
             f"Raw transcript: `{summary['transcript_path']}`",
             "",

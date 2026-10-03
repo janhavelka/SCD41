@@ -466,8 +466,8 @@ struct OperationOptions {
 /// confirmation. `make()` is suitable for value-free operation kinds.
 struct OperationRequest {
   OperationKind kind = OperationKind::NONE; ///< Requested typed operation.
-  int32_t signedValue = 0; ///< Signed payload, currently temperature offset.
-  uint32_t value = 0; ///< Unsigned setting, FRC reference, or diagnostic word.
+  int32_t signedValue = 0; ///< Temperature offset in milli-degrees Celsius.
+  uint32_t value = 0; ///< Altitude m, pressure Pa, target/reference ppm, period h, ASC bool, or raw diagnostic word.
   uint16_t command = 0; ///< Command word for a diagnostic request.
   uint8_t wordCount = 0; ///< Diagnostic read count in the supported range 1..3.
   MaintenanceConfirmation confirmation = MaintenanceConfirmation::NONE; ///< Authority token.
@@ -738,8 +738,8 @@ struct OperationValue {
   Identity identity = {}; ///< Attach/identity/wake/reset verification payload.
   ConfigurationSnapshot configuration = {}; ///< Setting/config/persistence payload.
   DataReadyStatus dataReady = {}; ///< Data-ready payload.
-  int32_t signedValue = 0; ///< Temperature-offset or FRC signed result.
-  uint32_t value = 0; ///< Altitude/pressure/ASC numeric/self-test result.
+  int32_t signedValue = 0; ///< Temperature offset in milli-degrees Celsius or FRC correction in ppm.
+  uint32_t value = 0; ///< Altitude m, pressure Pa, ASC target ppm, ASC period h, or raw self-test word.
   uint16_t rawWords[3] = {}; ///< CRC-verified diagnostic/raw words.
   uint8_t wordCount = 0; ///< Number of valid entries in `rawWords`.
   bool boolValue = false; ///< ASC enabled read result.

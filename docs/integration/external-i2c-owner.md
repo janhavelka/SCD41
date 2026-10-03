@@ -55,6 +55,10 @@ One invocation means one physical attempt. The adapter must not retry. It must:
 6. Return the best supported effect disposition and byte count.
 7. Set `completedMs` from the same 32-bit monotonic clock used by the owner.
 
+`request.timeoutMs` is capped by both `Config::transferTimeoutMs` and the
+remaining operation deadline. Honor the per-request value even when it is
+shorter than the configured ceiling.
+
 Mapping guidance:
 
 | Adapter observation | `TransferCode` | `TransferDisposition` |

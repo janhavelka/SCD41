@@ -39,15 +39,58 @@ the observation that supports it.
 
 ## Runner
 
+Use Python 3.11 and a complete [source checkout](https://github.com/janhavelka/SCD41),
+then run commands from its root. Installed library packages omit `tools/` and
+the build/check scripts. The parser self-test and dry-run need only Python's
+standard library:
+
 ```powershell
 python tools/scd41_hil_runner.py --parser-self-test
-python tools/scd41_hil_runner.py --dry-run --port COM8 --output-dir hil-results
-python tools/scd41_hil_runner.py `
-  --port COM8 --baud 115200 --output-dir hil-results `
-  --board "ESP32-S3 DevKitC-1" `
-  --firmware-commit "<actually flashed commit; note dirty builds>" `
-  --build-command "idf.py -C examples/idf/basic -B build-esp32s3 build" `
-  --fixture "SCD41 at 3.3 V; SDA/SCL and pullups recorded"
+python tools/scd41_hil_runner.py --dry-run --output-dir hil-results
+python tools/scd41_hil_runner.py --dry-run --include-config-writes
+python tools/scd41_hil_runner.py --dry-run --soak-mode periodic --soak-samples 2
+python tools/scd41_hil_runner.py --dry-run --soak-mode low-power --soak-samples 2
+python tools/scd41_hil_runner.py --dry-run --soak-mode single --soak-samples 2
+python tools/scd41_hil_runner.py --dry-run --include-destructive `
+  --confirm-destructive "I understand EEPROM and calibration risk"
+python tools/scd41_hil_runner.py --dry-run --include-destructive --skip-safe `
+  --confirm-destructive "I understand EEPROM and calibration risk"
+```
+
+Before a live run, build and flash the selected example for the actual board,
+and retain the build output. Verify the matching example configuration against
+the wiring: Arduino uses `examples/common/BoardConfig.h`; native ESP-IDF uses
+`SCD41_IDF_I2C_SDA`, `SCD41_IDF_I2C_SCL`, and `SCD41_IDF_I2C_FREQ_HZ` in
+`examples/idf/basic/main/main.cpp`. Both default to SDA GPIO8, SCL GPIO9, and
+400 kHz, which is the datasheet's maximum bus frequency. These defaults are
+not fixture evidence. Native ESP-IDF setup is in the
+[porting guide](../porting/esp-idf.md#build-checks).
+Close PlatformIO/IDF serial monitors and any other application using the port.
+Opening serial may reset the MCU; the runner allows a 2 s boot settle by
+default, configurable with `--boot-settle-s` (0..60 s).
+
+Install the live serial dependency into the Python environment used to run the
+script, then list ports:
+
+```powershell
+python -m pip install pyserial
+python -m serial.tools.list_ports
+```
+
+For a live safe smoke run, replace every placeholder below with the actual
+flashed build and fixture details. Keep this argument array for the optional
+configuration, soak, and maintenance commands later in this guide:
+
+```powershell
+$hilArguments = @(
+  '--port', 'COM8', '--baud', '115200', '--output-dir', 'hil-results',
+  '--board', '<board type and revision>',
+  '--operator', '<name or initials>',
+  '--firmware-commit', '<actually flashed commit; note dirty changes>',
+  '--build-command', '<exact command used to build that firmware>',
+  '--fixture', '<sensor identity; supply; SDA/SCL; speed; pullups; other devices>'
+)
+python tools/scd41_hil_runner.py @hilArguments
 ```
 
 Parser self-test and dry-run do not open serial and do not create hardware
@@ -59,8 +102,9 @@ attempts do not pollute the checkout; retain only reviewed live evidence that a
 release gate actually requires.
 
 The host checkout commit is **not** evidence of the firmware currently flashed
-to the board. Supply `--firmware-commit` and `--build-command`, and retain the
-build output. Unspecified fixture/operator/build fields remain `NOT_RECORDED`;
+to the board. Supply all provenance fields above and retain the build output,
+including the actual framework/toolchain versions. Unspecified
+fixture/operator/build fields remain `NOT_RECORDED`;
 a serial pass with missing provenance is insufficient for release evidence.
 The runner does not flash firmware or drive a fixture's power/fault controls.
 
@@ -76,7 +120,8 @@ pairs, stale pending output, truncated records, unexpected resets, and nonzero
 health failure counters fail the run. The scanner waits for its final count,
 and the help check recognizes aliases and verifies the complete command list.
 
-Reads respect both absolute and idle deadlines. Startup and response buffers,
+Reads respect both absolute and idle deadlines; even a complete response fails
+if it arrives after either deadline. Startup and response buffers,
 serial writes, and soak sample counts are bounded. The runner stops at the first
 failure, preserves the raw transcript, and lists every remaining step as
 `not-run`. Ctrl+C and serial/setup errors also produce failed summaries. There
@@ -100,7 +145,8 @@ calibration or EEPROM-writing commands. Existing sensor ASC policy remains in
 effect during measurements.
 
 The authoritative list is the `SAFE_STEPS` table in
-[`tools/scd41_hil_runner.py`](../../tools/scd41_hil_runner.py); the runner
+[`tools/scd41_hil_runner.py`](https://github.com/janhavelka/SCD41/blob/main/tools/scd41_hil_runner.py)
+at the checked-out revision; the runner
 executes exactly that table, including its settle waits. To reproduce it by
 hand, issue these commands in order:
 
@@ -182,9 +228,8 @@ and identity waits; initial power-up timing needs a power-cycle fixture because
 ## Volatile configuration sweep
 
 ```powershell
-python tools/scd41_hil_runner.py --port COM8 `
-  --include-config-writes --final-compensation altitude `
-  --board "ESP32-S3 DevKitC-1" --fixture "<record actual fixture>"
+python tools/scd41_hil_runner.py @hilArguments `
+  --include-config-writes --final-compensation altitude
 ```
 
 After the safe sequence, this optional group reads a verified baseline,
@@ -208,8 +253,10 @@ stops without guessing whether further writes or restoration would be safe.
 
 These gates need fixture control or a bus/sensor setup that can create the
 condition. Run them separately from the safe automated sequence.
-The JSON summary explicitly leaves these manual gates `not-run`, even when all
-selected serial commands pass. Sensor faults are never relabeled as expected
+The JSON and Markdown summaries leave the manual categories (fault injection,
+shared-bus latency, power-cycle persistence, FRC, accuracy, and clock wrap)
+`not-run`, even when all selected serial commands pass. Record the individual
+procedures below separately. Sensor faults are never relabeled as expected
 exceptions in the safe/configuration/soak groups.
 
 | Gate | Procedure | Required observation |
@@ -235,11 +282,11 @@ The runner can append a bounded acquisition group after the safe sequence:
 
 ```powershell
 # At least 31 minutes of periodic sample waits, plus the safe sequence.
-python tools/scd41_hil_runner.py --port COM8 --soak-samples 360 --soak-mode periodic
+python tools/scd41_hil_runner.py @hilArguments --soak-samples 360 --soak-mode periodic
 # At least 30 minutes of low-power sample waits.
-python tools/scd41_hil_runner.py --port COM8 --soak-samples 60 --soak-mode low-power
+python tools/scd41_hil_runner.py @hilArguments --soak-samples 60 --soak-mode low-power
 # Repeated full single shots.
-python tools/scd41_hil_runner.py --port COM8 --soak-samples 360 --soak-mode single
+python tools/scd41_hil_runner.py @hilArguments --soak-samples 360 --soak-mode single
 ```
 
 `--soak-samples` accepts 0..10000; 0 disables the group. Periodic reads wait 5.2 s,
@@ -275,8 +322,7 @@ transcript:
 Enable the runner only with the exact confirmation phrase:
 
 ```powershell
-python tools/scd41_hil_runner.py `
-  --port COM7 --include-destructive `
+python tools/scd41_hil_runner.py @hilArguments --include-destructive `
   --confirm-destructive "I understand EEPROM and calibration risk"
 ```
 

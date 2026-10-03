@@ -102,7 +102,10 @@ must not recursively enter the same driver instance.
 Validated configuration ranges are: transfer timeout `1..1000 ms` and power-up
 delay `30..1000 ms`. Defaults are 50 ms and 30 ms respectively. The application
 should choose the smallest transport timeout that is safe for its controller and
-bus. The driver enforces the fixed 1 ms SCD41 inter-command spacing internally.
+bus. Each callback's requested timeout is also capped by the remaining
+operation deadline; adapters must honor that request rather than always using
+the configured ceiling. The driver enforces the fixed 1 ms SCD41
+inter-command spacing internally.
 
 | `Config` field | Contract | Default |
 | --- | --- | ---: |
@@ -382,7 +385,19 @@ from another task. See the
 [feature coverage matrix](docs/validation/feature-coverage.md) and
 [external-owner scheduling contract](docs/integration/external-i2c-owner.md).
 
-Host checks on Windows (using the repository's approved PlatformIO wrapper):
+Run the checks below from the root of a complete
+[source checkout](https://github.com/janhavelka/SCD41). Installed library
+packages intentionally omit `tools/`, `scripts/`, `test/`, `platformio.ini`,
+and `Doxyfile`; the packaged core, examples, and reference guides remain usable
+without them.
+
+Host checks need Python 3.11 (the CI baseline), a C++17 GCC/Clang compiler on
+`PATH`, and Doxygen. `CXX` may select the compiler executable. On Windows,
+`scripts/pio.cmd` uses the existing VS Code-managed PlatformIO installation;
+if it is missing, stop rather than installing another Core. Parser tests and
+dry runs need no serial device or `pyserial`.
+
+Run each Windows command successfully before continuing:
 
 ```powershell
 python scripts/generate_version.py check
@@ -390,16 +405,29 @@ python tools/check_core_timing_guard.py
 python tools/check_repository_hygiene.py
 python tools/check_cli_contract.py
 python tools/check_idf_example_contract.py
+python tools/test_audit_guards.py
 python tools/test_scd41_hil_runner.py
 python tools/scd41_hil_runner.py --parser-self-test
+python tools/scd41_hil_runner.py --dry-run --output-dir hil-results
 .\scripts\pio.cmd test -e native
 .\scripts\pio.cmd run -e esp32s3dev
 .\scripts\pio.cmd run -e esp32s2dev
+New-Item -ItemType Directory -Force dist | Out-Null
+.\scripts\pio.cmd pkg pack . -o dist/SCD41-package.tar.gz
+python tools/check_package_contents.py dist/SCD41-package.tar.gz
+python tools/check_clean_consumer_compile.py . dist/SCD41-package.tar.gz
+python tools/check_target_package_consumer.py dist/SCD41-package.tar.gz
 doxygen Doxyfile
+git diff --check
 ```
 
-Doxygen writes the generated reference to `.doxygen/html/index.html`; do
-not commit generated HTML under `docs/`.
+Doxygen writes `.doxygen/html/index.html`; warnings fail the build. See the
+[API documentation guide](docs/README.md#generated-api-reference) for tool
+versions and generated metadata. Do not commit generated HTML under `docs/`.
+The guard regressions execute the actual example adapters with host framework
+stubs. The package checks inspect exported files, compile and run a clean host
+consumer, and compile/link generic Arduino S2/S3 consumers. These checks do not
+open a serial port, flash firmware, or run sensor hardware.
 
 Ubuntu CI additionally runs the `native_ubsan` environment; the Windows MinGW
 toolchain commonly used by PlatformIO does not provide the required UBSan
@@ -413,9 +441,12 @@ example transport baselines, not core requirements. See
 [backend compatibility](docs/porting/esp-idf.md#backend-compatibility) before
 selecting a different framework version. Native host tests use exact-pinned
 `native@1.2.1`. CI also builds the native ESP-IDF example and standalone
-packed-library consumers for
-both targets. Package consumers use generic board configurations and validate
-the public API without any application repository dependency. These compiler
+packed-library consumers for both targets. Native ESP-IDF build commands are
+in the [porting guide](docs/porting/esp-idf.md#build-checks); live runner setup,
+configuration sweeps, soak modes, and manual fault gates are in the
+[HIL guide](docs/validation/hardware-hil.md). Package consumers use generic
+board configurations and validate the public API without any application
+repository dependency. These compiler
 checks do not establish physical ACK/NACK behavior or hardware operation.
 
 ## Versioning

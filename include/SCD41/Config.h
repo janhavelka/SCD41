@@ -41,7 +41,7 @@ struct TransferRequest {
   size_t writeLength = 0;               ///< Number of requested write bytes.
   uint8_t* readData = nullptr;          ///< Destination buffer, or null when length is zero.
   size_t readLength = 0;                ///< Number of requested read bytes.
-  uint32_t timeoutMs = 0;               ///< Finite bound the adapter must enforce.
+  uint32_t timeoutMs = 0;               ///< Finite timeout in ms, clipped to the remaining operation budget.
   TransferIntent intent = TransferIntent::NORMAL; ///< Expected protocol context.
 };
 
@@ -95,9 +95,10 @@ struct Config {
   I2cTransferFn transfer = nullptr;
   /// Non-owning callback context; it must outlive use of this binding.
   void* transferUser = nullptr;
-  /// Maximum time passed to one adapter attempt, in milliseconds.
+  /// Maximum time passed to one adapter attempt, in milliseconds; valid 1..1000.
+  /// The driver reduces it when less time remains before the operation deadline.
   uint32_t transferTimeoutMs = 50;
-  /// Initial attach power-up wait. Values below 30 ms are rejected.
+  /// Attach power-up wait in milliseconds; valid 30..1000, including endpoints.
   uint16_t powerUpDelayMs = 30;
   /// Consecutive attempted transfer failures that report passive `OFFLINE`.
   /// Zero disables `OFFLINE`; failures still report `DEGRADED`.

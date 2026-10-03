@@ -351,6 +351,52 @@ def test_live_final_status_reads_health_and_complete_error_line() -> None:
                          "retained error in the last line is classified")
 
 
+def test_late_serial_response_cannot_pass_an_expired_deadline() -> None:
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+    class LateSerial:
+        timeout = 0.1
+
+        def __init__(self, clock, delay):
+            self.clock = clock
+            self.delay = delay
+
+        def read(self, _size):
+            self.clock.now += self.delay
+            return b"SCD41 version=1.3.2\n"
+
+    version_step = next(step for step in hil.SAFE_STEPS if step.command == "version")
+    for delay, deadline, idle, expected_match in (
+        (0.05, 1.0, 0.1, True),
+        (0.2, 1.0, 0.1, False),
+        (1.0, 1.0, 2.0, False),
+    ):
+        clock = Clock()
+        serial = LateSerial(clock, delay)
+        transcript = []
+        with mock.patch.object(hil.time, "monotonic", clock.monotonic):
+            matched, output = hil.read_until_match(
+                serial, hil.re.compile(version_step.expect), deadline, idle, transcript, version_step)
+        assert_equal(matched, expected_match, "complete response must arrive before both deadlines")
+        assert_equal("".join(transcript), output, "late response remains available as failure evidence")
+        assert_true("SCD41 version=" in output, "timeout cannot discard the received bytes")
+        assert_equal(serial.timeout, 0.1, "bounded read timeout is restored")
+    serial = LateSerial(Clock(), 0)
+    serial.read = mock.Mock(side_effect=OSError("serial disconnected"))
+    try:
+        with mock.patch.object(hil.time, "monotonic", return_value=0.0):
+            hil.read_until_match(serial, hil.re.compile(version_step.expect), 0.01, 0.01, [], version_step)
+    except OSError:
+        pass
+    else:
+        raise AssertionError("serial disconnect was swallowed")
+    assert_equal(serial.timeout, 0.1, "read exception also restores the serial timeout")
+
+
 def test_environment_metadata_distinguishes_clean_checkout() -> None:
     original_git_text = hil.git_text
     original_command_text = hil.command_text
@@ -407,6 +453,12 @@ def test_dry_run_writes_not_run_summary_without_pyserial() -> None:
         assert_equal(len(transcripts), 1, "dry-run writes transcript")
         report_text = reports[0].read_text(encoding="utf-8")
         assert_true("not-run" in report_text, "dry-run report marks steps not-run")
+        assert_true("Include configuration writes: `False`" in report_text, "Markdown identifies optional write scope")
+        assert_true("Requested soak: `0`" in report_text, "Markdown identifies optional soak scope")
+        assert_true("Manual hardware gates (the runner does not perform these):" in report_text,
+                    "Markdown does not hide the unperformed hardware gates")
+        for gate in ("fault injection", "shared bus latency", "power cycle persistence", "forced recalibration", "accuracy", "clock wrap"):
+            assert_true(f"- {gate}: `not-run`" in report_text, f"Markdown retains the {gate} evidence gap")
         summary = json.loads(summaries[0].read_text(encoding="utf-8"))
         for field in (
             "repository_branch",
@@ -439,6 +491,10 @@ def test_correlated_complete_results_and_semantic_rejections() -> None:
         valid.replace("identity valid=yes", "identity valid=no"),
         valid.replace("serial=0x100123456789", "serial=0x000000000000"),
         valid.replace("variant_word=0x1000", "variant_word=0x0000"),
+        valid.replace("variant_word=0x1000", "variant_word=0x11000"),
+        valid.replace("variant_word=0x1000 epoch=1", "variant_word=0x1000 epoch=2"),
+        valid.replace("epoch=1", "epoch=0"),
+        valid.replace("epoch=1", "epoch=4294967296"),
         valid.replace("reconcile=no", "reconcile=yes"),
         valid.replace("callbacks=6", "callbacks=65000"),
     ):
@@ -488,6 +544,8 @@ def test_sample_freshness_validity_and_ranges() -> None:
     for output in (
         sample_output(request=2),
         sample_output(request=2, sequence=2).replace("at=5100", "at=5099"),
+        sample_output(request=2, sequence=2).replace("at=5100", "at=4294972396"),
+        sample_output(request=2, sequence=2).replace("at=5100", "at=-4294962196"),
         sample_output(request=2, sequence=2, flags=7),
         sample_output(request=2, sequence=2).replace("co2=600", "co2=0"),
         sample_output(request=2, sequence=2).replace("co2=600", "co2=50000"),
@@ -764,6 +822,7 @@ def main() -> int:
         test_build_steps_timeout_override,
         test_live_selfcheck_allows_sensor_silence_and_keeps_timeouts_bounded,
         test_live_final_status_reads_health_and_complete_error_line,
+        test_late_serial_response_cannot_pass_an_expired_deadline,
         test_environment_metadata_distinguishes_clean_checkout,
         test_parser_self_test_mode,
         test_dry_run_writes_not_run_summary_without_pyserial,

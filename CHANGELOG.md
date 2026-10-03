@@ -11,6 +11,28 @@ earlier development milestones. The manifest version is a staging identifier,
 not a published version or a commitment to the first release number. Physical
 HIL remains an open release gate.
 
+### Validation tools and procedures
+
+#### Fixed
+
+- The HIL runner rejects a complete serial response received after its absolute
+  or idle deadline, retains the late bytes as evidence, and restores the serial
+  timeout after an error.
+- Runner checks now require identity and operation epochs to agree, valid
+  32-bit epochs and sample timestamps, and a valid 16-bit variant word.
+- Markdown HIL reports show the selected configuration-write and soak options
+  and every unperformed manual hardware gate, matching the JSON summary.
+
+#### Changed
+
+- README and test guides include the adapter regressions, package-consumer
+  checks, runner setup and source-checkout requirements. Hardware procedures
+  distinguish automated checks from manual fault and accuracy tests.
+- Public API comments state configuration limits, callback timeout clipping,
+  and request/result units.
+- Repository instructions require simple engineering language and committing,
+  syncing, and checking CI after each verified prompt or logical block.
+
 ### Framework independence and datasheet coverage
 
 #### Changed

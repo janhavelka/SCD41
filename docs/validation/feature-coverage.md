@@ -11,6 +11,12 @@ their distinct NACK mappings. Source and build checks do not establish physical
 operation; both examples still need HIL. See
 [backend compatibility](../porting/esp-idf.md#backend-compatibility).
 
+Run the commands in [README.md](../../README.md#examples-and-validation) for
+host tests, static guards, package consumers, and documentation checks. Tools
+and tests referenced here belong to the full source checkout and are excluded
+from installed library packages. The [HIL guide](hardware-hil.md#runner)
+separates no-hardware dry runs from recorded physical runs.
+
 ## Datasheet command matrix
 
 All command and response words are MSB-first. Returned words are CRC-8 checked

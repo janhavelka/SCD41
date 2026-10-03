@@ -24,12 +24,16 @@ the guides above.
 
 ## Generated API Reference
 
-Public API Doxygen lives beside the declarations in `include/SCD41/`. Build the
-reference from the repository root:
+Public API Doxygen lives beside the declarations in `include/SCD41/`. Use a
+complete [source checkout](https://github.com/janhavelka/SCD41); installed
+library packages omit `Doxyfile`, generation/check scripts, and generated HTML.
+Run from the repository root with Python 3.11 and Doxygen on `PATH`. CI pins
+Doxygen 1.17.0; record `doxygen --version` with any local documentation result.
 
 ```bash
 python scripts/generate_version.py check
 python tools/check_repository_hygiene.py
+doxygen --version
 doxygen Doxyfile
 ```
 
@@ -37,6 +41,11 @@ Warnings, undocumented public symbols, and missing parameter documentation are
 build failures. Generated HTML is written to `.doxygen/html/index.html` and
 must not be committed. `library.json` is the version source for the generated
 header, ESP-IDF component metadata, and the Doxygen project number.
+Open `.doxygen/html/index.html` to inspect the rendered API and guides after a
+successful build. If version metadata is stale after intentionally changing
+`library.json`, run `python scripts/generate_version.py sync`, then repeat the
+checks and inspect the generated diff. Never edit `include/SCD41/Version.h`
+manually or disable documentation warnings to obtain a pass.
 
 ## Documentation Policy
 
