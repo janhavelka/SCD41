@@ -1,12 +1,21 @@
 # AGENTS.md - SCD41 Production Embedded Guidelines
 
-Always synchronize Git with the intended upstream branch before starting work by fetching and fast-forwarding safely, preserving existing local changes and reporting any divergence, conflict, or synchronization failure.
+## Git workflow
+
+- Before editing, fetch and inspect the current branch and upstream; fast-forward
+  only when safe.
+- Keep the whole promptset on its existing branch. Do not create a branch or
+  worktree per prompt or agent unless the user asks.
+- Assume concurrent agents. Preserve unrelated changes; never stash, discard,
+  overwrite, or commit them. A dirty worktree alone is not a blocker.
+- After relevant checks pass, stage only your own files or hunks, then commit
+  and push each meaningful completed chunk, including multiple times within
+  one prompt and before finishing. No further permission is needed.
+- When using subagents, the lead owns Git mutations for their shared work.
+- Confirm upstream synchronization and check applicable CI for the pushed commit.
+  Report conflicts or sync failures; never force-push to resolve them.
 
 ## PlatformIO
-
-Before editing, fetch remotes and fast-forward the newest intended working
-branch to its upstream. Stop and report dirty, divergent, or conflicted state;
-never overwrite work to force a sync.
 
 On Windows, use `.\scripts\pio.cmd <arguments>`; it selects the current user's
 VS Code-managed installation. Never install another PlatformIO Core; if the
@@ -14,9 +23,6 @@ wrapper cannot find it, stop and report the missing installation.
 
 ## Workflow and Communication
 
-- After each verified prompt or logical block, commit only the owned changes,
-  push to the intended upstream branch, and confirm synchronization.
-- Preserve unrelated work. Never include another task's changes in a commit.
 - Use simple engineering language in documentation, comments, and reports.
 - Check CI for the pushed commit and fix failures within the current scope.
 - A green build is not physical HIL evidence. Do not tag a release while a
