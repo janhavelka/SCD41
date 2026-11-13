@@ -11,6 +11,10 @@ earlier development milestones. The manifest version is a staging identifier,
 not a published version or a commitment to the first release number. Physical
 HIL remains an open release gate.
 
+### Changed
+
+- Unified author, copyright and contact metadata: THYMOS Solution s.r.o., Jan Havelka, info@thymos.cz.
+
 ### Validation tools and procedures
 
 #### Fixed

@@ -3,5 +3,7 @@ description: "Owner-driven SCD41 photoacoustic NDIR CO2, temperature, and humidi
 url: "https://github.com/janhavelka/SCD41"
 repository: "https://github.com/janhavelka/SCD41.git"
 license: "MIT"
+maintainers:
+  - "Jan Havelka (THYMOS Solution s.r.o.) <info@thymos.cz>"
 dependencies:
   idf: ">=5.0"

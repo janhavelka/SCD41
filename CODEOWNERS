@@ -1,15 +1,15 @@
 # CODEOWNERS
 
 # Default owner for the repository
-* info@thymos.cz
+* @janhavelka
 
 # Public API and package metadata
-/include/SCD41/ info@thymos.cz
-/library.json info@thymos.cz
-/README.md info@thymos.cz
-/CHANGELOG.md info@thymos.cz
+/include/SCD41/ @janhavelka
+/library.json @janhavelka
+/README.md @janhavelka
+/CHANGELOG.md @janhavelka
 
 # CI and tooling
-/.github/ info@thymos.cz
-/scripts/ info@thymos.cz
-/tools/ info@thymos.cz
+/.github/ @janhavelka
+/scripts/ @janhavelka
+/tools/ @janhavelka
