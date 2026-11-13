@@ -39,7 +39,7 @@
     "url": "https://github.com/janhavelka/SCD41.git"
   },
   "license": "MIT",
-  "homepage": "https://www.thymos.cz",
+  "homepage": "https://github.com/janhavelka/SCD41",
   "frameworks": "*",
   "platforms": "*",
   "headers": [
