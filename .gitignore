@@ -39,3 +39,12 @@ wifi_credentials.h
 *.tmp
 *.bak
 *.log
+
+# ESP-IDF build output that idf.py writes next to any example or project.
+# sdkconfig.defaults* and any committed sdkconfig.ci stay tracked.
+build*/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+sdkconfig.esp32*
